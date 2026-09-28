@@ -20,11 +20,11 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 1.5 Test: run 2 Matching Service instances in the same consumer group, verify no duplicate order processing (observe via Kafka UI)
 
 ## Phase 2 — Trip lifecycle
-- [ ] 2.1 Trip Service: consumes `order.matched`, creates trip as `ASSIGNED`
-- [ ] 2.2 Confirm-pickup API → `IN_PROGRESS`, publishes `trip.status.changed` (US-4.1)
-- [ ] 2.3 Complete-trip API → `COMPLETED`, releases driver (US-4.2)
-- [ ] 2.4 Cancel-trip API + validate valid state transitions (US-4.3)
-- [ ] 2.5 Idempotency: add `eventId` + dedupe check in Trip Service (US-6.1)
+- [x] 2.1 Trip Service: consumes `order.matched`, creates trip as `ASSIGNED`
+- [x] 2.2 Confirm-pickup API → `IN_PROGRESS`, publishes `trip.status.changed` (US-4.1)
+- [x] 2.3 Complete-trip API → `COMPLETED`, releases driver (US-4.2)
+- [x] 2.4 Cancel-trip API + validate valid state transitions (US-4.3)
+- [x] 2.5 Idempotency: add `eventId` + dedupe check in Trip Service (US-6.1)
 
 ## Phase 3 — Driver location (learning a high-throughput topic)
 - [ ] 3.1 Driver Location Service: dedicated consumer group, writes to Redis GEO

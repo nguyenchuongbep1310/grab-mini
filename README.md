@@ -28,8 +28,9 @@ Add `-v` to also wipe volumes (Kafka topics, Postgres data, Redis data).
 ## Workspace
 
 **Backend** — a Go workspace (`go.work`):
-- `services/order-service`, `services/matching-service`, ... — one Go module per service
+- `services/order-service`, `services/matching-service`, `services/trip-service`, ... — one Go module per service
 - `services/pkg/events` — shared Kafka event types and topic names
+- `services/pkg/driverstatus` — shared Redis driver-status key format and atomic claim/release, used by any service that reads or moves a driver between AVAILABLE / ASSIGNED / ON_TRIP
 
 **Frontend** (added in a later phase) — a pnpm workspace:
 - `apps/rider`, `apps/driver` — rider and driver frontends
@@ -58,3 +59,21 @@ curl -X POST http://localhost:3001/orders \
 ```
 
 Watch the match happen in the Matching Service logs, or inspect the `order.created` / `order.matched` / `order.no_driver_found` topics in Kafka UI. Run a second Matching Service instance in another terminal (`cd services/matching-service && INSTANCE_ID=matching-B go run .`) to see the consumer group split partitions across instances with no duplicate processing.
+
+## Running the services (Phase 2)
+
+```bash
+# Trip Service — HTTP API on :3002, consumes order.matched, publishes trip.status.changed
+cd services/trip-service && go run .
+```
+
+Trip Service creates a trip (status `ASSIGNED`) automatically when it sees `order.matched`. Drive it through its lifecycle:
+
+```bash
+curl -X POST http://localhost:3002/trips/<tripId>/pickup    # -> IN_PROGRESS (US-4.1)
+curl -X POST http://localhost:3002/trips/<tripId>/complete  # -> COMPLETED, releases the driver (US-4.2)
+curl -X POST http://localhost:3002/trips/<tripId>/cancel    # -> CANCELLED, only from ASSIGNED/IN_PROGRESS (US-4.3)
+curl http://localhost:3002/trips/<tripId>                   # inspect current status
+```
+
+Calling `pickup` or `complete` again after it already happened is a no-op (US-6.1); cancelling a `COMPLETED` trip returns `409`.

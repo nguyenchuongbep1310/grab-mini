@@ -2,48 +2,13 @@ package main
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/redis/go-redis/v9"
+
+	"grab-mini/pkg/driverstatus"
 )
 
 const driverGeoKey = "drivers:geo"
-
-type DriverStatus string
-
-const (
-	DriverAvailable DriverStatus = "AVAILABLE"
-	DriverAssigned  DriverStatus = "ASSIGNED"
-	DriverOnTrip    DriverStatus = "ON_TRIP"
-)
-
-func driverStatusKey(driverID string) string {
-	return fmt.Sprintf("driver:%s:status", driverID)
-}
-
-func setDriverStatus(ctx context.Context, rdb *redis.Client, driverID string, status DriverStatus) error {
-	return rdb.Set(ctx, driverStatusKey(driverID), string(status), 0).Err()
-}
-
-// claimDriverScript atomically moves a driver from AVAILABLE to the
-// given status, so two matching-service instances racing on the same
-// driver can never both succeed.
-var claimDriverScript = redis.NewScript(`
-	local current = redis.call("GET", KEYS[1])
-	if current == ARGV[1] then
-		redis.call("SET", KEYS[1], ARGV[2])
-		return 1
-	end
-	return 0
-`)
-
-func claimDriver(ctx context.Context, rdb *redis.Client, driverID string, newStatus DriverStatus) (bool, error) {
-	claimed, err := claimDriverScript.Run(ctx, rdb, []string{driverStatusKey(driverID)}, string(DriverAvailable), string(newStatus)).Int()
-	if err != nil {
-		return false, err
-	}
-	return claimed == 1, nil
-}
 
 // findAndClaimNearestDriver implements US-2.1: claims the nearest
 // AVAILABLE driver within radiusKm, atomically, or returns "" if none
@@ -67,7 +32,7 @@ func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng,
 	}
 
 	for _, candidate := range results {
-		claimed, err := claimDriver(ctx, rdb, candidate.Name, DriverAssigned)
+		claimed, err := driverstatus.Claim(ctx, rdb, candidate.Name, driverstatus.Available, driverstatus.Assigned)
 		if err != nil {
 			return "", err
 		}

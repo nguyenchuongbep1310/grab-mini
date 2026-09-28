@@ -3,5 +3,7 @@ go 1.26.4
 use (
 	./services/matching-service
 	./services/order-service
+	./services/pkg/driverstatus
 	./services/pkg/events
+	./services/trip-service
 )

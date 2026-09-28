@@ -5,6 +5,8 @@ import (
 	"log"
 
 	"github.com/redis/go-redis/v9"
+
+	"grab-mini/pkg/driverstatus"
 )
 
 type seedDriver struct {
@@ -35,7 +37,7 @@ func runSeedDrivers(env Env) {
 		if err := rdb.GeoAdd(ctx, driverGeoKey, &redis.GeoLocation{Name: d.ID, Longitude: d.Lng, Latitude: d.Lat}).Err(); err != nil {
 			log.Fatalf("failed to seed driver %s: %v", d.ID, err)
 		}
-		if err := setDriverStatus(ctx, rdb, d.ID, DriverAvailable); err != nil {
+		if err := driverstatus.Set(ctx, rdb, d.ID, driverstatus.Available); err != nil {
 			log.Fatalf("failed to set status for %s: %v", d.ID, err)
 		}
 	}
