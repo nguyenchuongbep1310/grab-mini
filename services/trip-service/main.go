@@ -162,8 +162,9 @@ func main() {
 	defer rdb.Close()
 
 	producer := &kafka.Writer{
-		Addr:     kafka.TCP(env.KafkaBrokers...),
-		Balancer: &kafka.Hash{},
+		Addr:                   kafka.TCP(env.KafkaBrokers...),
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
 

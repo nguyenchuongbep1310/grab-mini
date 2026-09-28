@@ -12,6 +12,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconsumer"
 )
 
 // matchOrder implements US-2.1: try to match, retrying for a bounded
@@ -74,45 +75,25 @@ func runConsumer(env Env) {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: env.KafkaBrokers,
-		GroupID: "matching-service-group",
-		Topic:   events.TopicOrderCreated,
-	})
-	defer reader.Close()
-
 	producer := &kafka.Writer{
-		Addr:     kafka.TCP(env.KafkaBrokers...),
-		Balancer: &kafka.Hash{},
+		Addr:                   kafka.TCP(env.KafkaBrokers...),
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
 
-	log.Printf("[%s] matching-service consumer running", env.InstanceID)
-
-	for {
-		msg, err := reader.FetchMessage(ctx)
-		if err != nil {
-			log.Fatalf("failed to fetch message: %v", err)
-		}
-
+	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
+		Brokers:  env.KafkaBrokers,
+		GroupID:  "matching-service-group",
+		Topic:    events.TopicOrderCreated,
+		LogLabel: "[" + env.InstanceID + "]",
+	}, func(ctx context.Context, msg kafka.Message) error {
 		var order events.OrderCreated
 		if err := json.Unmarshal(msg.Value, &order); err != nil {
-			log.Printf("failed to unmarshal order.created: %v", err)
-			continue
+			return err
 		}
-
-		log.Printf("[%s] received order.created partition=%d offset=%d orderId=%s",
-			env.InstanceID, msg.Partition, msg.Offset, order.OrderID)
-
-		if err := matchOrder(ctx, env, rdb, producer, order); err != nil {
-			log.Printf("failed to match order %s: %v", order.OrderID, err)
-			continue
-		}
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("failed to commit offset: %v", err)
-		}
-	}
+		return matchOrder(ctx, env, rdb, producer, order)
+	})
 }
 
 func main() {

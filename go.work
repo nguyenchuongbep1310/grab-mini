@@ -9,5 +9,6 @@ use (
 	./services/pkg/driverlocation
 	./services/pkg/driverstatus
 	./services/pkg/events
+	./services/pkg/kafkaconsumer
 	./services/trip-service
 )

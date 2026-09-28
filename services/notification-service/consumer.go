@@ -3,53 +3,40 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
 
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconsumer"
 )
 
 // runConsumer implements tasks 4.2/4.3: one consumer group subscribed to
 // every topic the Notification Service cares about, dispatching each
 // event to the hub so it reaches the right rider/driver socket.
 func runConsumer(ctx context.Context, env Env, h *hub) {
-	reader := kafka.NewReader(kafka.ReaderConfig{
+	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers: env.KafkaBrokers,
 		GroupID: "notification-service-group",
-		GroupTopics: []string{
+		Topics: []string{
 			events.TopicOrderCreated,
 			events.TopicOrderMatched,
 			events.TopicOrderNoDriverFound,
 			events.TopicTripStatusChanged,
 			events.TopicDriverLocationUpdate,
 		},
+		LogLabel: "[notification-service]",
+	}, func(ctx context.Context, msg kafka.Message) error {
+		return handleMessage(h, msg)
 	})
-	defer reader.Close()
-
-	log.Println("notification-service consumer running")
-
-	for {
-		msg, err := reader.FetchMessage(ctx)
-		if err != nil {
-			log.Fatalf("failed to fetch message: %v", err)
-		}
-
-		handleMessage(h, msg)
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("failed to commit offset: %v", err)
-		}
-	}
 }
 
-func handleMessage(h *hub, msg kafka.Message) {
+func handleMessage(h *hub, msg kafka.Message) error {
 	switch msg.Topic {
 	case events.TopicOrderCreated:
 		var evt events.OrderCreated
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal order.created: %v", err)
-			return
+			return err
 		}
 		// US-5.1 needs to route order.matched/no_driver_found (which
 		// don't carry riderId) back to the right rider.
@@ -58,8 +45,7 @@ func handleMessage(h *hub, msg kafka.Message) {
 	case events.TopicOrderMatched:
 		var evt events.OrderMatched
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal order.matched: %v", err)
-			return
+			return err
 		}
 		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
 			h.rememberDriverRider(evt.DriverID, riderID)
@@ -70,8 +56,7 @@ func handleMessage(h *hub, msg kafka.Message) {
 	case events.TopicOrderNoDriverFound:
 		var evt events.OrderNoDriverFound
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal order.no_driver_found: %v", err)
-			return
+			return err
 		}
 		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
 			h.pushToRider(riderID, message{Type: events.TopicOrderNoDriverFound, Payload: evt})
@@ -80,8 +65,7 @@ func handleMessage(h *hub, msg kafka.Message) {
 	case events.TopicTripStatusChanged:
 		var evt events.TripStatusChanged
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal trip.status.changed: %v", err)
-			return
+			return err
 		}
 		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
 			h.pushToRider(riderID, message{Type: events.TopicTripStatusChanged, Payload: evt})
@@ -95,8 +79,7 @@ func handleMessage(h *hub, msg kafka.Message) {
 	case events.TopicDriverLocationUpdate:
 		var evt events.DriverLocationUpdated
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal driver.location.updated: %v", err)
-			return
+			return err
 		}
 		// task 4.3: push to the rider watching this driver's current trip.
 		if riderID, ok := h.riderForDriver(evt.DriverID); ok {
@@ -104,6 +87,8 @@ func handleMessage(h *hub, msg kafka.Message) {
 		}
 
 	default:
-		log.Printf("unhandled topic %q", msg.Topic)
+		return fmt.Errorf("unhandled topic %q", msg.Topic)
 	}
+
+	return nil
 }

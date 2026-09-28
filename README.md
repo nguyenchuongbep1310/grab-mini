@@ -32,6 +32,7 @@ Add `-v` to also wipe volumes (Kafka topics, Postgres data, Redis data).
 - `services/pkg/events` — shared Kafka event types and topic names
 - `services/pkg/driverstatus` — shared Redis driver-status key format and atomic claim/release, used by any service that reads or moves a driver between AVAILABLE / ASSIGNED / ON_TRIP
 - `services/pkg/driverlocation` — shared Redis GEO key and out-of-order-safe location update, used by Matching Service (reads) and Driver Location Service (writes)
+- `services/pkg/kafkaconsumer` — the shared retry + dead-letter-topic consumer loop used by every consumer in the project
 - `services/driver-app-sim` — stands in for the real Driver App frontend (Phase 6): publishes `driver.location.updated` every 3-5s for a set of drivers
 
 **Frontend** (added in a later phase) — a pnpm workspace:
@@ -115,3 +116,19 @@ websocat ws://localhost:3003/ws/driver/driver-1
 ```
 
 While connected as `rider-1`, create an order with `"riderId": "rider-1"` (see Phase 1) — the rider socket receives `order.matched` (or `order.no_driver_found`), then `trip.status.changed` as the trip progresses, and `driver.location.updated` for the matched driver once the driver app simulator (Phase 3) is running — all pushed as `{"type": "...", "payload": {...}}` JSON messages (US-5.1, task 4.3). The matched driver's own socket also receives `order.matched` and `trip.status.changed`.
+
+## Resilience: retries and dead-letter topics (Phase 5)
+
+Every consumer in this project runs through `services/pkg/kafkaconsumer`, which retries a failed message (3 attempts by default, 2s apart) and, if it still fails, publishes it — with the error and original payload attached — to `<topic>.DLQ` instead of blocking the partition or crashing (US-6.2). Every fetch also logs its topic/partition/offset (task 5.3).
+
+To see it happen, publish a message the consumer can't process — e.g. an unparseable `timestamp` for Driver Location Service:
+
+```bash
+docker exec grab-mini-kafka bash -c 'echo "{\"eventId\":\"$(uuidgen)\",\"occurredAt\":\"2026-01-01T00:00:00Z\",\"driverId\":\"driver-99\",\"lat\":1.0,\"lng\":1.0,\"timestamp\":\"NOT-A-VALID-TIMESTAMP\"}" | /opt/kafka/bin/kafka-console-producer.sh --topic driver.location.updated --bootstrap-server localhost:9092'
+```
+
+Watch the service log 4 failed attempts (1 initial + 3 retries) and then `gave up after retries, published to driver.location.updated.DLQ`. Inspect it:
+
+```bash
+docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --topic driver.location.updated.DLQ --bootstrap-server localhost:9092 --from-beginning
+```

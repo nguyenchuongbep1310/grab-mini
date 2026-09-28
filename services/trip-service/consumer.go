@@ -10,45 +10,25 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconsumer"
 )
 
 // runOrderMatchedConsumer implements task 2.1: for every order.matched
 // event, create a trip in ASSIGNED status. Deduping on eventId (US-6.1)
 // means a redelivered event is a safe no-op rather than a second trip.
 func runOrderMatchedConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: env.KafkaBrokers,
-		GroupID: "trip-service-group",
-		Topic:   events.TopicOrderMatched,
-	})
-	defer reader.Close()
-
-	log.Println("trip-service order.matched consumer running")
-
-	for {
-		msg, err := reader.FetchMessage(ctx)
-		if err != nil {
-			log.Fatalf("failed to fetch message: %v", err)
-		}
-
+	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
+		Brokers:  env.KafkaBrokers,
+		GroupID:  "trip-service-group",
+		Topic:    events.TopicOrderMatched,
+		LogLabel: "[trip-service]",
+	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.OrderMatched
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			log.Printf("failed to unmarshal order.matched: %v", err)
-			continue
+			return err
 		}
-
-		log.Printf("received order.matched partition=%d offset=%d orderId=%s driverId=%s",
-			msg.Partition, msg.Offset, evt.OrderID, evt.DriverID)
-
-		if err := handleOrderMatched(ctx, db, evt); err != nil {
-			log.Printf("failed to handle order.matched for order %s: %v", evt.OrderID, err)
-			continue
-		}
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("failed to commit offset: %v", err)
-		}
-	}
+		return handleOrderMatched(ctx, db, evt)
+	})
 }
 
 func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, evt events.OrderMatched) error {

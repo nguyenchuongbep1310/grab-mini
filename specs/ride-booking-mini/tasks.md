@@ -37,9 +37,9 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 4.3 Consume `driver.location.updated` → push driver location to the rider watching the corresponding trip
 
 ## Phase 5 — Resilience
-- [ ] 5.1 Add retry + dead-letter topic for each consumer (US-6.2)
-- [ ] 5.2 Simulate a failure: throw in a consumer, verify the event lands in the DLQ after N retries
-- [ ] 5.3 Standardize logging: each consumer logs topic/partition/offset on processing (for observability)
+- [x] 5.1 Add retry + dead-letter topic for each consumer (US-6.2)
+- [x] 5.2 Simulate a failure: throw in a consumer, verify the event lands in the DLQ after N retries
+- [x] 5.3 Standardize logging: each consumer logs topic/partition/offset on processing (for observability)
 
 ## Phase 6 — Design system
 - [ ] 6.1 `packages/ui`: set up build (Vite lib mode) + tokens (color, spacing, typography)

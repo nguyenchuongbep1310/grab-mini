@@ -100,9 +100,10 @@ func main() {
 	defer db.Close()
 
 	producer := &kafka.Writer{
-		Addr:     kafka.TCP(env.KafkaBrokers...),
-		Topic:    events.TopicOrderCreated,
-		Balancer: &kafka.Hash{},
+		Addr:                   kafka.TCP(env.KafkaBrokers...),
+		Topic:                  events.TopicOrderCreated,
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
 

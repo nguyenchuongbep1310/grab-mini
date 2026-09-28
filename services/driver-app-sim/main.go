@@ -104,9 +104,10 @@ func main() {
 	drivers := loadDrivers()
 
 	producer := &kafka.Writer{
-		Addr:     kafka.TCP(brokers...),
-		Topic:    events.TopicDriverLocationUpdate,
-		Balancer: &kafka.Hash{},
+		Addr:                   kafka.TCP(brokers...),
+		Topic:                  events.TopicDriverLocationUpdate,
+		Balancer:               &kafka.Hash{},
+		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
 
