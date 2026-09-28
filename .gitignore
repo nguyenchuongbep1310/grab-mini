@@ -2,3 +2,8 @@
 node_modules/
 dist/
 .env
+/services/*/matching-service
+/services/*/order-service
+/services/*/trip-service
+/services/*/driver-location-service
+/services/*/notification-service

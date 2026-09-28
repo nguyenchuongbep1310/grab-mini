@@ -5,10 +5,12 @@ Reference: [requirements.md](./requirements.md), [design.md](./design.md)
 Convention: each task should be a small commit/PR, with at least minimal tests before moving to the next task.
 
 ## Phase 0 — Foundation
-- [x] 0.1 Initialize monorepo (pnpm workspaces): `apps/`, `services/`, `packages/ui`
+- [x] 0.1 Initialize monorepo: Go workspace (`go.work`) for `services/*`, pnpm workspace for `apps/*` and `packages/ui`
 - [x] 0.2 Docker Compose: Kafka (KRaft mode, no Zookeeper) + Kafka UI + Postgres + Redis
 - [x] 0.3 Verify: manually create a topic, produce/consume via CLI to confirm the cluster works
-- [x] 0.4 Create shared package `packages/events` with TypeScript type definitions for every Kafka event (per requirements.md)
+- [x] 0.4 Create shared package `services/pkg/events` (Go) with type definitions for every Kafka event (per requirements.md). `packages/events` (TypeScript) is kept for later frontend WebSocket payload types.
+
+> Note: the backend was switched from Node.js/TypeScript to **Go** after Phase 1 was first built, to also use this project to learn Go. Order Service and Matching Service were rewritten in Go; see [design.md](./design.md#7-tech-stack).
 
 ## Phase 1 — Order + Matching (first core Kafka loop)
 - [x] 1.1 Order Service: create-order API, persist to Postgres, publish `order.created` (US-1.1)

@@ -17,7 +17,7 @@ Rider App ──HTTP──> Order Service ──publish──> [order.created]
                      ▼                                ▼                            ▼
              Trip Service                  Notification Service           Analytics Service
         (consumer group: trip)          (consumer group: notify)      (consumer group: analytics)
-                     │                   ma             │
+                     │                                │
                      ▼                                ▼
           [trip.status.changed]                WebSocket → Rider/Driver App
 
@@ -89,11 +89,11 @@ Shared between Rider App and Driver App (React + TypeScript), organized as its o
 Principle: components hold no business logic or direct API calls — they receive data via props, leaving data-fetching to each app.
 
 ## 7. Tech stack
-- Backend: Node.js + TypeScript, Express (HTTP-facing services only) + KafkaJS. Simplified from the originally planned NestJS to keep focus on Kafka mechanics rather than framework/DI boilerplate.
+- Backend: Go, standard `net/http` for HTTP-facing services, [segmentio/kafka-go](https://github.com/segmentio/kafka-go) for Kafka, [jackc/pgx](https://github.com/jackc/pgx) for Postgres, [redis/go-redis](https://github.com/redis/go-redis) for Redis. Chosen over Node.js/NestJS so the project also serves as a Go learning exercise, alongside Kafka and design systems.
 - Kafka: Docker Compose (Kafka + Kafka UI), single local broker using KRaft (no Zookeeper needed)
 - DB: Postgres (order, trip), Redis (driver status/geo, idempotency keys)
 - Frontend: React + TypeScript + Vite, WebSocket (socket.io or plain ws)
-- Monorepo: pnpm workspaces (`apps/rider`, `apps/driver`, `services/*`, `packages/ui`)
+- Monorepo layout: a Go workspace (`go.work`) linking `services/*` Go modules plus a shared `services/pkg/events` module for Kafka event types; a pnpm workspace for the frontend (`apps/rider`, `apps/driver`, `packages/ui`, and `packages/events` for WebSocket payload types shared by the two frontend apps)
 
 ## 8. Observability & debugging (supports the Kafka learning goal)
 - Kafka UI to visually inspect topics, partitions, consumer lag
