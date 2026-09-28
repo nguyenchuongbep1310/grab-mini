@@ -5,10 +5,10 @@ Reference: [requirements.md](./requirements.md), [design.md](./design.md)
 Convention: each task should be a small commit/PR, with at least minimal tests before moving to the next task.
 
 ## Phase 0 — Foundation
-- [ ] 0.1 Initialize monorepo (pnpm workspaces): `apps/`, `services/`, `packages/ui`
-- [ ] 0.2 Docker Compose: Kafka (KRaft mode, no Zookeeper) + Kafka UI + Postgres + Redis
-- [ ] 0.3 Verify: manually create a topic, produce/consume via CLI to confirm the cluster works
-- [ ] 0.4 Create shared package `packages/events` with TypeScript type definitions for every Kafka event (per requirements.md)
+- [x] 0.1 Initialize monorepo (pnpm workspaces): `apps/`, `services/`, `packages/ui`
+- [x] 0.2 Docker Compose: Kafka (KRaft mode, no Zookeeper) + Kafka UI + Postgres + Redis
+- [x] 0.3 Verify: manually create a topic, produce/consume via CLI to confirm the cluster works
+- [x] 0.4 Create shared package `packages/events` with TypeScript type definitions for every Kafka event (per requirements.md)
 
 ## Phase 1 — Order + Matching (first core Kafka loop)
 - [ ] 1.1 Order Service: create-order API, persist to Postgres, publish `order.created` (US-1.1)

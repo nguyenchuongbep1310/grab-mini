@@ -1,0 +1,15 @@
+{
+  "name": "grab-mini",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Ride-booking mini project for learning Kafka and design systems",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "kafka:up": "docker compose up -d",
+    "kafka:down": "docker compose down",
+    "kafka:logs": "docker compose logs -f"
+  }
+}
