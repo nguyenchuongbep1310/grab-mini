@@ -36,3 +36,26 @@ pnpm workspace with:
 ```bash
 pnpm install
 ```
+
+## Running the services (Phase 1)
+
+With infra up (`docker compose up -d`) and dependencies installed:
+
+```bash
+# Order Service — HTTP API on :3001, publishes order.created
+pnpm --filter @grab-mini/order-service start
+
+# Matching Service — consumes order.created, publishes order.matched / order.no_driver_found
+pnpm --filter @grab-mini/matching-service seed:drivers   # seed a few AVAILABLE drivers first
+pnpm --filter @grab-mini/matching-service start
+```
+
+Create a ride order:
+
+```bash
+curl -X POST http://localhost:3001/orders \
+  -H "Content-Type: application/json" \
+  -d '{"riderId": "rider-1", "pickup": {"lat": 10.776, "lng": 106.700}, "dropoff": {"lat": 10.79, "lng": 106.71}}'
+```
+
+Watch the match happen in the Matching Service logs, or inspect the `order.created` / `order.matched` / `order.no_driver_found` topics in Kafka UI. Run a second Matching Service instance (`INSTANCE_ID=matching-B pnpm --filter @grab-mini/matching-service start`) to see the consumer group split partitions across instances with no duplicate processing.

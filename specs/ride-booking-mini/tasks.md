@@ -11,11 +11,11 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 0.4 Create shared package `packages/events` with TypeScript type definitions for every Kafka event (per requirements.md)
 
 ## Phase 1 — Order + Matching (first core Kafka loop)
-- [ ] 1.1 Order Service: create-order API, persist to Postgres, publish `order.created` (US-1.1)
-- [ ] 1.2 Matching Service: dedicated consumer group, consumes `order.created`
-- [ ] 1.3 Mock driver status: seed a few `AVAILABLE` drivers in Redis with geo data
-- [ ] 1.4 Matching logic: find nearest driver, publish `order.matched` or `order.no_driver_found` (US-2.1)
-- [ ] 1.5 Test: run 2 Matching Service instances in the same consumer group, verify no duplicate order processing (observe via Kafka UI)
+- [x] 1.1 Order Service: create-order API, persist to Postgres, publish `order.created` (US-1.1)
+- [x] 1.2 Matching Service: dedicated consumer group, consumes `order.created`
+- [x] 1.3 Mock driver status: seed a few `AVAILABLE` drivers in Redis with geo data
+- [x] 1.4 Matching logic: find nearest driver, publish `order.matched` or `order.no_driver_found` (US-2.1)
+- [x] 1.5 Test: run 2 Matching Service instances in the same consumer group, verify no duplicate order processing (observe via Kafka UI)
 
 ## Phase 2 — Trip lifecycle
 - [ ] 2.1 Trip Service: consumes `order.matched`, creates trip as `ASSIGNED`

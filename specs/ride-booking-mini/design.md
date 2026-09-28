@@ -17,7 +17,7 @@ Rider App ──HTTP──> Order Service ──publish──> [order.created]
                      ▼                                ▼                            ▼
              Trip Service                  Notification Service           Analytics Service
         (consumer group: trip)          (consumer group: notify)      (consumer group: analytics)
-                     │                                │
+                     │                   ma             │
                      ▼                                ▼
           [trip.status.changed]                WebSocket → Rider/Driver App
 
@@ -89,7 +89,7 @@ Shared between Rider App and Driver App (React + TypeScript), organized as its o
 Principle: components hold no business logic or direct API calls — they receive data via props, leaving data-fetching to each app.
 
 ## 7. Tech stack
-- Backend: Node.js + NestJS, KafkaJS
+- Backend: Node.js + TypeScript, Express (HTTP-facing services only) + KafkaJS. Simplified from the originally planned NestJS to keep focus on Kafka mechanics rather than framework/DI boilerplate.
 - Kafka: Docker Compose (Kafka + Kafka UI), single local broker using KRaft (no Zookeeper needed)
 - DB: Postgres (order, trip), Redis (driver status/geo, idempotency keys)
 - Frontend: React + TypeScript + Vite, WebSocket (socket.io or plain ws)
