@@ -99,3 +99,19 @@ docker exec grab-mini-redis redis-cli GET driver:driver-1:location:ts
 ```
 
 An update with an older timestamp than what's recorded is discarded rather than applied (US-3.1) — the Driver Location Service logs `discarded as out-of-order` for it.
+
+## Running the services (Phase 4)
+
+```bash
+# Notification Service — WebSocket server on :3003, pushes realtime updates
+cd services/notification-service && go run .
+```
+
+Connect as a rider or driver (any WebSocket client works, e.g. `websocat`):
+
+```bash
+websocat ws://localhost:3003/ws/rider/rider-1
+websocat ws://localhost:3003/ws/driver/driver-1
+```
+
+While connected as `rider-1`, create an order with `"riderId": "rider-1"` (see Phase 1) — the rider socket receives `order.matched` (or `order.no_driver_found`), then `trip.status.changed` as the trip progresses, and `driver.location.updated` for the matched driver once the driver app simulator (Phase 3) is running — all pushed as `{"type": "...", "payload": {...}}` JSON messages (US-5.1, task 4.3). The matched driver's own socket also receives `order.matched` and `trip.status.changed`.

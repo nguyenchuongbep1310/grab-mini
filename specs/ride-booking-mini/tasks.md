@@ -32,9 +32,9 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 3.3 Driver App: simulate sending location every 3-5s (mock GPS or manual input on a map) — implemented as a `driver-app-sim` CLI (real Driver App frontend comes in Phase 6)
 
 ## Phase 4 — Realtime notifications
-- [ ] 4.1 Notification Service: WebSocket server, map connections by riderId/driverId
-- [ ] 4.2 Consume `order.matched`, `order.no_driver_found`, `trip.status.changed` → push to the right client (US-5.1)
-- [ ] 4.3 Consume `driver.location.updated` → push driver location to the rider watching the corresponding trip
+- [x] 4.1 Notification Service: WebSocket server, map connections by riderId/driverId
+- [x] 4.2 Consume `order.matched`, `order.no_driver_found`, `trip.status.changed` → push to the right client (US-5.1)
+- [x] 4.3 Consume `driver.location.updated` → push driver location to the rider watching the corresponding trip
 
 ## Phase 5 — Resilience
 - [ ] 5.1 Add retry + dead-letter topic for each consumer (US-6.2)
