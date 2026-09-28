@@ -31,6 +31,8 @@ Add `-v` to also wipe volumes (Kafka topics, Postgres data, Redis data).
 - `services/order-service`, `services/matching-service`, `services/trip-service`, ... — one Go module per service
 - `services/pkg/events` — shared Kafka event types and topic names
 - `services/pkg/driverstatus` — shared Redis driver-status key format and atomic claim/release, used by any service that reads or moves a driver between AVAILABLE / ASSIGNED / ON_TRIP
+- `services/pkg/driverlocation` — shared Redis GEO key and out-of-order-safe location update, used by Matching Service (reads) and Driver Location Service (writes)
+- `services/driver-app-sim` — stands in for the real Driver App frontend (Phase 6): publishes `driver.location.updated` every 3-5s for a set of drivers
 
 **Frontend** (added in a later phase) — a pnpm workspace:
 - `apps/rider`, `apps/driver` — rider and driver frontends
@@ -77,3 +79,23 @@ curl http://localhost:3002/trips/<tripId>                   # inspect current st
 ```
 
 Calling `pickup` or `complete` again after it already happened is a no-op (US-6.1); cancelling a `COMPLETED` trip returns `409`.
+
+## Running the services (Phase 3)
+
+```bash
+# Driver Location Service — consumes driver.location.updated, writes to Redis GEO
+cd services/driver-location-service && go run .
+
+# Driver App simulator — publishes locations for driver-1..driver-5 (the seeded drivers) every 3-5s
+cd services/driver-app-sim && go run .
+# or a specific set: DRIVER_IDS=driver-1,driver-2 go run .
+```
+
+Check a driver's current position and last-update time:
+
+```bash
+docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1
+docker exec grab-mini-redis redis-cli GET driver:driver-1:location:ts
+```
+
+An update with an older timestamp than what's recorded is discarded rather than applied (US-3.1) — the Driver Location Service logs `discarded as out-of-order` for it.

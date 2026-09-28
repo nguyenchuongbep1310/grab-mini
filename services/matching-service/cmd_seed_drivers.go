@@ -6,6 +6,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/driverstatus"
 )
 
@@ -29,12 +30,19 @@ func runSeedDrivers(env Env) {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
-	if err := rdb.Del(ctx, driverGeoKey).Err(); err != nil {
+	if err := rdb.Del(ctx, driverlocation.GeoKey).Err(); err != nil {
 		log.Fatalf("failed to clear driver geo set: %v", err)
+	}
+	for _, d := range seedDrivers {
+		if err := driverlocation.ResetTimestamp(ctx, rdb, d.ID); err != nil {
+			log.Fatalf("failed to clear location timestamp for %s: %v", d.ID, err)
+		}
 	}
 
 	for _, d := range seedDrivers {
-		if err := rdb.GeoAdd(ctx, driverGeoKey, &redis.GeoLocation{Name: d.ID, Longitude: d.Lng, Latitude: d.Lat}).Err(); err != nil {
+		// unixMillis 0 so any real location update from the simulator
+		// (task 3.3) is treated as newer and takes over.
+		if _, err := driverlocation.Update(ctx, rdb, d.ID, d.Lat, d.Lng, 0); err != nil {
 			log.Fatalf("failed to seed driver %s: %v", d.ID, err)
 		}
 		if err := driverstatus.Set(ctx, rdb, d.ID, driverstatus.Available); err != nil {

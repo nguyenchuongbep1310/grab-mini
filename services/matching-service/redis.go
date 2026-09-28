@@ -5,10 +5,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/driverstatus"
 )
-
-const driverGeoKey = "drivers:geo"
 
 // findAndClaimNearestDriver implements US-2.1: claims the nearest
 // AVAILABLE driver within radiusKm, atomically, or returns "" if none
@@ -16,7 +15,7 @@ const driverGeoKey = "drivers:geo"
 // ones another instance claims first keeps this race-free under
 // concurrent matching-service instances.
 func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng, radiusKm float64) (string, error) {
-	results, err := rdb.GeoSearchLocation(ctx, driverGeoKey, &redis.GeoSearchLocationQuery{
+	results, err := rdb.GeoSearchLocation(ctx, driverlocation.GeoKey, &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{
 			Longitude:  lng,
 			Latitude:   lat,

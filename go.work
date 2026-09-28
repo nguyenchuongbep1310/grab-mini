@@ -1,8 +1,11 @@
 go 1.26.4
 
 use (
+	./services/driver-app-sim
+	./services/driver-location-service
 	./services/matching-service
 	./services/order-service
+	./services/pkg/driverlocation
 	./services/pkg/driverstatus
 	./services/pkg/events
 	./services/trip-service

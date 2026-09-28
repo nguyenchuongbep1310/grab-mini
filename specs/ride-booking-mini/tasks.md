@@ -27,9 +27,9 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 2.5 Idempotency: add `eventId` + dedupe check in Trip Service (US-6.1)
 
 ## Phase 3 — Driver location (learning a high-throughput topic)
-- [ ] 3.1 Driver Location Service: dedicated consumer group, writes to Redis GEO
-- [ ] 3.2 Handle out-of-order events: discard events with an older timestamp than the current record (US-3.1)
-- [ ] 3.3 Driver App: simulate sending location every 3-5s (mock GPS or manual input on a map)
+- [x] 3.1 Driver Location Service: dedicated consumer group, writes to Redis GEO
+- [x] 3.2 Handle out-of-order events: discard events with an older timestamp than the current record (US-3.1)
+- [x] 3.3 Driver App: simulate sending location every 3-5s (mock GPS or manual input on a map) — implemented as a `driver-app-sim` CLI (real Driver App frontend comes in Phase 6)
 
 ## Phase 4 — Realtime notifications
 - [ ] 4.1 Notification Service: WebSocket server, map connections by riderId/driverId

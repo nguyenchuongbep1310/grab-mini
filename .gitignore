@@ -6,4 +6,5 @@ dist/
 /services/*/order-service
 /services/*/trip-service
 /services/*/driver-location-service
+/services/*/driver-app-sim
 /services/*/notification-service
