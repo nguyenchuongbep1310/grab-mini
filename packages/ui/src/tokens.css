@@ -1,0 +1,127 @@
+/* Design tokens: the single source of truth for color, spacing, radius,
+   type and elevation. Components only ever reference these variables. */
+
+:root {
+  /* Brand */
+  --gm-color-primary-50: #e8f8ef;
+  --gm-color-primary-100: #c6efd9;
+  --gm-color-primary-500: #12b76a;
+  --gm-color-primary-600: #0e9f5c;
+  --gm-color-primary-700: #0b8a4f;
+  --gm-color-primary-800: #096c3f;
+
+  /* Semantic (light) */
+  --gm-bg: #f6f7f9;
+  --gm-surface: #ffffff;
+  --gm-surface-raised: #ffffff;
+  --gm-border: #e4e7ec;
+  --gm-text: #101828;
+  --gm-text-muted: #667085;
+  --gm-text-on-primary: #ffffff;
+
+  /* 700 gives white text 4.6:1 contrast; 500 is kept for accents and dark mode. */
+  --gm-primary: var(--gm-color-primary-700);
+  --gm-primary-hover: var(--gm-color-primary-800);
+  --gm-primary-soft: var(--gm-color-primary-50);
+  --gm-primary-soft-text: var(--gm-color-primary-700);
+
+  --gm-success: #12b76a;
+  --gm-success-soft: #e8f8ef;
+  --gm-success-text: #0b7a45;
+  --gm-warning: #f79009;
+  --gm-warning-soft: #fef3e0;
+  --gm-warning-text: #93590a;
+  --gm-danger: #f04438;
+  --gm-danger-soft: #fdecea;
+  --gm-danger-text: #b42318;
+  --gm-info: #2e90fa;
+  --gm-info-soft: #e8f2fe;
+  --gm-info-text: #175cd3;
+  --gm-neutral-soft: #f2f4f7;
+  --gm-neutral-text: #475467;
+
+  /* Spacing (4px base) */
+  --gm-space-1: 4px;
+  --gm-space-2: 8px;
+  --gm-space-3: 12px;
+  --gm-space-4: 16px;
+  --gm-space-5: 24px;
+  --gm-space-6: 32px;
+
+  /* Radius */
+  --gm-radius-sm: 8px;
+  --gm-radius-md: 12px;
+  --gm-radius-lg: 20px;
+  --gm-radius-full: 999px;
+
+  /* Type */
+  --gm-font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  --gm-text-xs: 12px;
+  --gm-text-sm: 14px;
+  --gm-text-md: 16px;
+  --gm-text-lg: 20px;
+  --gm-text-xl: 28px;
+
+  /* Elevation */
+  --gm-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.08);
+  --gm-shadow-md: 0 4px 12px rgba(16, 24, 40, 0.1);
+  --gm-shadow-lg: 0 -8px 24px rgba(16, 24, 40, 0.12);
+
+  --gm-focus-ring: 0 0 0 3px rgba(18, 183, 106, 0.35);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --gm-bg: #0c111d;
+    --gm-surface: #161b26;
+    --gm-surface-raised: #1d2433;
+    --gm-border: #2a3244;
+    --gm-text: #f5f6f8;
+    --gm-text-muted: #98a2b3;
+    --gm-primary-soft: rgba(18, 183, 106, 0.16);
+    --gm-primary-soft-text: #5fe3a1;
+    --gm-success-soft: rgba(18, 183, 106, 0.16);
+    --gm-success-text: #5fe3a1;
+    --gm-warning-soft: rgba(247, 144, 9, 0.16);
+    --gm-warning-text: #fdb022;
+    --gm-danger-soft: rgba(240, 68, 56, 0.18);
+    --gm-danger-text: #fda29b;
+    --gm-info-soft: rgba(46, 144, 250, 0.16);
+    --gm-info-text: #84caff;
+    --gm-neutral-soft: #232b3b;
+    --gm-neutral-text: #c0c6d3;
+    --gm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --gm-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+    --gm-shadow-lg: 0 -8px 24px rgba(0, 0, 0, 0.5);
+  }
+}
+
+:root[data-theme="dark"] {
+  --gm-bg: #0c111d;
+  --gm-surface: #161b26;
+  --gm-surface-raised: #1d2433;
+  --gm-border: #2a3244;
+  --gm-text: #f5f6f8;
+  --gm-text-muted: #98a2b3;
+  --gm-primary-soft: rgba(18, 183, 106, 0.16);
+  --gm-primary-soft-text: #5fe3a1;
+  --gm-success-soft: rgba(18, 183, 106, 0.16);
+  --gm-success-text: #5fe3a1;
+  --gm-warning-soft: rgba(247, 144, 9, 0.16);
+  --gm-warning-text: #fdb022;
+  --gm-danger-soft: rgba(240, 68, 56, 0.18);
+  --gm-danger-text: #fda29b;
+  --gm-info-soft: rgba(46, 144, 250, 0.16);
+  --gm-info-text: #84caff;
+  --gm-neutral-soft: #232b3b;
+  --gm-neutral-text: #c0c6d3;
+  --gm-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --gm-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --gm-shadow-lg: 0 -8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.gm-root {
+  font-family: var(--gm-font);
+  color: var(--gm-text);
+  background: var(--gm-bg);
+}
