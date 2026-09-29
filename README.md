@@ -119,7 +119,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 
 | Service | Port | Consumes | Produces | State |
 |---|---|---|---|---|
-| Order Service | 3001 | | `order.created` | Postgres |
+| Order Service | 3001 | `order.matched`, `order.no_driver_found` (to keep order status current) | `order.created` | Postgres |
 | Matching Service | | `order.created` | `order.matched`, `order.no_driver_found` | Redis (driver status + GEO) |
 | Trip Service | 3002 | `order.matched` | `trip.status.changed`, `trip.rated` | Postgres, Redis (releases drivers) |
 | Driver Location Service | | `driver.location.updated` | | Redis GEO |
@@ -145,7 +145,8 @@ cd services/order-service && go run .                   # likewise for each serv
 # Order Service
 curl -X POST localhost:3001/orders -H "Content-Type: application/json" \
   -d '{"riderId": "rider-1", "pickup": {"lat": 10.776, "lng": 106.700}, "dropoff": {"lat": 10.79, "lng": 106.71}, "vehicleType": "BIKE"}'   # vehicleType: CAR (default) or BIKE
-curl localhost:3001/orders/<orderId>
+curl localhost:3001/orders/<orderId>                  # includes status: PENDING, then MATCHED or NO_DRIVER
+curl localhost:3001/riders/<riderId>/latest-order     # what a reloaded Rider App uses to find its ride
 
 # Trip Service
 curl localhost:3002/trips/by-order/<orderId>
@@ -199,6 +200,7 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
 - **A port is already in use** (3001-3004, 5171-5173, 5432, 6379, 8080, 8081, 8088, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
+- **The rider app is on a screen that doesn't match the trip**: reload it. It asks Order Service for the rider's latest order and Trip Service for its trip, and resumes searching, assigned or in-progress rides (a missed WebSocket push while searching is also caught by polling every 3s).
 - **The driver app shows no trip**: check the `?driver=` id matches the driver the rider was matched with (the rider's card shows it). A trip already under way is restored when the page opens or reloads.
 - **The Ops dashboard says ksqlDB is unreachable, or shows no data**: ksqlDB is a JVM and takes a minute to start; `docker logs grab-mini-ksqldb` shows its progress, and `docker logs grab-mini-ksql-init` shows whether the tables were created. The tables fill as events flow, so book a ride first.
 - **Start from scratch**: `scripts/dev.sh --reset`.

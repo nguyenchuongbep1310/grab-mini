@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,5 +39,14 @@ func TestVehicleTypeValidation(t *testing.T) {
 	rec := post(`{"riderId":"r","pickup":{"lat":10.776,"lng":106.7},"dropoff":{"lat":10.79,"lng":106.71},"vehicleType":"TRUCK"}`)
 	if !strings.Contains(rec.Body.String(), "CAR or BIKE") {
 		t.Errorf("body = %q, want a message naming the allowed types", rec.Body.String())
+	}
+}
+
+func TestAnOutcomeForANonUUIDOrderIsPermanent(t *testing.T) {
+	// The guard runs before the database, so no connection is needed.
+	err := setOutcome(context.Background(), nil, "not-a-uuid", "MATCHED")
+	var bad *badOutcome
+	if !errors.As(err, &bad) || !bad.Permanent() {
+		t.Errorf("err = %v, want a permanent badOutcome (retrying can't fix it)", err)
 	}
 }

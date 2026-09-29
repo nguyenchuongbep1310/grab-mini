@@ -32,7 +32,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 
 | Service | Responsibility | Consumes | Produces | Storage |
 |---|---|---|---|---|
-| Order Service | Accepts booking requests, manages orders | — | `order.created` | Postgres |
+| Order Service | Accepts booking requests, manages orders, keeps each order's status current | `order.matched`, `order.no_driver_found` | `order.created` | Postgres |
 | Matching Service | Finds the nearest driver | `order.created` | `order.matched`, `order.no_driver_found` | Redis (driver status/geo) |
 | Driver Location Service | Receives & stores driver location | `driver.location.updated` | — | Redis (geo, TTL) |
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
@@ -59,6 +59,7 @@ Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so
 **Order** (Postgres)
 ```
 id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER], createdAt
+(status starts PENDING and is moved by Order Service's own consumer of the matching outcomes)
 ```
 
 **Trip** (Postgres)
@@ -80,6 +81,10 @@ Every event is Avro in Confluent's Schema Registry wire format (magic byte, 4-by
 ## 4c. Analytics
 
 Rather than another hand-written consumer, analytics run in ksqlDB (see `ksql/statements.sql`): each Kafka topic is declared as a stream, and tables are derived with windowed aggregations and one stream-stream join (`order.created` with `order.matched` within a minute, to measure matching latency). Columns are inferred from the Avro schemas in the Schema Registry, which is why `schema-init` registers every schema before ksqlDB starts. The Ops dashboard reads the tables with pull queries. ksqlDB's own state is rebuilt from Kafka, so nothing here needs a database.
+
+## 4d. Recovering after a reload
+
+WebSocket pushes only reach a client that is connected at that moment, so both apps also recover by asking. The Driver App reads `GET /drivers/{id}/active-trip` (Trip Service). The Rider App reads `GET /riders/{id}/latest-order` (Order Service), and for a MATCHED order the trip from Trip Service; a still-PENDING order resumes "searching" and is polled every few seconds, which also covers a push missed while the socket reconnects. Composing the two calls in the client keeps the services independent (the trip doesn't know its rider, the order doesn't know its trip).
 
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.

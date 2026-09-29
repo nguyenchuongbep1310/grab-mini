@@ -14,6 +14,7 @@ import {
   type LatLngTuple,
 } from "@grab-mini/ui";
 import { createOrder, rateTrip, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
+import { checkOutcome, findActiveRide } from "./recovery";
 import { useRide, type Phase } from "./useRide";
 
 // Fixed pickup near the seeded drivers (central Ho Chi Minh City).
@@ -54,6 +55,38 @@ export function App() {
   const [rated, setRated] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const socket = useNotificationSocket("rider", riderId, (message) => dispatch({ type: "notification", message }));
+
+  // Pick up a ride that was already under way when this page opened.
+  useEffect(() => {
+    let stale = false;
+    findActiveRide(riderId)
+      .then((ride) => {
+        if (ride && !stale) dispatch({ type: "restored", ride });
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [dispatch]);
+
+  // While searching, also ask now and then how it turned out. The push normally
+  // arrives first; this covers one missed while the page loaded or the socket reconnected.
+  useEffect(() => {
+    if (ride.phase !== "searching" || !ride.orderId) return;
+    const orderId = ride.orderId;
+    let stale = false;
+    const timer = setInterval(() => {
+      checkOutcome(orderId)
+        .then((outcome) => {
+          if (outcome && !stale) dispatch({ type: "outcome", orderId, outcome });
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => {
+      stale = true;
+      clearInterval(timer);
+    };
+  }, [ride.phase, ride.orderId, dispatch]);
 
   // order.matched carries no tripId; look the trip up once the driver is assigned.
   const { phase, orderId, tripId, driverId } = ride;

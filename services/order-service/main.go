@@ -113,28 +113,30 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"orderId": orderID, "status": "PENDING"})
 }
 
-// handleGetOrder lets a client that only knows the orderId (e.g. the Driver
-// App after an order.matched push) find where the trip starts and ends.
-// The stored status is deliberately not returned: Order Service doesn't
-// consume order.matched, so it would stay PENDING forever.
-func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
-	// orders.id is a UUID column: a malformed id would surface as a
-	// Postgres error (500) instead of the "not found" it really is.
-	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
-		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
-		return
-	}
+// orderView is what clients see of an order.
+type orderView struct {
+	ID          string        `json:"id"`
+	RiderID     string        `json:"riderId"`
+	Pickup      events.LatLng `json:"pickup"`
+	Dropoff     events.LatLng `json:"dropoff"`
+	VehicleType string        `json:"vehicleType"`
+	// PENDING until matching reports back, then MATCHED or NO_DRIVER (see outcomes.go).
+	Status string `json:"status"`
+}
 
-	var (
-		riderID string
-		pickup  events.LatLng
-		dropoff events.LatLng
-		vehicle string
-	)
-	err := s.db.QueryRow(r.Context(),
-		`SELECT rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type FROM orders WHERE id = $1`,
-		r.PathValue("id"),
-	).Scan(&riderID, &pickup.Lat, &pickup.Lng, &dropoff.Lat, &dropoff.Lng, &vehicle)
+const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status`
+
+func queryOrder(ctx context.Context, db *pgxpool.Pool, where string, arg string) (*orderView, error) {
+	var o orderView
+	err := db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE `+where+` ORDER BY created_at DESC LIMIT 1`, arg).
+		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+func respondWithOrder(w http.ResponseWriter, o *orderView, err error) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
 		return
@@ -144,11 +146,28 @@ func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"id": r.PathValue("id"), "riderId": riderID, "pickup": pickup, "dropoff": dropoff, "vehicleType": vehicle,
-	})
+	json.NewEncoder(w).Encode(o)
+}
+
+// handleGetOrder lets a client that only knows the orderId (e.g. the Driver
+// App after an order.matched push) find where the trip starts and ends.
+func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
+	// orders.id is a UUID column: a malformed id would surface as a
+	// Postgres error (500) instead of the "not found" it really is.
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
+		return
+	}
+	o, err := queryOrder(r.Context(), s.db, "id = $1", r.PathValue("id"))
+	respondWithOrder(w, o, err)
+}
+
+// handleGetLatestOrder is how a Rider App that was closed or reloaded finds
+// the ride it may still be in the middle of.
+func (s *server) handleGetLatestOrder(w http.ResponseWriter, r *http.Request) {
+	o, err := queryOrder(r.Context(), s.db, "rider_id = $1", r.PathValue("id"))
+	respondWithOrder(w, o, err)
 }
 
 func main() {
@@ -169,12 +188,16 @@ func main() {
 	}
 	defer producer.Close()
 
-	s := &server{db: db, producer: producer, codec: eventcodec.New(env.SchemaRegistryURL)}
+	codec := eventcodec.New(env.SchemaRegistryURL)
+	s := &server{db: db, producer: producer, codec: codec}
+
+	go runOutcomeConsumer(ctx, env, db, codec)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /orders", s.handleCreateOrder)
 	mux.HandleFunc("GET /orders/{id}", s.handleGetOrder)
+	mux.HandleFunc("GET /riders/{id}/latest-order", s.handleGetLatestOrder)
 
 	log.Printf("order-service listening on :%s", env.Port)
 	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {

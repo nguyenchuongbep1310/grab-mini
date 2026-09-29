@@ -40,9 +40,26 @@ export const initialRide: RideState = {
   driverAnchor: null,
 };
 
+/** A ride that was already under way when the page opened. */
+export interface ActiveRide {
+  orderId: string;
+  phase: "searching" | "assigned" | "in_progress";
+  vehicleType: VehicleType;
+  dropoff: LatLng;
+  driverId?: string;
+  tripId?: string;
+}
+
+/** How a search that was still pending turned out (found by asking, not by a push). */
+export type Outcome =
+  | { kind: "matched"; driverId: string; vehicleType: VehicleType; tripId?: string }
+  | { kind: "no_driver" };
+
 type Action =
   | { type: "setDropoff"; dropoff: LatLng }
   | { type: "setVehicle"; vehicleType: VehicleType }
+  | { type: "restored"; ride: ActiveRide }
+  | { type: "outcome"; orderId: string; outcome: Outcome }
   | { type: "bookStarted" }
   | { type: "bookSucceeded"; orderId: string }
   | { type: "bookFailed" }
@@ -71,6 +88,31 @@ function reduce(state: RideState, action: Action): RideState {
 
     case "setVehicle":
       return state.phase === "idle" ? { ...state, vehicleType: action.vehicleType } : state;
+
+    case "restored": {
+      // Only from a fresh page: a push that arrived first knows better.
+      if (state.phase !== "idle") return state;
+      const { ride } = action;
+      return moveTo(state, ride.phase, {
+        orderId: ride.orderId,
+        vehicleType: ride.vehicleType,
+        dropoff: ride.dropoff,
+        driverId: ride.driverId ?? null,
+        tripId: ride.tripId ?? null,
+      });
+    }
+
+    case "outcome": {
+      // Applies only to the search still in progress: the push may have got here first.
+      if (state.phase !== "searching" || state.orderId !== action.orderId) return state;
+      const { outcome } = action;
+      if (outcome.kind === "no_driver") return moveTo(state, "no_driver");
+      return moveTo(state, "assigned", {
+        driverId: outcome.driverId,
+        vehicleType: outcome.vehicleType,
+        tripId: outcome.tripId ?? state.tripId,
+      });
+    }
 
     case "bookStarted":
       return moveTo(state, "booking");

@@ -19,6 +19,8 @@ export interface Order {
   pickup: LatLng;
   dropoff: LatLng;
   vehicleType: VehicleType;
+  /** PENDING until matching reports back, then MATCHED or NO_DRIVER. */
+  status: "PENDING" | "MATCHED" | "NO_DRIVER";
 }
 
 export interface Trip {
@@ -112,6 +114,16 @@ export function getDriverRating(driverId: string): Promise<DriverRating> {
 export async function getActiveTrip(driverId: string): Promise<Trip | null> {
   try {
     return await request<Trip>(`${TRIP_API}/drivers/${driverId}/active-trip`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+/** The rider's most recent order, or null if they have never booked. */
+export async function getLatestOrder(riderId: string): Promise<Order | null> {
+  try {
+    return await request<Order>(`${ORDER_API}/riders/${riderId}/latest-order`);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
