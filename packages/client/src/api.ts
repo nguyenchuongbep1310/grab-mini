@@ -1,4 +1,6 @@
-import type { TripStatus } from "@grab-mini/events";
+import type { TripStatus, VehicleType } from "@grab-mini/events";
+
+export type { VehicleType };
 
 // The dev servers proxy these prefixes to the Go services (see each app's
 // vite.config.ts), so the browser only ever talks to its own origin.
@@ -15,6 +17,7 @@ export interface Order {
   riderId: string;
   pickup: LatLng;
   dropoff: LatLng;
+  vehicleType: VehicleType;
 }
 
 export interface Trip {
@@ -40,11 +43,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function createOrder(riderId: string, pickup: LatLng, dropoff: LatLng): Promise<{ orderId: string }> {
+export function createOrder(
+  riderId: string,
+  pickup: LatLng,
+  dropoff: LatLng,
+  vehicleType: VehicleType,
+): Promise<{ orderId: string }> {
   return request(`${ORDER_API}/orders`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ riderId, pickup, dropoff }),
+    body: JSON.stringify({ riderId, pickup, dropoff, vehicleType }),
   });
 }
 

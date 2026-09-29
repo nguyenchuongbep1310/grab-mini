@@ -26,7 +26,7 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka
 		if attempt > 0 {
 			time.Sleep(time.Duration(env.MatchRetryDelay) * time.Millisecond)
 		}
-		driverID, err = findAndClaimNearestDriver(ctx, rdb, order.Pickup.Lat, order.Pickup.Lng, env.MatchRadiusKm)
+		driverID, err = findAndClaimNearestDriver(ctx, rdb, order.Pickup.Lat, order.Pickup.Lng, env.MatchRadiusKm, order.VehicleType)
 		if err != nil {
 			return err
 		}
@@ -39,9 +39,10 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka
 
 	if driverID != "" {
 		event := events.OrderMatched{
-			Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: now},
-			OrderID:  order.OrderID,
-			DriverID: driverID,
+			Envelope:    events.Envelope{EventID: uuid.NewString(), OccurredAt: now},
+			OrderID:     order.OrderID,
+			DriverID:    driverID,
+			VehicleType: order.VehicleType,
 		}
 		publish := func() error {
 			payload, err := codec.Encode(ctx, events.TopicOrderMatched, event)

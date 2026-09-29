@@ -6,6 +6,7 @@
     {"name": "eventId", "type": "string"},
     {"name": "occurredAt", "type": "string"},
     {"name": "orderId", "type": "string"},
-    {"name": "driverId", "type": "string"}
+    {"name": "driverId", "type": "string"},
+    {"name": "vehicleType", "type": "string", "default": "CAR"}
   ]
 }

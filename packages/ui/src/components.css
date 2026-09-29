@@ -184,3 +184,26 @@
   background: var(--gm-info); border: 3px solid #fff; box-shadow: var(--gm-shadow-md);
 }
 .leaflet-marker-icon.gm-marker--driver { transition: transform 1s linear; }
+
+/* ---------- SegmentedControl ---------- */
+.gm-segmented {
+  display: flex; gap: var(--gm-space-1);
+  padding: var(--gm-space-1);
+  background: var(--gm-neutral-soft);
+  border-radius: var(--gm-radius-md);
+}
+.gm-segmented__option {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 12px;
+  background: transparent; border: 1px solid transparent; border-radius: var(--gm-radius-sm);
+  color: var(--gm-text-muted); font-family: var(--gm-font); cursor: pointer;
+  transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.gm-segmented__option:focus-visible { outline: none; box-shadow: var(--gm-focus-ring); }
+.gm-segmented__option:disabled { opacity: 0.55; cursor: not-allowed; }
+.gm-segmented__option--selected {
+  background: var(--gm-surface); color: var(--gm-text);
+  box-shadow: var(--gm-shadow-sm); border-color: var(--gm-border);
+}
+.gm-segmented__label { font-weight: 600; font-size: var(--gm-text-md); }
+.gm-segmented__hint { font-size: var(--gm-text-xs); color: var(--gm-text-muted); }

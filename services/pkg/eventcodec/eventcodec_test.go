@@ -72,6 +72,8 @@ var sampleOrder = events.OrderCreated{
 	RiderID:  "rider-1",
 	Pickup:   events.LatLng{Lat: 10.776, Lng: 106.7},
 	Dropoff:  events.LatLng{Lat: 10.79, Lng: 106.71},
+
+	VehicleType: events.VehicleCar,
 }
 
 func TestRoundTripAndWireFormat(t *testing.T) {
@@ -202,5 +204,58 @@ func TestRegistersOncePerTopic(t *testing.T) {
 	}
 	if len(reg.schemas) != 1 {
 		t.Errorf("registered %d schemas, want 1", len(reg.schemas))
+	}
+}
+
+// order.created as it was before vehicleType existed. Messages written with
+// it are still sitting in Kafka after the upgrade, and must still be readable.
+const orderCreatedV1 = `{"type":"record","name":"OrderCreated","namespace":"grabmini.events","fields":[
+ {"name":"eventId","type":"string"},{"name":"occurredAt","type":"string"},{"name":"orderId","type":"string"},{"name":"riderId","type":"string"},
+ {"name":"pickup","type":{"type":"record","name":"LatLng","fields":[{"name":"lat","type":"double"},{"name":"lng","type":"double"}]}},
+ {"name":"dropoff","type":"LatLng"}]}`
+
+func TestCurrentOrderCreatedReadsMessagesWrittenBeforeVehicleType(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+
+	oldProducer := New(url, WithSchemaSource(func(string) (string, error) { return orderCreatedV1, nil }))
+	type v1Order struct {
+		events.Envelope
+		OrderID string        `avro:"orderId"`
+		RiderID string        `avro:"riderId"`
+		Pickup  events.LatLng `avro:"pickup"`
+		Dropoff events.LatLng `avro:"dropoff"`
+	}
+	old := v1Order{sampleOrder.Envelope, "o-1", "rider-1", sampleOrder.Pickup, sampleOrder.Dropoff}
+	data, err := oldProducer.Encode(ctx, events.TopicOrderCreated, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got events.OrderCreated
+	if err := New(url).Decode(ctx, events.TopicOrderCreated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OrderID != "o-1" || got.VehicleType != events.VehicleCar {
+		t.Errorf("got orderId=%q vehicleType=%q, want o-1 and the CAR default", got.OrderID, got.VehicleType)
+	}
+}
+
+func TestVehicleTypeSurvivesARoundTrip(t *testing.T) {
+	_, url := newRegistry(t)
+	c := New(url)
+	in := sampleOrder
+	in.VehicleType = events.VehicleBike
+
+	data, err := c.Encode(context.Background(), events.TopicOrderCreated, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out events.OrderCreated
+	if err := c.Decode(context.Background(), events.TopicOrderCreated, data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.VehicleType != events.VehicleBike {
+		t.Errorf("vehicleType = %q, want BIKE", out.VehicleType)
 	}
 }

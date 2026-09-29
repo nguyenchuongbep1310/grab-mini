@@ -6,6 +6,7 @@ import {
   Card,
   MapMarker,
   MapView,
+  SegmentedControl,
   StatusBadge,
   TripStatusTimeline,
   useToast,
@@ -23,6 +24,13 @@ const STEPS = [
   { key: "in_progress", label: "On your trip" },
   { key: "completed", label: "Arrived" },
 ];
+
+const VEHICLE_OPTIONS = [
+  { value: "CAR" as const, label: "Car", hint: "Up to 4 riders" },
+  { value: "BIKE" as const, label: "Bike", hint: "Quick and cheap" },
+];
+
+const VEHICLE_NAME = { CAR: "Car", BIKE: "Bike" };
 
 const BADGE_STATUS: Record<Phase, string> = {
   idle: "",
@@ -70,7 +78,7 @@ export function App() {
     if (!ride.dropoff) return;
     dispatch({ type: "bookStarted" });
     try {
-      const { orderId } = await createOrder(riderId, { lat: PICKUP[0], lng: PICKUP[1] }, ride.dropoff);
+      const { orderId } = await createOrder(riderId, { lat: PICKUP[0], lng: PICKUP[1] }, ride.dropoff, ride.vehicleType);
       dispatch({ type: "bookSucceeded", orderId });
     } catch (err) {
       dispatch({ type: "bookFailed" });
@@ -110,7 +118,7 @@ export function App() {
         center={PICKUP}
         zoom={15}
         fitTo={fitPoints}
-        bottomInset={phase === "idle" ? 200 : 320}
+        bottomInset={phase === "idle" ? 270 : 320}
         onClick={phase === "idle" ? (p) => dispatch({ type: "setDropoff", dropoff: { lat: p[0], lng: p[1] } }) : undefined}
       >
         <MapMarker position={PICKUP} variant="pickup" />
@@ -138,6 +146,12 @@ export function App() {
                   : "Tap the map to drop a destination pin."}
               </p>
             </div>
+            <SegmentedControl
+              label="Vehicle type"
+              value={ride.vehicleType}
+              onChange={(vehicleType) => dispatch({ type: "setVehicle", vehicleType })}
+              options={VEHICLE_OPTIONS}
+            />
             <Button size="lg" block disabled={!ride.dropoff} onClick={book}>
               Book ride
             </Button>
@@ -157,7 +171,7 @@ export function App() {
                   <Avatar name={driverId} />
                   <div>
                     <div className="driver-row__name">{driverId}</div>
-                    <div className="driver-row__meta">Your driver</div>
+                    <div className="driver-row__meta">Your driver · {VEHICLE_NAME[ride.vehicleType]}</div>
                   </div>
                   <StatusBadge className="driver-row__badge" status={BADGE_STATUS[phase]} />
                 </div>

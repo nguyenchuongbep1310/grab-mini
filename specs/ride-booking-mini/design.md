@@ -56,7 +56,7 @@ Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so
 
 **Order** (Postgres)
 ```
-id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, status[PENDING|MATCHED|NO_DRIVER], createdAt
+id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER], createdAt
 ```
 
 **Trip** (Postgres)
@@ -67,12 +67,13 @@ id, orderId, driverId, status[ASSIGNED|IN_PROGRESS|COMPLETED|CANCELLED], started
 **Driver status** (Redis)
 ```
 driver:{id}:status -> AVAILABLE | ASSIGNED | ON_TRIP
+driver:{id}:vehicle -> CAR | BIKE
 driver:{id}:geo -> lat, lng (Redis GEO)
 ```
 
 ## 4b. Event serialization
 
-Every event is Avro in Confluent's Schema Registry wire format (magic byte, 4-byte schema id, Avro payload). Schemas live in `services/pkg/events/schemas/*.avsc`, one per topic, registered under the subject `<topic>-value`. The registry enforces `BACKWARD` compatibility, so a new schema version must be able to read data written with the old one; in practice, new fields need a default. Consumers read the writer's schema id from each message and resolve it against their own schema, so producers and consumers can be upgraded independently. A message that can't be decoded is a permanent error and goes straight to the dead-letter topic.
+Every event is Avro in Confluent's Schema Registry wire format (magic byte, 4-byte schema id, Avro payload). Schemas live in `services/pkg/events/schemas/*.avsc`, one per topic, registered under the subject `<topic>-value`. The registry enforces `BACKWARD` compatibility, so a new schema version must be able to read data written with the old one; in practice, new fields need a default. Consumers read the writer's schema id from each message and resolve it against their own schema, so producers and consumers can be upgraded independently. Vehicle types are the worked example: `vehicleType` was added to `order.created` and `order.matched` as schema version 2 with a default of `CAR`, which is backward compatible. Matching claims a driver only if their status is AVAILABLE *and* their vehicle matches, in one atomic Redis script. A message that can't be decoded is a permanent error and goes straight to the dead-letter topic.
 
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.

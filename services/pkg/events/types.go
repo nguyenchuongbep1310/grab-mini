@@ -32,6 +32,16 @@ const (
 	DriverStatusOnTrip    DriverStatus = "ON_TRIP"
 )
 
+// VehicleType is what a rider asks for and what a driver drives.
+type VehicleType string
+
+const (
+	VehicleCar  VehicleType = "CAR"
+	VehicleBike VehicleType = "BIKE"
+)
+
+func (v VehicleType) Valid() bool { return v == VehicleCar || v == VehicleBike }
+
 type LatLng struct {
 	Lat float64 `json:"lat" avro:"lat"`
 	Lng float64 `json:"lng" avro:"lng"`
@@ -43,12 +53,16 @@ type OrderCreated struct {
 	RiderID string `json:"riderId" avro:"riderId"`
 	Pickup  LatLng `json:"pickup" avro:"pickup"`
 	Dropoff LatLng `json:"dropoff" avro:"dropoff"`
+	// Added in schema v2 (default CAR), so older messages still decode.
+	VehicleType VehicleType `json:"vehicleType" avro:"vehicleType"`
 }
 
 type OrderMatched struct {
 	Envelope
 	OrderID  string `json:"orderId" avro:"orderId"`
 	DriverID string `json:"driverId" avro:"driverId"`
+	// Added in schema v2 (default CAR), so older messages still decode.
+	VehicleType VehicleType `json:"vehicleType" avro:"vehicleType"`
 }
 
 type OrderNoDriverFound struct {

@@ -6,6 +6,7 @@ export interface EventEnvelope {
 
 export type OrderStatus = "PENDING" | "MATCHED" | "NO_DRIVER";
 export type TripStatus = "ASSIGNED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+export type VehicleType = "CAR" | "BIKE";
 export type DriverStatus = "AVAILABLE" | "ASSIGNED" | "ON_TRIP";
 
 export interface OrderCreated extends EventEnvelope {
@@ -13,11 +14,13 @@ export interface OrderCreated extends EventEnvelope {
   riderId: string;
   pickup: { lat: number; lng: number };
   dropoff: { lat: number; lng: number };
+  vehicleType: VehicleType;
 }
 
 export interface OrderMatched extends EventEnvelope {
   orderId: string;
   driverId: string;
+  vehicleType: VehicleType;
 }
 
 export interface OrderNoDriverFound extends EventEnvelope {

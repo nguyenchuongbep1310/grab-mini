@@ -11,6 +11,7 @@
       "type": "record", "name": "LatLng",
       "fields": [{"name": "lat", "type": "double"}, {"name": "lng", "type": "double"}]
     }},
-    {"name": "dropoff", "type": "LatLng"}
+    {"name": "dropoff", "type": "LatLng"},
+    {"name": "vehicleType", "type": "string", "default": "CAR"}
   ]
 }

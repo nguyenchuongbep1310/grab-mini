@@ -7,6 +7,7 @@ import {
   Card,
   MapMarker,
   MapView,
+  SegmentedControl,
   StatusBadge,
   ToastProvider,
   TripStatusTimeline,
@@ -37,6 +38,7 @@ function Gallery() {
   const toast = useToast();
   const [step, setStep] = useState("assigned");
   const [dark, setDark] = useState(false);
+  const [vehicle, setVehicle] = useState<"CAR" | "BIKE">("CAR");
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
@@ -60,6 +62,20 @@ function Gallery() {
           <Button disabled>Disabled</Button>
           <Button size="sm">Small</Button>
           <Button size="lg">Large</Button>
+        </Section>
+
+        <Section title="SegmentedControl">
+          <div style={{ width: 320 }}>
+            <SegmentedControl
+              label="Vehicle type"
+              value={vehicle}
+              onChange={setVehicle}
+              options={[
+                { value: "CAR", label: "Car", hint: "4 seats" },
+                { value: "BIKE", label: "Bike", hint: "Faster" },
+              ]}
+            />
+          </div>
         </Section>
 
         <Section title="StatusBadge">

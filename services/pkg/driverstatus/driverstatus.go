@@ -37,22 +37,33 @@ func Get(ctx context.Context, rdb *redis.Client, driverID string) (Status, error
 	return Status(v), nil
 }
 
-// claimScript atomically moves a driver from expectedCurrent to
-// newStatus, so concurrent callers (e.g. two Matching Service
-// instances) can never both succeed for the same driver.
+func vehicleKey(driverID string) string {
+	return fmt.Sprintf("driver:%s:vehicle", driverID)
+}
+
+// SetVehicle records what a driver drives (e.g. "CAR", "BIKE").
+func SetVehicle(ctx context.Context, rdb *redis.Client, driverID, vehicle string) error {
+	return rdb.Set(ctx, vehicleKey(driverID), vehicle, 0).Err()
+}
+
+// claimScript atomically moves a driver from expectedCurrent to newStatus,
+// but only if they drive the wanted vehicle, so concurrent callers (e.g.
+// two Matching Service instances) can never both succeed for the same driver.
 var claimScript = redis.NewScript(`
-	local current = redis.call("GET", KEYS[1])
-	if current == ARGV[1] then
+	if redis.call("GET", KEYS[1]) == ARGV[1] and redis.call("GET", KEYS[2]) == ARGV[3] then
 		redis.call("SET", KEYS[1], ARGV[2])
 		return 1
 	end
 	return 0
 `)
 
-// Claim atomically moves a driver from expectedCurrent to newStatus.
-// It reports whether this call performed the transition.
-func Claim(ctx context.Context, rdb *redis.Client, driverID string, expectedCurrent, newStatus Status) (bool, error) {
-	claimed, err := claimScript.Run(ctx, rdb, []string{key(driverID)}, string(expectedCurrent), string(newStatus)).Int()
+// Claim atomically moves a driver from expectedCurrent to newStatus if they
+// drive the given vehicle. It reports whether this call performed the transition.
+func Claim(ctx context.Context, rdb *redis.Client, driverID, vehicle string, expectedCurrent, newStatus Status) (bool, error) {
+	claimed, err := claimScript.Run(ctx, rdb,
+		[]string{key(driverID), vehicleKey(driverID)},
+		string(expectedCurrent), string(newStatus), vehicle,
+	).Int()
 	if err != nil {
 		return false, err
 	}

@@ -23,6 +23,9 @@ func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 			status TEXT NOT NULL DEFAULT 'PENDING',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		);
+
+		-- Added after the first release; existing rows were all cars.
+		ALTER TABLE orders ADD COLUMN IF NOT EXISTS vehicle_type TEXT NOT NULL DEFAULT 'CAR';
 	`)
 	if err != nil {
 		return nil, err

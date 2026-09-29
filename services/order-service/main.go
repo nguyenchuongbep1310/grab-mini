@@ -22,6 +22,8 @@ type createOrderRequest struct {
 	RiderID string         `json:"riderId"`
 	Pickup  *events.LatLng `json:"pickup"`
 	Dropoff *events.LatLng `json:"dropoff"`
+	// Optional; defaults to CAR.
+	VehicleType events.VehicleType `json:"vehicleType"`
 }
 
 func isValidLatLng(p *events.LatLng) bool {
@@ -52,6 +54,14 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.VehicleType == "" {
+		req.VehicleType = events.VehicleCar
+	}
+	if !req.VehicleType.Valid() {
+		http.Error(w, `{"error":"vehicleType must be CAR or BIKE"}`, http.StatusBadRequest)
+		return
+	}
+
 	orderID := uuid.NewString()
 	ctx := r.Context()
 
@@ -64,6 +74,8 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		RiderID: req.RiderID,
 		Pickup:  *req.Pickup,
 		Dropoff: *req.Dropoff,
+
+		VehicleType: req.VehicleType,
 	}
 
 	// Encode before touching the database: if the schema registry is down
@@ -76,9 +88,9 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = s.db.Exec(ctx, `
-		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')`,
-		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng,
+		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')`,
+		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng, req.VehicleType,
 	)
 	if err != nil {
 		log.Printf("failed to insert order: %v", err)
@@ -117,11 +129,12 @@ func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		riderID string
 		pickup  events.LatLng
 		dropoff events.LatLng
+		vehicle string
 	)
 	err := s.db.QueryRow(r.Context(),
-		`SELECT rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng FROM orders WHERE id = $1`,
+		`SELECT rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type FROM orders WHERE id = $1`,
 		r.PathValue("id"),
-	).Scan(&riderID, &pickup.Lat, &pickup.Lng, &dropoff.Lat, &dropoff.Lng)
+	).Scan(&riderID, &pickup.Lat, &pickup.Lng, &dropoff.Lat, &dropoff.Lng, &vehicle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
 		return
@@ -134,7 +147,7 @@ func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"id": r.PathValue("id"), "riderId": riderID, "pickup": pickup, "dropoff": dropoff,
+		"id": r.PathValue("id"), "riderId": riderID, "pickup": pickup, "dropoff": dropoff, "vehicleType": vehicle,
 	})
 }
 

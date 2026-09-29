@@ -157,6 +157,8 @@ export function App() {
                   <dd>{orderId?.slice(0, 8)}…</dd>
                   <dt>Rider</dt>
                   <dd>{order?.riderId ?? "…"}</dd>
+                  <dt>Vehicle</dt>
+                  <dd>{order ? (order.vehicleType === "BIKE" ? "Bike" : "Car") : "…"}</dd>
                 </dl>
               </Card>
 

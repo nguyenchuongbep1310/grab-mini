@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import type { NotificationMessage } from "@grab-mini/events";
+import type { NotificationMessage, VehicleType } from "@grab-mini/events";
 import type { LatLng } from "@grab-mini/client";
 
 export type Phase =
@@ -22,6 +22,7 @@ export interface RideState {
   orderId: string | null;
   tripId: string | null;
   driverId: string | null;
+  vehicleType: VehicleType;
   driverPos: LatLng | null;
   /** First driver position seen, so the map fits it once instead of on every update. */
   driverAnchor: LatLng | null;
@@ -34,12 +35,14 @@ export const initialRide: RideState = {
   orderId: null,
   tripId: null,
   driverId: null,
+  vehicleType: "CAR",
   driverPos: null,
   driverAnchor: null,
 };
 
 type Action =
   | { type: "setDropoff"; dropoff: LatLng }
+  | { type: "setVehicle"; vehicleType: VehicleType }
   | { type: "bookStarted" }
   | { type: "bookSucceeded"; orderId: string }
   | { type: "bookFailed" }
@@ -66,6 +69,9 @@ function reduce(state: RideState, action: Action): RideState {
     case "setDropoff":
       return state.phase === "idle" ? { ...state, dropoff: action.dropoff } : state;
 
+    case "setVehicle":
+      return state.phase === "idle" ? { ...state, vehicleType: action.vehicleType } : state;
+
     case "bookStarted":
       return moveTo(state, "booking");
 
@@ -83,7 +89,8 @@ function reduce(state: RideState, action: Action): RideState {
       return { ...state, tripId: action.tripId };
 
     case "reset":
-      return initialRide;
+      // Keep the vehicle choice: most riders book the same kind again.
+      return { ...initialRide, vehicleType: state.vehicleType };
 
     case "notification": {
       if (!ACTIVE.includes(state.phase)) return state;
@@ -102,7 +109,11 @@ function reduce(state: RideState, action: Action): RideState {
 
       switch (message.type) {
         case "order.matched":
-          return moveTo(state, "assigned", { orderId, driverId: message.payload.driverId });
+          return moveTo(state, "assigned", {
+            orderId,
+            driverId: message.payload.driverId,
+            vehicleType: message.payload.vehicleType,
+          });
         case "order.no_driver_found":
           return moveTo(state, "no_driver", { orderId });
         case "trip.status.changed": {

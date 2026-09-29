@@ -5,6 +5,7 @@ export { Card, type CardProps } from "./Card";
 export { Avatar, type AvatarProps } from "./Avatar";
 export { StatusBadge, type StatusBadgeProps } from "./StatusBadge";
 export { ToastProvider, useToast } from "./Toast";
+export { SegmentedControl, type SegmentedControlProps, type SegmentedOption } from "./SegmentedControl";
 export { BottomSheet, type BottomSheetProps } from "./BottomSheet";
 export { TripStatusTimeline, type TimelineStep, type TripStatusTimelineProps } from "./TripStatusTimeline";
 export { MapView, type MapViewProps, type LatLngTuple } from "./MapView";

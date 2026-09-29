@@ -7,14 +7,15 @@ import (
 
 	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/driverstatus"
+	"grab-mini/pkg/events"
 )
 
-// findAndClaimNearestDriver implements US-2.1: claims the nearest
-// AVAILABLE driver within radiusKm, atomically, or returns "" if none
-// could be claimed. Trying candidates in distance order and skipping
-// ones another instance claims first keeps this race-free under
-// concurrent matching-service instances.
-func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng, radiusKm float64) (string, error) {
+// findAndClaimNearestDriver implements US-2.1: claims the nearest AVAILABLE
+// driver of the requested vehicle type within radiusKm, atomically, or
+// returns "" if none could be claimed. Trying candidates in distance order
+// and skipping ones another instance claims first keeps this race-free
+// under concurrent matching-service instances.
+func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng, radiusKm float64, vehicle events.VehicleType) (string, error) {
 	results, err := rdb.GeoSearchLocation(ctx, driverlocation.GeoKey, &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{
 			Longitude:  lng,
@@ -22,7 +23,7 @@ func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng,
 			Radius:     radiusKm,
 			RadiusUnit: "km",
 			Sort:       "ASC",
-			Count:      20,
+			Count:      50, // several types share one GEO set, so look further than 20
 		},
 		WithDist: true,
 	}).Result()
@@ -31,7 +32,7 @@ func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng,
 	}
 
 	for _, candidate := range results {
-		claimed, err := driverstatus.Claim(ctx, rdb, candidate.Name, driverstatus.Available, driverstatus.Assigned)
+		claimed, err := driverstatus.Claim(ctx, rdb, candidate.Name, string(vehicle), driverstatus.Available, driverstatus.Assigned)
 		if err != nil {
 			return "", err
 		}

@@ -34,11 +34,11 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 
 ### Take a ride
 
-1. In the **Rider App**, tap the map to drop a destination pin, then **Book ride**.
-2. The rider is matched with the nearest driver (`driver-1` to `driver-5`, all seeded around central Ho Chi Minh City) and can watch them move on the map.
+1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**.
+2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
 3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. A driver only receives a trip while their app is open. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
 
-Also try: **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
+Also try: booking a bike (only `driver-4`/`driver-5` can take it), **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
 
 The map background comes from OpenStreetMap tiles, so it needs internet access; markers work without it.
 
@@ -63,6 +63,7 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
   docker exec grab-mini-kafka bash -c 'echo "{\"driverId\":\"driver-99\"}" | /opt/kafka/bin/kafka-console-producer.sh --topic driver.location.updated --bootstrap-server localhost:9092'
   docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --topic driver.location.updated.DLQ --bootstrap-server localhost:9092 --from-beginning
   ```
+- **See a schema evolve.** Vehicle types were added after the first release by giving `order.created` and `order.matched` a `vehicleType` field with a default of `CAR` (schema version 2). `curl localhost:8081/subjects/order.created-value/versions` lists both versions. Old messages still in the topic decode with the default, and a consumer on the old schema ignores the new field.
 - **Try to register an incompatible schema.** Schema Registry runs in `BACKWARD` mode: a new schema must be able to read data written with the old one. Adding a field *without* a default breaks that, so it's rejected (HTTP 409); with a default it's fine:
   ```bash
   # rejected: "vehicle" has no default
@@ -103,7 +104,7 @@ cd services/order-service && go run .                   # likewise for each serv
 ```bash
 # Order Service
 curl -X POST localhost:3001/orders -H "Content-Type: application/json" \
-  -d '{"riderId": "rider-1", "pickup": {"lat": 10.776, "lng": 106.700}, "dropoff": {"lat": 10.79, "lng": 106.71}}'
+  -d '{"riderId": "rider-1", "pickup": {"lat": 10.776, "lng": 106.700}, "dropoff": {"lat": 10.79, "lng": 106.71}, "vehicleType": "BIKE"}'   # vehicleType: CAR (default) or BIKE
 curl localhost:3001/orders/<orderId>
 
 # Trip Service
@@ -121,6 +122,7 @@ Inspect state directly:
 ```bash
 docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1
 docker exec grab-mini-redis redis-cli GET "driver:driver-1:status"
+docker exec grab-mini-redis redis-cli GET "driver:driver-1:vehicle"
 docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from trips;"
 ```
 
@@ -131,7 +133,7 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 - `services/pkg/events`: Kafka event types, topic names and the Avro schemas (`schemas/*.avsc`)
 - `services/pkg/eventcodec`: Avro encode/decode with Schema Registry (registers schemas, resolves writer vs reader schema)
 - `services/pkg/kafkaconsumer`: the retry + dead-letter consumer loop
-- `services/pkg/driverstatus`: the Redis driver-status key and its atomic claim
+- `services/pkg/driverstatus`: the Redis driver status and vehicle keys, and the atomic claim (AVAILABLE and the right vehicle, or nothing)
 - `services/pkg/driverlocation`: the Redis GEO key and the out-of-order-safe location update
 
 **Frontend**, a pnpm workspace (React, TypeScript, Vite):
