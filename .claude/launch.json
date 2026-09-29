@@ -1,0 +1,45 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ui-playground",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--filter",
+        "@grab-mini/ui",
+        "dev"
+      ],
+      "port": 5170
+    },
+    {
+      "name": "rider",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--filter",
+        "@grab-mini/rider",
+        "dev"
+      ],
+      "port": 5171
+    },
+    {
+      "name": "driver",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--filter",
+        "@grab-mini/driver",
+        "dev"
+      ],
+      "port": 5172
+    },
+    {
+      "name": "ops",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--filter",
+        "@grab-mini/ops",
+        "dev"
+      ],
+      "port": 5173
+    }
+  ]
+}
