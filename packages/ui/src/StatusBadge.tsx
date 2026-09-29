@@ -24,14 +24,16 @@ const STATUS_STYLES: Record<string, StatusStyle> = {
 
 export interface StatusBadgeProps {
   status: string;
+  /** Overrides the default label when a status reads differently for another audience (e.g. the driver). */
+  label?: string;
   className?: string;
 }
 
-export function StatusBadge({ status, className }: StatusBadgeProps) {
+export function StatusBadge({ status, label, className }: StatusBadgeProps) {
   const style = STATUS_STYLES[status] ?? { label: status, tone: "neutral" as Tone };
   return (
     <span className={cx("gm-badge", `gm-badge--${style.tone}`, style.pulse && "gm-badge--pulse", className)}>
-      {style.label}
+      {label ?? style.label}
     </span>
   );
 }

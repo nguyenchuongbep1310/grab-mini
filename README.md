@@ -33,12 +33,13 @@ Add `-v` to also wipe volumes (Kafka topics, Postgres data, Redis data).
 - `services/pkg/driverstatus` — shared Redis driver-status key format and atomic claim/release, used by any service that reads or moves a driver between AVAILABLE / ASSIGNED / ON_TRIP
 - `services/pkg/driverlocation` — shared Redis GEO key and out-of-order-safe location update, used by Matching Service (reads) and Driver Location Service (writes)
 - `services/pkg/kafkaconsumer` — the shared retry + dead-letter-topic consumer loop used by every consumer in the project
-- `services/driver-app-sim` — stands in for the real Driver App frontend (Phase 6): publishes `driver.location.updated` every 3-5s for a set of drivers
+- `services/driver-app-sim` — publishes `driver.location.updated` every 3-5s for a set of drivers (a browser can't produce to Kafka, so the Driver App relies on this for its location)
 
-**Frontend** (added in a later phase) — a pnpm workspace:
-- `apps/rider`, `apps/driver` — rider and driver frontends
-- `packages/ui` — shared design system components
-- `packages/events` — TypeScript types for WebSocket payloads sent to the frontend
+**Frontend** — a pnpm workspace (React + TypeScript + Vite):
+- `apps/rider`, `apps/driver` — rider and driver apps
+- `packages/ui` — the design system: tokens (CSS variables, light/dark) and components
+- `packages/client` — REST calls and the notification WebSocket hook shared by both apps
+- `packages/events` — TypeScript types for the WebSocket payloads sent to the frontend
 
 ## Running the services (Phase 1)
 
@@ -132,3 +133,30 @@ Watch the service log 4 failed attempts (1 initial + 3 retries) and then `gave u
 ```bash
 docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --topic driver.location.updated.DLQ --bootstrap-server localhost:9092 --from-beginning
 ```
+
+## Running the apps and design system (Phase 6)
+
+```bash
+pnpm install
+pnpm dev:ui       # design system playground   -> http://localhost:5170
+pnpm dev:rider    # Rider App                   -> http://localhost:5171
+pnpm dev:driver   # Driver App                  -> http://localhost:5172
+```
+
+The apps talk to the Go services through Vite's dev proxy (the services send no CORS headers), so all services from the earlier phases need to be running, plus `driver-app-sim` so drivers have a location.
+
+End-to-end walkthrough:
+
+1. Open the Rider App. Tap the map to drop a destination pin, then **Book ride**.
+2. The rider sees the match (`driver-N`), then the driver moving on the map.
+3. Open the Driver App as the matched driver: `http://localhost:5172/?driver=driver-N` (a driver only receives trips while their app is open). Use **Confirm pickup**, then **Complete trip**. The rider's timeline follows along.
+
+`?rider=rider-2` / `?driver=driver-3` pick a different identity. Map tiles come from OpenStreetMap, so the map background needs internet access.
+
+Build the design system as a library (ES module + `style.css` + type declarations in `packages/ui/dist`):
+
+```bash
+pnpm --filter @grab-mini/ui build
+```
+
+Inside this workspace the apps import `@grab-mini/ui` from source, so no build step is needed during development.

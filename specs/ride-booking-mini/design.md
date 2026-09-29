@@ -86,7 +86,7 @@ Shared between Rider App and Driver App (React + TypeScript), organized as its o
 - `MapView` + `MapMarker` (wraps a map library, e.g. MapLibre/Leaflet)
 - `TripStatusTimeline` (shows trip progress)
 
-Principle: components hold no business logic or direct API calls — they receive data via props, leaving data-fetching to each app.
+Principle: components hold no business logic or direct API calls — they receive data via props, leaving data-fetching to each app. Both apps share `packages/client` (REST calls + the notification WebSocket hook) and, in dev, reach the Go services through a Vite proxy (the services send no CORS headers).
 
 ## 7. Tech stack
 - Backend: Go, standard `net/http` for HTTP-facing services, [segmentio/kafka-go](https://github.com/segmentio/kafka-go) for Kafka, [jackc/pgx](https://github.com/jackc/pgx) for Postgres, [redis/go-redis](https://github.com/redis/go-redis) for Redis. Chosen over Node.js/NestJS so the project also serves as a Go learning exercise, alongside Kafka and design systems.

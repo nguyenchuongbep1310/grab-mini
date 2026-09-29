@@ -42,12 +42,14 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 5.3 Standardize logging: each consumer logs topic/partition/offset on processing (for observability)
 
 ## Phase 6 — Design system
-- [ ] 6.1 `packages/ui`: set up build (Vite lib mode) + tokens (color, spacing, typography)
-- [ ] 6.2 Components: `Button`, `Card`, `Avatar`, `StatusBadge`, `Toast`
-- [ ] 6.3 Components: `BottomSheet`, `TripStatusTimeline`
-- [ ] 6.4 Components: `MapView` + `MapMarker` (wraps MapLibre/Leaflet)
-- [ ] 6.5 Apply all components in the Rider App (home, booking, tracking)
-- [ ] 6.6 Apply all components in the Driver App (accept trip, tracking, completion)
+- [x] 6.1 `packages/ui`: set up build (Vite lib mode) + tokens (color, spacing, typography)
+- [x] 6.2 Components: `Button`, `Card`, `Avatar`, `StatusBadge`, `Toast`
+- [x] 6.3 Components: `BottomSheet`, `TripStatusTimeline`
+- [x] 6.4 Components: `MapView` + `MapMarker` (wraps MapLibre/Leaflet) — Leaflet
+- [x] 6.5 Apply all components in the Rider App (home, booking, tracking)
+- [x] 6.6 Apply all components in the Driver App (accept trip, tracking, completion)
+
+> Notes: the apps also needed a few small backend additions — `GET /orders/{id}` (Order Service), `GET /trips/by-order/{orderId}` (Trip Service), and Notification Service echoing `driver.location.updated` to the driver's own socket — plus a shared `packages/client` for REST calls and the WebSocket hook. The Driver App shows the driver's position but doesn't publish it: `driver-app-sim` still does that, since a browser can't produce to Kafka directly.
 
 ## Phase 7 — End-to-end integration
 - [ ] 7.1 Run the full flow: rider books → matched → driver moves → completed, observe end to end via Kafka UI

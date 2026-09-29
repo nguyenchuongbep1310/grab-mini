@@ -10,6 +10,10 @@
   "scripts": {
     "kafka:up": "docker compose up -d",
     "kafka:down": "docker compose down",
-    "kafka:logs": "docker compose logs -f"
+    "kafka:logs": "docker compose logs -f",
+    "dev:rider": "pnpm --filter @grab-mini/rider dev",
+    "dev:driver": "pnpm --filter @grab-mini/driver dev",
+    "dev:ui": "pnpm --filter @grab-mini/ui dev",
+    "typecheck": "pnpm -r typecheck"
   }
 }
