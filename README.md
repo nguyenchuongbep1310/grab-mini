@@ -2,7 +2,7 @@
 
 A mini ride-booking app (think Grab) built to learn three things by building them: **Kafka** (event streaming), **Go**, and a **design system**.
 
-A rider books a ride, a matching service finds the nearest driver, a trip runs through its lifecycle, and both apps update in real time. Every step between services is a Kafka event, serialized as Avro and validated against a schema in Schema Registry.
+A rider books a ride, a matching service finds the nearest driver, a trip runs through its lifecycle, and both apps update in real time. Every step between services is a Kafka event, serialized as Avro and validated against a schema in Schema Registry. ksqlDB reads the same topics to compute live analytics.
 
 ```
 Rider App ──POST──> Order Service ──> [order.created] ──> Matching Service ──> [order.matched] ──┬──> Trip Service ──> [trip.status.changed] ──┐
@@ -21,14 +21,16 @@ pnpm install
 pnpm dev:all
 ```
 
-`pnpm dev:all` (which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra (Kafka, Schema Registry, Postgres, Redis, Kafka UI), waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts both apps. When it prints `grab-mini is up`:
+`pnpm dev:all` (which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra (Kafka, Schema Registry, ksqlDB, Postgres, Redis, Kafka UI), waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts both apps. When it prints `grab-mini is up`:
 
 | What | URL |
 |---|---|
 | Rider App | http://localhost:5171 |
 | Driver App | http://localhost:5172/?driver=driver-1 |
+| Ops dashboard | http://localhost:5173 |
 | Kafka UI | http://localhost:8080 |
 | Schema Registry | http://localhost:8081/subjects |
+| ksqlDB | http://localhost:8088/info |
 
 Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log`. Use `scripts/dev.sh --reset` to wipe Kafka, Postgres and Redis data first, and `docker compose down` to stop the infra.
 
@@ -52,6 +54,34 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
 - **Schema Registry** (menu item in Kafka UI, or `curl localhost:8081/subjects`): one subject per topic (`order.created-value`, ...), each holding the Avro schema producers registered.
 - **Consumers**: one consumer group per service (`matching-service-group`, `trip-service-group`, `driver-location-service-group`, `notification-service-group`). Each reads every event on its topics independently. Check **lag** here: it stays at or near 0 (a message or two in flight on `driver.location.updated` while the simulator publishes; `N/A` just means a group hasn't committed an offset on that topic yet).
 
+## Analytics with ksqlDB
+
+The [Ops dashboard](http://localhost:5173) shows live figures (orders per minute by vehicle type, match rate, average match time, trips completed, driver ratings, location update throughput). None of it is computed by a service we wrote: [ksqlDB](https://ksqldb.io) reads the Avro topics and maintains the tables in [ksql/statements.sql](ksql/statements.sql), and the dashboard just runs pull queries against them (through the ksqlDB REST API).
+
+| Table | Built from | What it shows |
+|---|---|---|
+| `orders_per_minute` | `order.created` | orders per vehicle type, in one-minute tumbling windows |
+| `match_stats` | join of `order.created` and `order.matched` | matches, average and max time to find a driver, by vehicle type |
+| `matched_total`, `no_driver_total` | `order.matched`, `order.no_driver_found` | how many orders found a driver |
+| `trip_status_totals` | `trip.status.changed` | trips by status (completed versus cancelled) |
+| `driver_rating_stats` | `trip.rated` | average stars per driver |
+| `location_updates_per_minute` | `driver.location.updated` | throughput of the busiest topic |
+
+`driver_rating_stats` computes the same average as Rating Service does in Postgres: one is a declarative query over the topic, the other a consumer we wrote and deduplicate ourselves. Compare them, and note what ksqlDB gives you for free (no consumer code, replayable from the topic) versus what it doesn't (the result lives in ksqlDB, not in a database the other services read).
+
+Try it yourself, from the ksqlDB CLI (or the **KSQL** section of Kafka UI):
+
+```bash
+docker run --rm -it --network grab-mini_default confluentinc/ksqldb-cli:0.29.0 ksql http://ksqldb-server:8088
+```
+```sql
+SELECT * FROM match_stats;                                   -- a pull query: the current value
+SELECT ORDERID, VEHICLETYPE FROM orders_created EMIT CHANGES;  -- a push query: streams new orders as they arrive
+SHOW QUERIES;                                                -- every table above is a running query
+```
+
+ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId` becomes `ORDERID`). The tables are rebuilt from the Kafka topics, so they survive `docker compose down`.
+
 ## Things to try
 
 - **Scale a consumer group.** Start a second matching service in another terminal and watch Kafka split the 3 partitions between the two instances, with no order matched twice:
@@ -64,7 +94,7 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
   docker exec grab-mini-kafka bash -c 'echo "{\"driverId\":\"driver-99\"}" | /opt/kafka/bin/kafka-console-producer.sh --topic driver.location.updated --bootstrap-server localhost:9092'
   docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --topic driver.location.updated.DLQ --bootstrap-server localhost:9092 --from-beginning
   ```
-- **See a schema evolve.** Vehicle types were added after the first release by giving `order.created` and `order.matched` a `vehicleType` field with a default of `CAR` (schema version 2). `curl localhost:8081/subjects/order.created-value/versions` lists both versions. Old messages still in the topic decode with the default, and a consumer on the old schema ignores the new field.
+- **Read about a schema that evolved.** Vehicle types were added after the first release by giving `order.created` and `order.matched` a `vehicleType` field with a default of `CAR`, which is a backward-compatible change. A fresh start registers only the current version (`curl localhost:8081/subjects/order.created-value/versions`), but the test `TestCurrentOrderCreatedReadsMessagesWrittenBeforeVehicleType` in [services/pkg/eventcodec](services/pkg/eventcodec/eventcodec_test.go) shows the effect: a message written with the old schema still decodes, with `vehicleType` set to the default.
 - **Try to register an incompatible schema.** Schema Registry runs in `BACKWARD` mode: a new schema must be able to read data written with the old one. Adding a field *without* a default breaks that, so it's rejected (HTTP 409); with a default it's fine:
   ```bash
   # rejected: "vehicle" has no default
@@ -94,6 +124,7 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
 | Trip Service | 3002 | `order.matched` | `trip.status.changed`, `trip.rated` | Postgres, Redis (releases drivers) |
 | Driver Location Service | | `driver.location.updated` | | Redis GEO |
 | Rating Service | 3004 | `trip.rated` | | Postgres (per-driver totals) |
+| ksqlDB | 8088 | every topic above | analytics tables (`analytics` section) | Kafka (changelog topics) |
 | Notification Service | 3003 | all of the above | | in-memory WebSocket connections |
 | `driver-app-sim` | | | `driver.location.updated` | |
 
@@ -142,6 +173,8 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 
 ## Repository layout
 
+**Analytics**: [ksql/statements.sql](ksql/statements.sql), the ksqlDB streams and tables, applied by the `ksql-init` container.
+
 **Backend**, a Go workspace ([go.work](go.work)) with one module per service:
 - `services/*-service` (order, matching, trip, driver-location, notification, rating), `services/driver-app-sim`
 - `services/pkg/events`: Kafka event types, topic names and the Avro schemas (`schemas/*.avsc`)
@@ -151,7 +184,7 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 - `services/pkg/driverlocation`: the Redis GEO key and the out-of-order-safe location update
 
 **Frontend**, a pnpm workspace (React, TypeScript, Vite):
-- `apps/rider`, `apps/driver`: the two apps
+- `apps/rider`, `apps/driver`: the two apps, and `apps/ops`: the analytics dashboard (reads ksqlDB)
 - `packages/ui`: the design system, with tokens (CSS variables, light and dark) and components
 - `packages/client`: REST calls and the notification WebSocket hook
 - `packages/events`: types for the WebSocket messages
@@ -163,7 +196,8 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3001-3004, 5171-5172, 5432, 6379, 8080, 8081, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3001-3004, 5171-5173, 5432, 6379, 8080, 8081, 8088, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The driver app shows no trip**: it must be open, as the matched driver, when the trip is assigned. Reload doesn't recover an in-flight trip.
+- **The Ops dashboard says ksqlDB is unreachable, or shows no data**: ksqlDB is a JVM and takes a minute to start; `docker logs grab-mini-ksqldb` shows its progress, and `docker logs grab-mini-ksql-init` shows whether the tables were created. The tables fill as events flow, so book a ride first.
 - **Start from scratch**: `scripts/dev.sh --reset`.

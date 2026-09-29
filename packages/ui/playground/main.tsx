@@ -8,6 +8,7 @@ import {
   MapMarker,
   MapView,
   SegmentedControl,
+  Stat,
   StarRating,
   StatusBadge,
   ToastProvider,
@@ -78,6 +79,14 @@ function Gallery() {
               ]}
             />
           </div>
+        </Section>
+
+        <Section title="Stat">
+          <Card style={{ display: "flex", gap: 32 }}>
+            <Stat label="Orders" value="128" hint="last hour" />
+            <Stat label="Match rate" value="94%" tone="success" hint="121 of 128" />
+            <Stat label="No driver" value="7" tone="danger" />
+          </Card>
         </Section>
 
         <Section title="StarRating">

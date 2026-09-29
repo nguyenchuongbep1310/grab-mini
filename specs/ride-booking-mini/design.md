@@ -38,7 +38,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
 | Notification Service | Pushes realtime updates to clients | `order.matched`, `order.no_driver_found`, `trip.status.changed`, `driver.location.updated` | — | (stateless, in-memory socket map) |
 | Rating Service | Averages each driver's ratings | `trip.rated` | | Postgres (`driver_ratings`, deduped by eventId) |
-| Analytics Service (optional) | Logs all events to practice a separate consumer group | all topics | — | append-only log file / Postgres |
+| ksqlDB (replaces the planned Analytics Service) | Stream processing: per-minute counts, a stream-stream join for match latency, ratings, throughput | all topics | analytics tables | Kafka (changelog topics) |
 
 ## 3. Kafka topics
 
@@ -76,6 +76,10 @@ driver:{id}:geo -> lat, lng (Redis GEO)
 ## 4b. Event serialization
 
 Every event is Avro in Confluent's Schema Registry wire format (magic byte, 4-byte schema id, Avro payload). Schemas live in `services/pkg/events/schemas/*.avsc`, one per topic, registered under the subject `<topic>-value`. The registry enforces `BACKWARD` compatibility, so a new schema version must be able to read data written with the old one; in practice, new fields need a default. Consumers read the writer's schema id from each message and resolve it against their own schema, so producers and consumers can be upgraded independently. Vehicle types are the worked example: `vehicleType` was added to `order.created` and `order.matched` as schema version 2 with a default of `CAR`, which is backward compatible. Matching claims a driver only if their status is AVAILABLE *and* their vehicle matches, in one atomic Redis script. A message that can't be decoded is a permanent error and goes straight to the dead-letter topic.
+
+## 4c. Analytics
+
+Rather than another hand-written consumer, analytics run in ksqlDB (see `ksql/statements.sql`): each Kafka topic is declared as a stream, and tables are derived with windowed aggregations and one stream-stream join (`order.created` with `order.matched` within a minute, to measure matching latency). Columns are inferred from the Avro schemas in the Schema Registry, which is why `schema-init` registers every schema before ksqlDB starts. The Ops dashboard reads the tables with pull queries. ksqlDB's own state is rebuilt from Kafka, so nothing here needs a database.
 
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.

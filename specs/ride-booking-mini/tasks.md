@@ -58,5 +58,5 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
 - [x] Multiple vehicle types (car/bike) affecting matching — `vehicleType` as Avro schema v2 (defaulted), vehicle-aware atomic claim, `SegmentedControl` in the design system
-- [ ] Kafka Streams/ksqlDB for analytics instead of manual consumers
+- [x] Kafka Streams/ksqlDB for analytics instead of manual consumers — ksqlDB (`ksql/statements.sql`) plus an Ops dashboard (`apps/ops`)
 - [x] Schema Registry (Avro/Protobuf) instead of plain JSON — learn schema evolution (Avro; `services/pkg/eventcodec`)

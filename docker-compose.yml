@@ -71,6 +71,82 @@ services:
       timeout: 5s
       retries: 12
 
+  # One-shot: registers every schema up front. ksqlDB infers its columns
+  # from the registry, so the subjects must exist before the first event is
+  # produced. Services register the same text later, which is a no-op.
+  schema-init:
+    image: curlimages/curl:8.10.1
+    container_name: grab-mini-schema-init
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./services/pkg/events/schemas:/schemas:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for file in /schemas/*.avsc; do
+          topic=$$(basename "$$file" .avsc)
+          schema=$$(tr -d '\n' < "$$file" | sed 's/"/\\"/g')
+          curl -fsS -X POST "http://schema-registry:8081/subjects/$$topic-value/versions" \
+            -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+            -d "{\"schemaType\":\"AVRO\",\"schema\":\"$$schema\"}"
+          echo " <- $$topic-value"
+        done
+
+  # Stream processing without writing a consumer: ksqlDB reads the Avro
+  # topics and maintains the tables defined in ksql/statements.sql.
+  ksqldb-server:
+    image: confluentinc/ksqldb-server:0.29.0
+    container_name: grab-mini-ksqldb
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      schema-init:
+        condition: service_completed_successfully
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_BOOTSTRAP_SERVERS: kafka:19092
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KSQL_KSQL_SERVICE_ID: grab-mini_
+      KSQL_KSQL_STREAMS_AUTO_OFFSET_RESET: earliest
+      # Single-broker cluster: everything ksqlDB creates needs replication 1.
+      KSQL_KSQL_INTERNAL_TOPIC_REPLICAS: 1
+      KSQL_KSQL_STREAMS_REPLICATION_FACTOR: 1
+      KSQL_KSQL_SINK_REPLICAS: 1
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_REPLICATION_FACTOR: 1
+      KSQL_KSQL_QUERY_PULL_TABLE_SCAN_ENABLED: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8088/info || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  # One-shot: runs ksql/statements.sql (every statement is IF NOT EXISTS, so
+  # running it again after a restart is safe). The ksql CLI exits 0 even when
+  # a statement fails, so its output is checked and a failure made visible.
+  ksql-init:
+    image: confluentinc/ksqldb-cli:0.29.0
+    container_name: grab-mini-ksql-init
+    depends_on:
+      ksqldb-server:
+        condition: service_healthy
+    restart: "no"
+    volumes:
+      - ./ksql/statements.sql:/statements.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ksql http://ksqldb-server:8088 --file /statements.sql > /tmp/out 2>&1
+        cat /tmp/out
+        if grep -qE "Could not|Failed|Error:|error:" /tmp/out; then echo "ksql-init: a statement failed" >&2; exit 1; fi
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: grab-mini-kafka-ui
@@ -83,6 +159,7 @@ services:
       KAFKA_CLUSTERS_0_NAME: grab-mini
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      KAFKA_CLUSTERS_0_KSQLDBSERVER: http://ksqldb-server:8088
 
   postgres:
     image: postgres:16-alpine

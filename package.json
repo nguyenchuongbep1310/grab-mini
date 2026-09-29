@@ -15,6 +15,7 @@
     "dev:driver": "pnpm --filter @grab-mini/driver dev",
     "dev:ui": "pnpm --filter @grab-mini/ui dev",
     "typecheck": "pnpm -r typecheck",
-    "dev:all": "bash scripts/dev.sh"
+    "dev:all": "bash scripts/dev.sh",
+    "dev:ops": "pnpm --filter @grab-mini/ops dev"
   }
 }

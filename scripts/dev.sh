@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts everything needed to try grab-mini locally:
-#   infra (Kafka, Kafka UI, Postgres, Redis) -> seeded drivers -> the Go
-#   services -> the driver location simulator -> the Rider and Driver apps.
+#   infra (Kafka, Schema Registry, ksqlDB, Kafka UI, Postgres, Redis) -> seeded drivers -> the Go
+#   services -> the driver location simulator -> the Rider, Driver and Ops apps.
 # Ctrl-C stops everything except the Docker infra (use `docker compose down`).
 #
 #   scripts/dev.sh            start
@@ -64,6 +64,7 @@ wait_for() { # wait_for <description> <command...>
 }
 
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = "healthy" ]; }
+ksql_ready() { [ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' grab-mini-ksql-init 2>/dev/null)" = "exited 0" ]; }
 topics_ready() { [ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' grab-mini-kafka-init 2>/dev/null)" = "exited 0" ]; }
 
 if $RESET; then
@@ -78,6 +79,8 @@ wait_for "Postgres" healthy grab-mini-postgres
 wait_for "Redis" healthy grab-mini-redis
 wait_for "Schema Registry" healthy grab-mini-schema-registry
 wait_for "topics" topics_ready
+wait_for "ksqlDB" healthy grab-mini-ksqldb
+wait_for "analytics tables" ksql_ready
 
 echo "Building Go services..."
 SERVICES="order-service matching-service trip-service driver-location-service notification-service rating-service driver-app-sim"
@@ -94,6 +97,7 @@ for svc in $SERVICES; do
 done
 start rider apps/rider pnpm dev
 start driver apps/driver pnpm dev
+start ops apps/ops pnpm dev
 
 wait_for "Order Service" curl -fs localhost:3001/health
 wait_for "Trip Service" curl -fs localhost:3002/health
@@ -101,6 +105,7 @@ wait_for "Notification Service" curl -fs localhost:3003/health
 wait_for "Rating Service" curl -fs localhost:3004/health
 wait_for "Rider App" curl -fs localhost:5171
 wait_for "Driver App" curl -fs localhost:5172
+wait_for "Ops dashboard" curl -fs localhost:5173
 
 cat <<MSG
 
@@ -108,7 +113,10 @@ grab-mini is up.
 
   Rider App    http://localhost:5171
   Driver App   http://localhost:5172/?driver=driver-1   (open as the driver the rider gets matched with)
+  Ops          http://localhost:5173   (live analytics from ksqlDB)
   Kafka UI     http://localhost:8080
+  Schema Reg.  http://localhost:8081/subjects
+  ksqlDB       http://localhost:8088/info
 
   Logs: $LOGS/<name>.log     Ctrl-C to stop.
 MSG

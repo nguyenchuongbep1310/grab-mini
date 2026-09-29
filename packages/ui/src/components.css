@@ -230,3 +230,12 @@
   position: absolute; left: 0; top: 0; overflow: hidden; white-space: nowrap;
   color: var(--gm-warning);
 }
+
+/* ---------- Stat ---------- */
+.gm-stat { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.gm-stat__label { font: 600 var(--gm-text-xs) / 1.2 var(--gm-font); color: var(--gm-text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.gm-stat__value { font: 800 var(--gm-text-xl) / 1.1 var(--gm-font); font-variant-numeric: tabular-nums; color: var(--gm-text); }
+.gm-stat__value--success { color: var(--gm-success-text); }
+.gm-stat__value--warning { color: var(--gm-warning-text); }
+.gm-stat__value--danger { color: var(--gm-danger-text); }
+.gm-stat__hint { font: 400 var(--gm-text-xs) / 1.3 var(--gm-font); color: var(--gm-text-muted); }
