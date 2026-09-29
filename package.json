@@ -14,6 +14,7 @@
     "dev:rider": "pnpm --filter @grab-mini/rider dev",
     "dev:driver": "pnpm --filter @grab-mini/driver dev",
     "dev:ui": "pnpm --filter @grab-mini/ui dev",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "dev:all": "bash scripts/dev.sh"
   }
 }

@@ -19,6 +19,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # The image defaults to /tmp/kraft-combined-logs, which is not the
+      # mounted volume, so topics would vanish on every `docker compose down`.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       CLUSTER_ID: grabminikafkacluster01
     volumes:
       - kafka-data:/var/lib/kafka/data
@@ -27,6 +30,24 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+
+  # One-shot: creates the topics the services consume, so a consumer never
+  # subscribes to a topic that doesn't exist yet. Dead-letter topics are
+  # created on demand by kafkaconsumer.
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: grab-mini-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for topic in order.created order.matched order.no_driver_found driver.location.updated trip.status.changed; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
+            --topic $$topic --partitions 3 --replication-factor 1
+        done
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest

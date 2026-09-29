@@ -52,8 +52,8 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 > Notes: the apps also needed a few small backend additions — `GET /orders/{id}` (Order Service), `GET /trips/by-order/{orderId}` (Trip Service), and Notification Service echoing `driver.location.updated` to the driver's own socket — plus a shared `packages/client` for REST calls and the WebSocket hook. The Driver App shows the driver's position but doesn't publish it: `driver-app-sim` still does that, since a browser can't produce to Kafka directly.
 
 ## Phase 7 — End-to-end integration
-- [ ] 7.1 Run the full flow: rider books → matched → driver moves → completed, observe end to end via Kafka UI
-- [ ] 7.2 Write a README describing how to run locally (docker compose up, seed data, run each app)
+- [x] 7.1 Run the full flow: rider books → matched → driver moves → completed, observe end to end via Kafka UI
+- [x] 7.2 Write a README describing how to run locally (docker compose up, seed data, run each app) — plus `pnpm dev:all` / `scripts/dev.sh` to do all of it in one command, and Docker Compose now creates the topics and keeps them across restarts
 
 ## Backlog (after core is done, explore as interested)
 - [ ] Post-trip rating/feedback

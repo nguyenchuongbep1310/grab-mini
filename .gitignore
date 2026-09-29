@@ -8,3 +8,4 @@ dist/
 /services/*/driver-location-service
 /services/*/driver-app-sim
 /services/*/notification-service
+.dev/
