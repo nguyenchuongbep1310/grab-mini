@@ -14,6 +14,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/driverstatus"
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 )
 
@@ -21,20 +22,23 @@ type server struct {
 	db       *pgxpool.Pool
 	rdb      *redis.Client
 	producer *kafka.Writer
+	codec    *eventcodec.Codec
 }
 
-func (s *server) publishStatusChanged(ctx context.Context, t *trip, status events.TripStatus) error {
-	event := events.TripStatusChanged{
+func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events.TripStatus) ([]byte, error) {
+	return s.codec.Encode(ctx, events.TopicTripStatusChanged, events.TripStatusChanged{
 		Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: time.Now().UTC().Format(time.RFC3339)},
 		TripID:   t.ID,
 		OrderID:  t.OrderID,
 		DriverID: t.DriverID,
 		Status:   status,
-	}
-	payload, _ := json.Marshal(event)
+	})
+}
+
+func (s *server) publish(ctx context.Context, tripID string, payload []byte) error {
 	return s.producer.WriteMessages(ctx, kafka.Message{
 		Topic: events.TopicTripStatusChanged,
-		Key:   []byte(t.ID),
+		Key:   []byte(tripID),
 		Value: payload,
 	})
 }
@@ -129,6 +133,15 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, fromSt
 		return
 	}
 
+	// Encode before changing any state: if the schema registry is down we
+	// refuse the request rather than move the trip without telling anyone.
+	payload, err := s.encodeStatusChanged(ctx, t, targetStatus)
+	if err != nil {
+		log.Printf("failed to encode trip.status.changed: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
 	transitioned, err := transitionTrip(ctx, s.db, id, fromStatuses, targetStatus, field)
 	if err != nil {
 		log.Printf("failed to transition trip: %v", err)
@@ -148,7 +161,7 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, fromSt
 		}
 	}
 
-	if err := s.publishStatusChanged(ctx, t, targetStatus); err != nil {
+	if err := s.publish(ctx, t.ID, payload); err != nil {
 		log.Printf("failed to publish trip.status.changed: %v", err)
 	}
 
@@ -176,9 +189,10 @@ func main() {
 	}
 	defer producer.Close()
 
-	s := &server{db: db, rdb: rdb, producer: producer}
+	codec := eventcodec.New(env.SchemaRegistryURL)
+	s := &server{db: db, rdb: rdb, producer: producer, codec: codec}
 
-	go runOrderMatchedConsumer(ctx, env, db)
+	go runOrderMatchedConsumer(ctx, env, db, codec)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)

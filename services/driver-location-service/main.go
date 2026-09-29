@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/driverlocation"
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconsumer"
 )
@@ -24,6 +24,8 @@ func runConsumer(env Env) {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
+	codec := eventcodec.New(env.SchemaRegistryURL)
+
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers:  env.KafkaBrokers,
 		GroupID:  "driver-location-service-group",
@@ -31,7 +33,7 @@ func runConsumer(env Env) {
 		LogLabel: "[driver-location-service]",
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.DriverLocationUpdated
-		if err := json.Unmarshal(msg.Value, &evt); err != nil {
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
 

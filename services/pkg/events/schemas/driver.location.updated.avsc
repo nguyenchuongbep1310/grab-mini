@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "DriverLocationUpdated",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "driverId", "type": "string"},
+    {"name": "lat", "type": "double"},
+    {"name": "lng", "type": "double"},
+    {"name": "timestamp", "type": "string"}
+  ]
+}

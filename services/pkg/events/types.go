@@ -3,8 +3,8 @@ package events
 // Envelope carries the fields every event on the bus has, used for
 // idempotency and tracing (see requirements US-6.1).
 type Envelope struct {
-	EventID    string `json:"eventId"`
-	OccurredAt string `json:"occurredAt"`
+	EventID    string `json:"eventId" avro:"eventId"`
+	OccurredAt string `json:"occurredAt" avro:"occurredAt"`
 }
 
 type OrderStatus string
@@ -33,43 +33,43 @@ const (
 )
 
 type LatLng struct {
-	Lat float64 `json:"lat"`
-	Lng float64 `json:"lng"`
+	Lat float64 `json:"lat" avro:"lat"`
+	Lng float64 `json:"lng" avro:"lng"`
 }
 
 type OrderCreated struct {
 	Envelope
-	OrderID string `json:"orderId"`
-	RiderID string `json:"riderId"`
-	Pickup  LatLng `json:"pickup"`
-	Dropoff LatLng `json:"dropoff"`
+	OrderID string `json:"orderId" avro:"orderId"`
+	RiderID string `json:"riderId" avro:"riderId"`
+	Pickup  LatLng `json:"pickup" avro:"pickup"`
+	Dropoff LatLng `json:"dropoff" avro:"dropoff"`
 }
 
 type OrderMatched struct {
 	Envelope
-	OrderID  string `json:"orderId"`
-	DriverID string `json:"driverId"`
+	OrderID  string `json:"orderId" avro:"orderId"`
+	DriverID string `json:"driverId" avro:"driverId"`
 }
 
 type OrderNoDriverFound struct {
 	Envelope
-	OrderID string `json:"orderId"`
+	OrderID string `json:"orderId" avro:"orderId"`
 }
 
 // DriverLocationUpdated carries the driver's device timestamp, used to
 // discard out-of-order updates (US-3.1).
 type DriverLocationUpdated struct {
 	Envelope
-	DriverID  string  `json:"driverId"`
-	Lat       float64 `json:"lat"`
-	Lng       float64 `json:"lng"`
-	Timestamp string  `json:"timestamp"`
+	DriverID  string  `json:"driverId" avro:"driverId"`
+	Lat       float64 `json:"lat" avro:"lat"`
+	Lng       float64 `json:"lng" avro:"lng"`
+	Timestamp string  `json:"timestamp" avro:"timestamp"`
 }
 
 type TripStatusChanged struct {
 	Envelope
-	TripID   string     `json:"tripId"`
-	OrderID  string     `json:"orderId"`
-	DriverID string     `json:"driverId"`
-	Status   TripStatus `json:"status"`
+	TripID   string     `json:"tripId" avro:"tripId"`
+	OrderID  string     `json:"orderId" avro:"orderId"`
+	DriverID string     `json:"driverId" avro:"driverId"`
+	Status   TripStatus `json:"status" avro:"status"`
 }

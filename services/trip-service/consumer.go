@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconsumer"
 )
@@ -16,7 +16,7 @@ import (
 // runOrderMatchedConsumer implements task 2.1: for every order.matched
 // event, create a trip in ASSIGNED status. Deduping on eventId (US-6.1)
 // means a redelivered event is a safe no-op rather than a second trip.
-func runOrderMatchedConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
+func runOrderMatchedConsumer(ctx context.Context, env Env, db *pgxpool.Pool, codec *eventcodec.Codec) {
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers:  env.KafkaBrokers,
 		GroupID:  "trip-service-group",
@@ -24,7 +24,7 @@ func runOrderMatchedConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 		LogLabel: "[trip-service]",
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.OrderMatched
-		if err := json.Unmarshal(msg.Value, &evt); err != nil {
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
 		return handleOrderMatched(ctx, db, evt)

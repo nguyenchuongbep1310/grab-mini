@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 )
 
@@ -30,6 +31,7 @@ func isValidLatLng(p *events.LatLng) bool {
 type server struct {
 	db       *pgxpool.Pool
 	producer *kafka.Writer
+	codec    *eventcodec.Codec
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -53,17 +55,6 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	orderID := uuid.NewString()
 	ctx := r.Context()
 
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')`,
-		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng,
-	)
-	if err != nil {
-		log.Printf("failed to insert order: %v", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-		return
-	}
-
 	event := events.OrderCreated{
 		Envelope: events.Envelope{
 			EventID:    uuid.NewString(),
@@ -74,7 +65,26 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Pickup:  *req.Pickup,
 		Dropoff: *req.Dropoff,
 	}
-	payload, _ := json.Marshal(event)
+
+	// Encode before touching the database: if the schema registry is down
+	// or rejects the schema, no order row is left behind without an event.
+	payload, err := s.codec.Encode(ctx, events.TopicOrderCreated, event)
+	if err != nil {
+		log.Printf("failed to encode order.created: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	_, err = s.db.Exec(ctx, `
+		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'PENDING')`,
+		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng,
+	)
+	if err != nil {
+		log.Printf("failed to insert order: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
 
 	err = s.producer.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(orderID),
@@ -146,7 +156,7 @@ func main() {
 	}
 	defer producer.Close()
 
-	s := &server{db: db, producer: producer}
+	s := &server{db: db, producer: producer, codec: eventcodec.New(env.SchemaRegistryURL)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)

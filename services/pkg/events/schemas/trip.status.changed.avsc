@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "TripStatusChanged",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "tripId", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "driverId", "type": "string"},
+    {"name": "status", "type": "string"}
+  ]
+}

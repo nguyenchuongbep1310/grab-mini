@@ -76,6 +76,7 @@ docker compose up -d
 wait_for "Kafka" healthy grab-mini-kafka
 wait_for "Postgres" healthy grab-mini-postgres
 wait_for "Redis" healthy grab-mini-redis
+wait_for "Schema Registry" healthy grab-mini-schema-registry
 wait_for "topics" topics_ready
 
 echo "Building Go services..."

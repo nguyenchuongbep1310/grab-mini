@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"os"
 	"time"
@@ -11,13 +10,15 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/driverstatus"
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconsumer"
 )
 
 // matchOrder implements US-2.1: try to match, retrying for a bounded
 // time before giving up and reporting no_driver_found.
-func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka.Writer, order events.OrderCreated) error {
+func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka.Writer, codec *eventcodec.Codec, order events.OrderCreated) error {
 	var driverID string
 	var err error
 
@@ -42,12 +43,23 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka
 			OrderID:  order.OrderID,
 			DriverID: driverID,
 		}
-		payload, _ := json.Marshal(event)
-		if err := producer.WriteMessages(ctx, kafka.Message{
-			Topic: events.TopicOrderMatched,
-			Key:   []byte(order.OrderID),
-			Value: payload,
-		}); err != nil {
+		publish := func() error {
+			payload, err := codec.Encode(ctx, events.TopicOrderMatched, event)
+			if err != nil {
+				return err
+			}
+			return producer.WriteMessages(ctx, kafka.Message{
+				Topic: events.TopicOrderMatched,
+				Key:   []byte(order.OrderID),
+				Value: payload,
+			})
+		}
+		if err := publish(); err != nil {
+			// The driver is already claimed. Hand them back, or a retry
+			// would claim a second driver and this one stays ASSIGNED forever.
+			if relErr := driverstatus.Set(ctx, rdb, driverID, driverstatus.Available); relErr != nil {
+				log.Printf("[%s] failed to release driver=%s after publish error: %v", env.InstanceID, driverID, relErr)
+			}
 			return err
 		}
 		log.Printf("[%s] matched order=%s -> driver=%s", env.InstanceID, order.OrderID, driverID)
@@ -58,7 +70,10 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer *kafka
 		Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: now},
 		OrderID:  order.OrderID,
 	}
-	payload, _ := json.Marshal(event)
+	payload, err := codec.Encode(ctx, events.TopicOrderNoDriverFound, event)
+	if err != nil {
+		return err
+	}
 	if err := producer.WriteMessages(ctx, kafka.Message{
 		Topic: events.TopicOrderNoDriverFound,
 		Key:   []byte(order.OrderID),
@@ -82,6 +97,8 @@ func runConsumer(env Env) {
 	}
 	defer producer.Close()
 
+	codec := eventcodec.New(env.SchemaRegistryURL)
+
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers:  env.KafkaBrokers,
 		GroupID:  "matching-service-group",
@@ -89,10 +106,10 @@ func runConsumer(env Env) {
 		LogLabel: "[" + env.InstanceID + "]",
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var order events.OrderCreated
-		if err := json.Unmarshal(msg.Value, &order); err != nil {
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &order); err != nil {
 			return err
 		}
-		return matchOrder(ctx, env, rdb, producer, order)
+		return matchOrder(ctx, env, rdb, producer, codec, order)
 	})
 }
 

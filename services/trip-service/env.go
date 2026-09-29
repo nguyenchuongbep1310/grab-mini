@@ -3,18 +3,20 @@ package main
 import "os"
 
 type Env struct {
-	Port         string
-	DatabaseURL  string
-	KafkaBrokers []string
-	RedisAddr    string
+	SchemaRegistryURL string
+	Port              string
+	DatabaseURL       string
+	KafkaBrokers      []string
+	RedisAddr         string
 }
 
 func loadEnv() Env {
 	return Env{
-		Port:         getEnv("PORT", "3002"),
-		DatabaseURL:  getEnv("DATABASE_URL", "postgres://grabmini:grabmini@localhost:5432/grabmini"),
-		KafkaBrokers: []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
-		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
+		SchemaRegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+		Port:              getEnv("PORT", "3002"),
+		DatabaseURL:       getEnv("DATABASE_URL", "postgres://grabmini:grabmini@localhost:5432/grabmini"),
+		KafkaBrokers:      []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
+		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
 	}
 }
 

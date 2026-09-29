@@ -49,16 +49,40 @@ services:
             --topic $$topic --partitions 3 --replication-factor 1
         done
 
+  # Every event is Avro; producers register their schema here and consumers
+  # fetch the writer's schema by id (see services/pkg/eventcodec).
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    container_name: grab-mini-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:19092
+      # The default of 3 can't be satisfied by a single-broker cluster.
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/subjects || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: grab-mini-kafka-ui
     depends_on:
       - kafka
+      - schema-registry
     ports:
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: grab-mini
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
 
   postgres:
     image: postgres:16-alpine

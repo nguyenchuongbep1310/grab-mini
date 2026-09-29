@@ -2,7 +2,7 @@
 
 A mini ride-booking app (think Grab) built to learn three things by building them: **Kafka** (event streaming), **Go**, and a **design system**.
 
-A rider books a ride, a matching service finds the nearest driver, a trip runs through its lifecycle, and both apps update in real time. Every step between services is a Kafka event.
+A rider books a ride, a matching service finds the nearest driver, a trip runs through its lifecycle, and both apps update in real time. Every step between services is a Kafka event, serialized as Avro and validated against a schema in Schema Registry.
 
 ```
 Rider App ──POST──> Order Service ──> [order.created] ──> Matching Service ──> [order.matched] ──┬──> Trip Service ──> [trip.status.changed] ──┐
@@ -21,13 +21,14 @@ pnpm install
 pnpm dev:all
 ```
 
-`pnpm dev:all` (which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra, waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts both apps. When it prints `grab-mini is up`:
+`pnpm dev:all` (which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra (Kafka, Schema Registry, Postgres, Redis, Kafka UI), waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts both apps. When it prints `grab-mini is up`:
 
 | What | URL |
 |---|---|
 | Rider App | http://localhost:5171 |
 | Driver App | http://localhost:5172/?driver=driver-1 |
 | Kafka UI | http://localhost:8080 |
+| Schema Registry | http://localhost:8081/subjects |
 
 Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log`. Use `scripts/dev.sh --reset` to wipe Kafka, Postgres and Redis data first, and `docker compose down` to stop the infra.
 
@@ -45,8 +46,9 @@ The map background comes from OpenStreetMap tiles, so it needs internet access; 
 
 Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a ride:
 
-- **Topics**: `order.created`, `order.matched`, `order.no_driver_found`, `trip.status.changed` and `driver.location.updated`, each with 3 partitions. Open a topic's **Messages** tab to see the JSON events. `driver.location.updated` grows every few seconds.
+- **Topics**: `order.created`, `order.matched`, `order.no_driver_found`, `trip.status.changed` and `driver.location.updated`, each with 3 partitions. Open a topic's **Messages** tab: Kafka UI decodes the Avro values through Schema Registry, so you see JSON. `driver.location.updated` grows every few seconds.
 - **Partition keys**: messages for one order (or one driver) always land in the same partition, which keeps their order. Compare the **Partition** column across messages.
+- **Schema Registry** (menu item in Kafka UI, or `curl localhost:8081/subjects`): one subject per topic (`order.created-value`, ...), each holding the Avro schema producers registered.
 - **Consumers**: one consumer group per service (`matching-service-group`, `trip-service-group`, `driver-location-service-group`, `notification-service-group`). Each reads every event on its topics independently. Check **lag** here: it stays at or near 0 (a message or two in flight on `driver.location.updated` while the simulator publishes; `N/A` just means a group hasn't committed an offset on that topic yet).
 
 ## Things to try
@@ -56,9 +58,16 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
   cd services/matching-service && INSTANCE_ID=matching-B go run .
   ```
   The **Consumers** tab in Kafka UI shows the partition assignment change.
-- **Send a poison message and watch it land in a dead-letter topic.** Publish an event the Driver Location Service can't process; it retries 3 times (2s apart), then gives up and publishes to `driver.location.updated.DLQ` with the error and original payload attached:
+- **Send a message that isn't Avro** and watch it land in a dead-letter topic. A hand-published JSON message has no Schema Registry header, so the Driver Location Service can't decode it. Decoding errors are permanent, so it skips the retries and publishes straight to `driver.location.updated.DLQ`, with the original bytes (`valueBase64`, plus a readable `valueText`) and the error attached. (Transient failures, like Redis being down, are retried 3 times, 2s apart, before dead-lettering.)
   ```bash
-  docker exec grab-mini-kafka bash -c 'echo "{\"eventId\":\"$(uuidgen)\",\"occurredAt\":\"2026-01-01T00:00:00Z\",\"driverId\":\"driver-99\",\"lat\":1.0,\"lng\":1.0,\"timestamp\":\"NOT-A-VALID-TIMESTAMP\"}" | /opt/kafka/bin/kafka-console-producer.sh --topic driver.location.updated --bootstrap-server localhost:9092'
+  docker exec grab-mini-kafka bash -c 'echo "{\"driverId\":\"driver-99\"}" | /opt/kafka/bin/kafka-console-producer.sh --topic driver.location.updated --bootstrap-server localhost:9092'
+  docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --topic driver.location.updated.DLQ --bootstrap-server localhost:9092 --from-beginning
+  ```
+- **Try to register an incompatible schema.** Schema Registry runs in `BACKWARD` mode: a new schema must be able to read data written with the old one. Adding a field *without* a default breaks that, so it's rejected (HTTP 409); with a default it's fine:
+  ```bash
+  # rejected: "vehicle" has no default
+  curl -s -X POST localhost:8081/subjects/order.matched-value/versions -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+    -d '{"schema":"{\"type\":\"record\",\"name\":\"OrderMatched\",\"namespace\":\"grabmini.events\",\"fields\":[{\"name\":\"eventId\",\"type\":\"string\"},{\"name\":\"occurredAt\",\"type\":\"string\"},{\"name\":\"orderId\",\"type\":\"string\"},{\"name\":\"driverId\",\"type\":\"string\"},{\"name\":\"vehicle\",\"type\":\"string\"}]}"}'
   ```
 - **Replay an old location** (US-3.1). Publish a `driver.location.updated` with a `timestamp` in the past. The Driver Location Service logs `discarded as out-of-order` and the driver's position doesn't move.
 - **Make every driver busy** and book a ride, to see `order.no_driver_found`:
@@ -78,7 +87,7 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
 | Notification Service | 3003 | all of the above | | in-memory WebSocket connections |
 | `driver-app-sim` | | | `driver.location.updated` | |
 
-Every consumer runs through [services/pkg/kafkaconsumer](services/pkg/kafkaconsumer): retry, then dead-letter topic, and uniform logging of topic/partition/offset. Duplicate events are harmless (dedupe by `eventId`, idempotent state transitions).
+Every consumer runs through [services/pkg/kafkaconsumer](services/pkg/kafkaconsumer): retry, then dead-letter topic, and uniform logging of topic/partition/offset. Every producer and consumer encodes and decodes through [services/pkg/eventcodec](services/pkg/eventcodec) (Avro plus the Schema Registry wire format); the schemas live in [services/pkg/events/schemas](services/pkg/events/schemas). Duplicate events are harmless (dedupe by `eventId`, idempotent state transitions).
 
 `driver-app-sim` publishes the drivers' locations because a browser can't produce to Kafka directly; the Driver App only displays its position.
 
@@ -119,7 +128,8 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 
 **Backend**, a Go workspace ([go.work](go.work)) with one module per service:
 - `services/*-service`, `services/driver-app-sim`
-- `services/pkg/events`: Kafka event types and topic names
+- `services/pkg/events`: Kafka event types, topic names and the Avro schemas (`schemas/*.avsc`)
+- `services/pkg/eventcodec`: Avro encode/decode with Schema Registry (registers schemas, resolves writer vs reader schema)
 - `services/pkg/kafkaconsumer`: the retry + dead-letter consumer loop
 - `services/pkg/driverstatus`: the Redis driver-status key and its atomic claim
 - `services/pkg/driverlocation`: the Redis GEO key and the out-of-order-safe location update
@@ -137,7 +147,7 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3001-3003, 5171-5172, 5432, 6379, 8080, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3001-3003, 5171-5172, 5432, 6379, 8080, 8081, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The driver app shows no trip**: it must be open, as the matched driver, when the trip is assigned. Reload doesn't recover an in-flight trip.
 - **Start from scratch**: `scripts/dev.sh --reset`.

@@ -1,0 +1,11 @@
+{
+  "type": "record",
+  "name": "OrderMatched",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "driverId", "type": "string"}
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "OrderCreated",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string"},
+    {"name": "pickup", "type": {
+      "type": "record", "name": "LatLng",
+      "fields": [{"name": "lat", "type": "double"}, {"name": "lng", "type": "double"}]
+    }},
+    {"name": "dropoff", "type": "LatLng"}
+  ]
+}

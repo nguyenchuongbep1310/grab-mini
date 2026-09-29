@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"math/rand"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 )
 
@@ -65,7 +65,7 @@ func randomWalk(d *simDriver) {
 	d.Lng += (rand.Float64()*2 - 1) * stepDegrees
 }
 
-func simulateDriver(ctx context.Context, wg *sync.WaitGroup, producer *kafka.Writer, d simDriver) {
+func simulateDriver(ctx context.Context, wg *sync.WaitGroup, producer *kafka.Writer, codec *eventcodec.Codec, d simDriver) {
 	defer wg.Done()
 
 	for {
@@ -78,12 +78,11 @@ func simulateDriver(ctx context.Context, wg *sync.WaitGroup, producer *kafka.Wri
 			Lng:       d.Lng,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 		}
-		payload, _ := json.Marshal(event)
-
-		if err := producer.WriteMessages(ctx, kafka.Message{
-			Key:   []byte(d.ID),
-			Value: payload,
-		}); err != nil {
+		payload, err := codec.Encode(ctx, events.TopicDriverLocationUpdate, event)
+		if err == nil {
+			err = producer.WriteMessages(ctx, kafka.Message{Key: []byte(d.ID), Value: payload})
+		}
+		if err != nil {
 			log.Printf("driver=%s failed to publish location: %v", d.ID, err)
 		} else {
 			log.Printf("driver=%s lat=%.5f lng=%.5f published", d.ID, d.Lat, d.Lng)
@@ -113,11 +112,13 @@ func main() {
 
 	log.Printf("driver-app-sim publishing for %d driver(s): %v", len(drivers), driverIDs(drivers))
 
+	codec := eventcodec.New(getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"))
+
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	for _, d := range drivers {
 		wg.Add(1)
-		go simulateDriver(ctx, &wg, producer, d)
+		go simulateDriver(ctx, &wg, producer, codec, d)
 	}
 	wg.Wait()
 }

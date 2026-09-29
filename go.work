@@ -8,6 +8,7 @@ use (
 	./services/order-service
 	./services/pkg/driverlocation
 	./services/pkg/driverstatus
+	./services/pkg/eventcodec
 	./services/pkg/events
 	./services/pkg/kafkaconsumer
 	./services/trip-service

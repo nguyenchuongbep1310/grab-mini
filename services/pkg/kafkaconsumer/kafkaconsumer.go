@@ -6,13 +6,24 @@ package kafkaconsumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"time"
+	"unicode/utf8"
 
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
 )
+
+// permanent is implemented by errors that retrying can't fix (see
+// eventcodec.DecodeError). A handler returning one skips the retries.
+type permanent interface{ Permanent() bool }
+
+func isPermanent(err error) bool {
+	var p permanent
+	return errors.As(err, &p) && p.Permanent()
+}
 
 // Handler processes one Kafka message. Returning an error triggers a
 // retry, and eventually (after MaxRetries) publishing to the topic's
@@ -98,6 +109,10 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 			}
 			log.Printf("%s attempt %d/%d failed topic=%s partition=%d offset=%d: %v",
 				label, attempt+1, maxRetries+1, msg.Topic, msg.Partition, msg.Offset, handleErr)
+			if isPermanent(handleErr) {
+				log.Printf("%s not retrying: the error is permanent", label)
+				break
+			}
 		}
 
 		if handleErr != nil {
@@ -110,24 +125,45 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 	}
 }
 
+// dlqEnvelope wraps a message that couldn't be processed. Values are Avro
+// (binary), not JSON, so the original bytes travel base64-encoded (that's
+// what encoding/json does for []byte); valueText is a readable copy when
+// the bytes happen to be text, e.g. a hand-published JSON message.
 type dlqEnvelope struct {
-	OriginalTopic     string          `json:"originalTopic"`
-	OriginalPartition int             `json:"originalPartition"`
-	OriginalOffset    int64           `json:"originalOffset"`
-	Error             string          `json:"error"`
-	Value             json.RawMessage `json:"value"`
+	OriginalTopic     string `json:"originalTopic"`
+	OriginalPartition int    `json:"originalPartition"`
+	OriginalOffset    int64  `json:"originalOffset"`
+	Error             string `json:"error"`
+	ValueBase64       []byte `json:"valueBase64"`
+	ValueText         string `json:"valueText,omitempty"`
+}
+
+func printable(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r < 0x20 && r != '\n' && r != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause error, label string) {
 	dlqTopic := events.DeadLetterTopic(msg.Topic)
 
-	payload, err := json.Marshal(dlqEnvelope{
+	envelope := dlqEnvelope{
 		OriginalTopic:     msg.Topic,
 		OriginalPartition: msg.Partition,
 		OriginalOffset:    msg.Offset,
 		Error:             cause.Error(),
-		Value:             msg.Value,
-	})
+		ValueBase64:       msg.Value,
+	}
+	if printable(msg.Value) {
+		envelope.ValueText = string(msg.Value)
+	}
+	payload, err := json.Marshal(envelope)
 	if err != nil {
 		log.Printf("%s failed to marshal DLQ envelope: %v", label, err)
 		return
@@ -147,5 +183,5 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 		log.Printf("%s failed to publish to %s: %v", label, dlqTopic, err)
 		return
 	}
-	log.Printf("%s gave up after retries, published to %s (partition=%d offset=%d)", label, dlqTopic, msg.Partition, msg.Offset)
+	log.Printf("%s giving up on the message, published to %s (partition=%d offset=%d)", label, dlqTopic, msg.Partition, msg.Offset)
 }
