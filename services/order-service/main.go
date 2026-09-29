@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
@@ -89,6 +91,43 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"orderId": orderID, "status": "PENDING"})
 }
 
+// handleGetOrder lets a client that only knows the orderId (e.g. the Driver
+// App after an order.matched push) find where the trip starts and ends.
+// The stored status is deliberately not returned: Order Service doesn't
+// consume order.matched, so it would stay PENDING forever.
+func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
+	// orders.id is a UUID column: a malformed id would surface as a
+	// Postgres error (500) instead of the "not found" it really is.
+	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
+		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
+		return
+	}
+
+	var (
+		riderID string
+		pickup  events.LatLng
+		dropoff events.LatLng
+	)
+	err := s.db.QueryRow(r.Context(),
+		`SELECT rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng FROM orders WHERE id = $1`,
+		r.PathValue("id"),
+	).Scan(&riderID, &pickup.Lat, &pickup.Lng, &dropoff.Lat, &dropoff.Lng)
+	if errors.Is(err, pgx.ErrNoRows) {
+		http.Error(w, `{"error":"order not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("failed to load order: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"id": r.PathValue("id"), "riderId": riderID, "pickup": pickup, "dropoff": dropoff,
+	})
+}
+
 func main() {
 	env := loadEnv()
 	ctx := context.Background()
@@ -112,6 +151,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /orders", s.handleCreateOrder)
+	mux.HandleFunc("GET /orders/{id}", s.handleGetOrder)
 
 	log.Printf("order-service listening on :%s", env.Port)
 	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {

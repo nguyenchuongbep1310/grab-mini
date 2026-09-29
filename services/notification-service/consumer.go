@@ -85,6 +85,8 @@ func handleMessage(h *hub, msg kafka.Message) error {
 		if riderID, ok := h.riderForDriver(evt.DriverID); ok {
 			h.pushToRider(riderID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
 		}
+		// Echo to the driver's own app so it can show where it is.
+		h.pushToDriver(evt.DriverID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
 
 	default:
 		return fmt.Errorf("unhandled topic %q", msg.Topic)

@@ -55,16 +55,25 @@ func markEventProcessed(ctx context.Context, db *pgxpool.Pool, eventID string) (
 }
 
 type trip struct {
-	ID       string
-	OrderID  string
-	DriverID string
-	Status   events.TripStatus
+	ID       string            `json:"id"`
+	OrderID  string            `json:"orderId"`
+	DriverID string            `json:"driverId"`
+	Status   events.TripStatus `json:"status"`
 }
 
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status FROM trips WHERE id = $1`, id)
+}
+
+// getTripByOrderID lets a client that only knows the orderId (e.g. from an
+// order.matched push) find the trip Trip Service created for it.
+func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status FROM trips WHERE order_id = $1`, orderID)
+}
+
+func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, `SELECT id, order_id, driver_id, status FROM trips WHERE id = $1`, id).
-		Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
 	}

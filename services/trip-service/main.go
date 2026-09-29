@@ -45,7 +45,15 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleGetTrip(w http.ResponseWriter, r *http.Request) {
-	t, err := getTripByID(r.Context(), s.db, r.PathValue("id"))
+	s.respondWithTrip(w, r, func() (*trip, error) { return getTripByID(r.Context(), s.db, r.PathValue("id")) })
+}
+
+func (s *server) handleGetTripByOrder(w http.ResponseWriter, r *http.Request) {
+	s.respondWithTrip(w, r, func() (*trip, error) { return getTripByOrderID(r.Context(), s.db, r.PathValue("orderId")) })
+}
+
+func (s *server) respondWithTrip(w http.ResponseWriter, r *http.Request, load func() (*trip, error)) {
+	t, err := load()
 	if errors.Is(err, errTripNotFound) {
 		http.Error(w, `{"error":"trip not found"}`, http.StatusNotFound)
 		return
@@ -175,6 +183,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /trips/{id}", s.handleGetTrip)
+	mux.HandleFunc("GET /trips/by-order/{orderId}", s.handleGetTripByOrder)
 	mux.HandleFunc("POST /trips/{id}/pickup", s.handlePickup)
 	mux.HandleFunc("POST /trips/{id}/complete", s.handleComplete)
 	mux.HandleFunc("POST /trips/{id}/cancel", s.handleCancel)
