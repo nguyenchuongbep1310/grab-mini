@@ -44,7 +44,7 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        for topic in order.created order.matched order.no_driver_found driver.location.updated trip.status.changed; do
+        for topic in order.created order.matched order.no_driver_found driver.location.updated trip.status.changed trip.rated; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists \
             --topic $$topic --partitions 3 --replication-factor 1
         done

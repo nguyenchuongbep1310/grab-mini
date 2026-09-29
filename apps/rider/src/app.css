@@ -34,3 +34,6 @@ body {
 .driver-row__badge { margin-left: auto; }
 
 .sheet-stack > .gm-badge { align-self: flex-start; }
+
+.rating-box { display: flex; flex-direction: column; align-items: center; gap: var(--gm-space-3); text-align: center; }
+.rating-box .gm-btn { margin-top: var(--gm-space-1); }

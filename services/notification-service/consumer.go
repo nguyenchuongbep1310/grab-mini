@@ -26,6 +26,7 @@ func runConsumer(ctx context.Context, env Env, h *hub) {
 			events.TopicOrderNoDriverFound,
 			events.TopicTripStatusChanged,
 			events.TopicDriverLocationUpdate,
+			events.TopicTripRated,
 		},
 		LogLabel: "[notification-service]",
 	}, func(ctx context.Context, msg kafka.Message) error {
@@ -89,6 +90,13 @@ func handleMessage(ctx context.Context, codec *eventcodec.Codec, h *hub, msg kaf
 		}
 		// Echo to the driver's own app so it can show where it is.
 		h.pushToDriver(evt.DriverID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
+
+	case events.TopicTripRated:
+		var evt events.TripRated
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		h.pushToDriver(evt.DriverID, message{Type: events.TopicTripRated, Payload: evt})
 
 	default:
 		return fmt.Errorf("unhandled topic %q", msg.Topic)

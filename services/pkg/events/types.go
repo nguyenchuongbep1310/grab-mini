@@ -87,3 +87,14 @@ type TripStatusChanged struct {
 	DriverID string     `json:"driverId" avro:"driverId"`
 	Status   TripStatus `json:"status" avro:"status"`
 }
+
+// TripRated is published once, when a rider rates a completed trip.
+type TripRated struct {
+	Envelope
+	TripID   string `json:"tripId" avro:"tripId"`
+	OrderID  string `json:"orderId" avro:"orderId"`
+	RiderID  string `json:"riderId" avro:"riderId"`
+	DriverID string `json:"driverId" avro:"driverId"`
+	Stars    int    `json:"stars" avro:"stars"`
+	Comment  string `json:"comment" avro:"comment"`
+}

@@ -80,7 +80,7 @@ wait_for "Schema Registry" healthy grab-mini-schema-registry
 wait_for "topics" topics_ready
 
 echo "Building Go services..."
-SERVICES="order-service matching-service trip-service driver-location-service notification-service driver-app-sim"
+SERVICES="order-service matching-service trip-service driver-location-service notification-service rating-service driver-app-sim"
 ROOT=$PWD
 for svc in $SERVICES; do
   (cd "services/$svc" && go build -o "$ROOT/$BIN/$svc" .)
@@ -98,6 +98,7 @@ start driver apps/driver pnpm dev
 wait_for "Order Service" curl -fs localhost:3001/health
 wait_for "Trip Service" curl -fs localhost:3002/health
 wait_for "Notification Service" curl -fs localhost:3003/health
+wait_for "Rating Service" curl -fs localhost:3004/health
 wait_for "Rider App" curl -fs localhost:5171
 wait_for "Driver App" curl -fs localhost:5172
 

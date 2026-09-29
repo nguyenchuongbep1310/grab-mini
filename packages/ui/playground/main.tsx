@@ -8,6 +8,7 @@ import {
   MapMarker,
   MapView,
   SegmentedControl,
+  StarRating,
   StatusBadge,
   ToastProvider,
   TripStatusTimeline,
@@ -38,6 +39,7 @@ function Gallery() {
   const toast = useToast();
   const [step, setStep] = useState("assigned");
   const [dark, setDark] = useState(false);
+  const [stars, setStars] = useState(0);
   const [vehicle, setVehicle] = useState<"CAR" | "BIKE">("CAR");
 
   useEffect(() => {
@@ -76,6 +78,21 @@ function Gallery() {
               ]}
             />
           </div>
+        </Section>
+
+        <Section title="StarRating">
+          <Card>
+            <div style={{ marginBottom: 8, fontSize: 13, color: "var(--gm-text-muted)" }}>Rate your driver</div>
+            <StarRating value={stars} onChange={setStars} size="lg" label="Rate your driver" />
+          </Card>
+          <Card>
+            <div style={{ marginBottom: 8, fontSize: 13, color: "var(--gm-text-muted)" }}>Average, read-only</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <StarRating value={4.7} label="Driver rating" />
+              <StarRating value={3.2} size="sm" label="Driver rating" />
+              <StarRating value={0} size="sm" label="Driver rating" />
+            </div>
+          </Card>
         </Section>
 
         <Section title="StatusBadge">

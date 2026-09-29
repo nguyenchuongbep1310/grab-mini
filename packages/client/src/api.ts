@@ -6,6 +6,7 @@ export type { VehicleType };
 // vite.config.ts), so the browser only ever talks to its own origin.
 const ORDER_API = "/order-api";
 const TRIP_API = "/trip-api";
+const RATING_API = "/rating-api";
 
 export interface LatLng {
   lat: number;
@@ -25,6 +26,15 @@ export interface Trip {
   orderId: string;
   driverId: string;
   status: TripStatus;
+  /** Stars the rider gave, once they have. */
+  rating?: number;
+}
+
+export interface DriverRating {
+  driverId: string;
+  /** Mean of all ratings, or 0 when there are none. */
+  average: number;
+  count: number;
 }
 
 export class ApiError extends Error {
@@ -84,4 +94,16 @@ export type TripAction = "pickup" | "complete" | "cancel";
 
 export function tripAction(tripId: string, action: TripAction): Promise<{ tripId: string; status: TripStatus }> {
   return request(`${TRIP_API}/trips/${tripId}/${action}`, { method: "POST" });
+}
+
+export function rateTrip(tripId: string, riderId: string, stars: number, comment = ""): Promise<{ tripId: string; stars: number }> {
+  return request(`${TRIP_API}/trips/${tripId}/rating`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ riderId, stars, comment }),
+  });
+}
+
+export function getDriverRating(driverId: string): Promise<DriverRating> {
+  return request(`${RATING_API}/drivers/${driverId}/rating`);
 }

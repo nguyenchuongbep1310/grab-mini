@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Avatar,
   BottomSheet,
@@ -6,16 +6,19 @@ import {
   Card,
   MapMarker,
   MapView,
+  StarRating,
   StatusBadge,
   TripStatusTimeline,
   useToast,
   type LatLngTuple,
 } from "@grab-mini/ui";
 import {
+  getDriverRating,
   getOrder,
   tripAction,
   useNotificationSocket,
   waitForTripByOrder,
+  type DriverRating,
   type TripAction,
 } from "@grab-mini/client";
 import { useDriverTrip, type Phase } from "./useDriverTrip";
@@ -49,9 +52,22 @@ export function App() {
   const toast = useToast();
   const [state, dispatch] = useDriverTrip();
   const [pending, setPending] = useState<TripAction | null>(null);
-  const socket = useNotificationSocket("driver", driverId, (message) =>
-    dispatch({ type: "notification", message, driverId }),
-  );
+  const [rating, setRating] = useState<DriverRating | null>(null);
+
+  const refreshRating = useCallback(() => {
+    getDriverRating(driverId).then(setRating).catch(() => {});
+  }, []);
+  useEffect(refreshRating, [refreshRating]);
+
+  const socket = useNotificationSocket("driver", driverId, (message) => {
+    if (message.type === "trip.rated") {
+      toast.show(`${message.payload.stars}-star rating from ${message.payload.riderId}`, "success");
+      // Rating Service updates its totals asynchronously, so give it a moment.
+      setTimeout(refreshRating, 800);
+      return;
+    }
+    dispatch({ type: "notification", message, driverId });
+  });
 
   // order.matched carries neither the tripId nor the route, so fetch both.
   const { phase, orderId, tripId, order } = state;
@@ -137,6 +153,14 @@ export function App() {
                 </p>
               </div>
               <StatusBadge status="AVAILABLE" />
+              {rating && (
+                <div className="rating-line">
+                  <StarRating value={rating.average} size="sm" label="Your rating" />
+                  <span>
+                    {rating.count > 0 ? `${rating.average.toFixed(2)} · ${rating.count} ${rating.count === 1 ? "rating" : "ratings"}` : "No ratings yet"}
+                  </span>
+                </div>
+              )}
             </>
           )}
 

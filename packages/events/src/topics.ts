@@ -4,6 +4,7 @@ export const Topics = {
   OrderNoDriverFound: "order.no_driver_found",
   DriverLocationUpdated: "driver.location.updated",
   TripStatusChanged: "trip.status.changed",
+  TripRated: "trip.rated",
 } as const;
 
 export type Topic = (typeof Topics)[keyof typeof Topics];

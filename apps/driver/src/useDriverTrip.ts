@@ -63,6 +63,8 @@ function reduce(state: DriverState, action: Action): DriverState {
           return { ...state, ...patch };
         }
         case "order.no_driver_found":
+        case "trip.rated":
+          // Not part of the trip flow (the app reacts to ratings separately).
           return state;
       }
     }

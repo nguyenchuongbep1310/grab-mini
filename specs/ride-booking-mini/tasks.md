@@ -56,7 +56,7 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 7.2 Write a README describing how to run locally (docker compose up, seed data, run each app) — plus `pnpm dev:all` / `scripts/dev.sh` to do all of it in one command, and Docker Compose now creates the topics and keeps them across restarts
 
 ## Backlog (after core is done, explore as interested)
-- [ ] Post-trip rating/feedback
+- [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
 - [x] Multiple vehicle types (car/bike) affecting matching — `vehicleType` as Avro schema v2 (defaulted), vehicle-aware atomic claim, `SegmentedControl` in the design system
 - [ ] Kafka Streams/ksqlDB for analytics instead of manual consumers
 - [x] Schema Registry (Avro/Protobuf) instead of plain JSON — learn schema evolution (Avro; `services/pkg/eventcodec`)

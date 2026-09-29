@@ -7,12 +7,13 @@ import {
   MapMarker,
   MapView,
   SegmentedControl,
+  StarRating,
   StatusBadge,
   TripStatusTimeline,
   useToast,
   type LatLngTuple,
 } from "@grab-mini/ui";
-import { createOrder, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
+import { createOrder, rateTrip, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
 import { useRide, type Phase } from "./useRide";
 
 // Fixed pickup near the seeded drivers (central Ho Chi Minh City).
@@ -49,6 +50,9 @@ export function App() {
   const toast = useToast();
   const [ride, dispatch] = useRide();
   const [cancelling, setCancelling] = useState(false);
+  const [stars, setStars] = useState(0);
+  const [rated, setRated] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const socket = useNotificationSocket("rider", riderId, (message) => dispatch({ type: "notification", message }));
 
   // order.matched carries no tripId; look the trip up once the driver is assigned.
@@ -84,6 +88,26 @@ export function App() {
       dispatch({ type: "bookFailed" });
       toast.show(err instanceof Error ? err.message : "Couldn't book the ride", "error");
     }
+  };
+
+  const submitRating = async () => {
+    if (!tripId || stars === 0) return;
+    setSubmitting(true);
+    try {
+      await rateTrip(tripId, riderId, stars);
+      setRated(true);
+      toast.show("Thanks for your feedback!", "success");
+    } catch (err) {
+      toast.show(err instanceof Error ? err.message : "Couldn't send your rating", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const newRide = () => {
+    setStars(0);
+    setRated(false);
+    dispatch({ type: "reset" });
   };
 
   const cancel = async () => {
@@ -191,8 +215,27 @@ export function App() {
                 Cancel trip
               </Button>
             )}
+            {phase === "completed" && (
+              <Card padding="sm">
+                <div className="rating-box">
+                  <div className="driver-row__name">{rated ? "Your rating" : `How was your ride with ${driverId}?`}</div>
+                  <StarRating
+                    value={stars}
+                    size="lg"
+                    label="Rate your driver"
+                    onChange={rated ? undefined : setStars}
+                    disabled={submitting}
+                  />
+                  {!rated && (
+                    <Button block loading={submitting} disabled={stars === 0 || !tripId} onClick={submitRating}>
+                      Submit rating
+                    </Button>
+                  )}
+                </div>
+              </Card>
+            )}
             {finished && (
-              <Button block onClick={() => dispatch({ type: "reset" })}>
+              <Button block variant={phase === "completed" && !rated ? "secondary" : "primary"} onClick={newRide}>
                 New ride
               </Button>
             )}

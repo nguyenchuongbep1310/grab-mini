@@ -207,3 +207,26 @@
 }
 .gm-segmented__label { font-weight: 600; font-size: var(--gm-text-md); }
 .gm-segmented__hint { font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
+
+/* ---------- StarRating ---------- */
+.gm-stars { display: inline-flex; line-height: 1; font-family: var(--gm-font); }
+.gm-stars--sm { font-size: 14px; }
+.gm-stars--md { font-size: 20px; }
+.gm-stars--lg { font-size: 36px; gap: 4px; }
+
+.gm-stars__star {
+  background: none; border: 0; padding: 2px; cursor: pointer;
+  font: inherit; color: var(--gm-border);
+  transition: color 0.1s, transform 0.1s;
+}
+.gm-stars__star--on { color: var(--gm-warning); }
+.gm-stars__star:hover:not(:disabled) { transform: scale(1.12); }
+.gm-stars__star:focus-visible { outline: none; box-shadow: var(--gm-focus-ring); border-radius: var(--gm-radius-sm); }
+.gm-stars__star:disabled { cursor: default; }
+
+.gm-stars--readonly { position: relative; letter-spacing: 1px; }
+.gm-stars__track { color: var(--gm-border); }
+.gm-stars__fill {
+  position: absolute; left: 0; top: 0; overflow: hidden; white-space: nowrap;
+  color: var(--gm-warning);
+}

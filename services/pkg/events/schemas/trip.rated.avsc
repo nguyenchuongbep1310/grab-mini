@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "TripRated",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "tripId", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string"},
+    {"name": "driverId", "type": "string"},
+    {"name": "stars", "type": "int"},
+    {"name": "comment", "type": "string", "default": ""}
+  ]
+}

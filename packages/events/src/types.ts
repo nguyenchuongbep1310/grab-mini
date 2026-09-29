@@ -41,3 +41,13 @@ export interface TripStatusChanged extends EventEnvelope {
   driverId: string;
   status: TripStatus;
 }
+
+export interface TripRated extends EventEnvelope {
+  tripId: string;
+  orderId: string;
+  riderId: string;
+  driverId: string;
+  /** 1 to 5. */
+  stars: number;
+  comment: string;
+}

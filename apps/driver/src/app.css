@@ -40,3 +40,5 @@ body {
 .btn-row > * { flex: 1; }
 
 .sheet-stack > .gm-badge { align-self: flex-start; }
+
+.rating-line { display: flex; align-items: center; gap: var(--gm-space-2); font-size: var(--gm-text-sm); color: var(--gm-text-muted); }

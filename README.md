@@ -37,8 +37,9 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**.
 2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
 3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. A driver only receives a trip while their app is open. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
+4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. The driver's app shows a toast and their updated average.
 
-Also try: booking a bike (only `driver-4`/`driver-5` can take it), **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
+Also try: rating a trip twice (the second is rejected), booking a bike (only `driver-4`/`driver-5` can take it), **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
 
 The map background comes from OpenStreetMap tiles, so it needs internet access; markers work without it.
 
@@ -70,6 +71,13 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
   curl -s -X POST localhost:8081/subjects/order.matched-value/versions -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
     -d '{"schema":"{\"type\":\"record\",\"name\":\"OrderMatched\",\"namespace\":\"grabmini.events\",\"fields\":[{\"name\":\"eventId\",\"type\":\"string\"},{\"name\":\"occurredAt\",\"type\":\"string\"},{\"name\":\"orderId\",\"type\":\"string\"},{\"name\":\"driverId\",\"type\":\"string\"},{\"name\":\"vehicle\",\"type\":\"string\"}]}"}'
   ```
+- **Replay a topic and see nothing counted twice.** Ratings are averaged per driver from `trip.rated`, deduplicated by `eventId` in the same transaction as the update. Stop the Rating Service, rewind its consumer group, start it again, and the events are read again but the average doesn't change (`duplicate trip.rated event ..., skipping` in its log):
+  ```bash
+  pkill -f .dev/bin/rating-service   # then wait a few seconds for the group to go idle
+  docker exec grab-mini-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+    --group rating-service-group --reset-offsets --to-earliest --topic trip.rated --execute
+  cd services/rating-service && go run .
+  ```
 - **Replay an old location** (US-3.1). Publish a `driver.location.updated` with a `timestamp` in the past. The Driver Location Service logs `discarded as out-of-order` and the driver's position doesn't move.
 - **Make every driver busy** and book a ride, to see `order.no_driver_found`:
   ```bash
@@ -83,8 +91,9 @@ Open [Kafka UI](http://localhost:8080), cluster **grab-mini**, while you take a 
 |---|---|---|---|---|
 | Order Service | 3001 | | `order.created` | Postgres |
 | Matching Service | | `order.created` | `order.matched`, `order.no_driver_found` | Redis (driver status + GEO) |
-| Trip Service | 3002 | `order.matched` | `trip.status.changed` | Postgres, Redis (releases drivers) |
+| Trip Service | 3002 | `order.matched` | `trip.status.changed`, `trip.rated` | Postgres, Redis (releases drivers) |
 | Driver Location Service | | `driver.location.updated` | | Redis GEO |
+| Rating Service | 3004 | `trip.rated` | | Postgres (per-driver totals) |
 | Notification Service | 3003 | all of the above | | in-memory WebSocket connections |
 | `driver-app-sim` | | | `driver.location.updated` | |
 
@@ -113,6 +122,11 @@ curl localhost:3002/trips/<tripId>
 curl -X POST localhost:3002/trips/<tripId>/pickup     # ASSIGNED -> IN_PROGRESS
 curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED, driver becomes AVAILABLE
 curl -X POST localhost:3002/trips/<tripId>/cancel     # from ASSIGNED or IN_PROGRESS; 409 once COMPLETED
+curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/json" \
+  -d '{"riderId": "rider-1", "stars": 5, "comment": "Smooth ride"}'   # COMPLETED trips only, once (409 otherwise)
+
+# Rating Service
+curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count": 3}
 ```
 
 Repeating `pickup` or `complete` is a no-op. The WebSocket is `ws://localhost:3003/ws/rider/<id>` or `/ws/driver/<id>`, pushing `{"type": "...", "payload": {...}}`.
@@ -129,7 +143,7 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 ## Repository layout
 
 **Backend**, a Go workspace ([go.work](go.work)) with one module per service:
-- `services/*-service`, `services/driver-app-sim`
+- `services/*-service` (order, matching, trip, driver-location, notification, rating), `services/driver-app-sim`
 - `services/pkg/events`: Kafka event types, topic names and the Avro schemas (`schemas/*.avsc`)
 - `services/pkg/eventcodec`: Avro encode/decode with Schema Registry (registers schemas, resolves writer vs reader schema)
 - `services/pkg/kafkaconsumer`: the retry + dead-letter consumer loop
@@ -149,7 +163,7 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3001-3003, 5171-5172, 5432, 6379, 8080, 8081, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3001-3004, 5171-5172, 5432, 6379, 8080, 8081, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The driver app shows no trip**: it must be open, as the matched driver, when the trip is assigned. Reload doesn't recover an in-flight trip.
 - **Start from scratch**: `scripts/dev.sh --reset`.

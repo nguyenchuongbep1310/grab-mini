@@ -112,6 +112,7 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 		events.TopicOrderNoDriverFound:   &events.OrderNoDriverFound{OrderID: "o"},
 		events.TopicDriverLocationUpdate: &events.DriverLocationUpdated{DriverID: "d", Lat: 1, Lng: 2, Timestamp: "t"},
 		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
+		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great"},
 	}
 	for topic, in := range cases {
 		data, err := c.Encode(ctx, topic, in)

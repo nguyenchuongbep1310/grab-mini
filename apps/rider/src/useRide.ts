@@ -124,6 +124,9 @@ function reduce(state: RideState, action: Action): RideState {
           if (status === "CANCELLED") return moveTo(state, "cancelled", patch);
           return moveTo(state, "assigned", patch);
         }
+        case "trip.rated":
+          // Ratings are only pushed to the driver.
+          return state;
       }
     }
   }

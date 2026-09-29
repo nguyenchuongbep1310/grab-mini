@@ -32,6 +32,11 @@ func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 
 		-- US-6.1: dedupe table so a redelivered Kafka event never creates a
 		-- second trip for the same order.matched event.
+		-- Ratings arrived after the first release, hence ALTER rather than CREATE.
+		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating INT;
+		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating_comment TEXT;
+		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rated_at TIMESTAMPTZ;
+
 		CREATE TABLE IF NOT EXISTS processed_events (
 			event_id UUID PRIMARY KEY,
 			processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -59,21 +64,23 @@ type trip struct {
 	OrderID  string            `json:"orderId"`
 	DriverID string            `json:"driverId"`
 	Status   events.TripStatus `json:"status"`
+	// Set once the rider has rated the trip.
+	Rating *int `json:"rating,omitempty"`
 }
 
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status FROM trips WHERE id = $1`, id)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status, rating FROM trips WHERE id = $1`, id)
 }
 
 // getTripByOrderID lets a client that only knows the orderId (e.g. from an
 // order.matched push) find the trip Trip Service created for it.
 func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status FROM trips WHERE order_id = $1`, orderID)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status, rating FROM trips WHERE order_id = $1`, orderID)
 }
 
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status, &t.Rating)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
 	}
@@ -115,4 +122,19 @@ func statusesToStrings(statuses []events.TripStatus) []string {
 		out[i] = string(s)
 	}
 	return out
+}
+
+// saveRating records a rating on a completed, not-yet-rated trip and reports
+// whether this call did it. The conditions live in the UPDATE, so two
+// concurrent submissions can't both succeed.
+func saveRating(ctx context.Context, db *pgxpool.Pool, tripID string, stars int, comment string) (bool, error) {
+	tag, err := db.Exec(ctx, `
+		UPDATE trips SET rating = $1, rating_comment = $2, rated_at = now()
+		WHERE id = $3 AND status = 'COMPLETED' AND rating IS NULL`,
+		stars, comment, tripID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
