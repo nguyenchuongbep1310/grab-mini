@@ -57,6 +57,10 @@ func (s *server) handleGetTripByOrder(w http.ResponseWriter, r *http.Request) {
 	s.respondWithTrip(w, r, func() (*trip, error) { return getTripByOrderID(r.Context(), s.db, r.PathValue("orderId")) })
 }
 
+func (s *server) handleGetActiveTrip(w http.ResponseWriter, r *http.Request) {
+	s.respondWithTrip(w, r, func() (*trip, error) { return getActiveTripByDriver(r.Context(), s.db, r.PathValue("id")) })
+}
+
 func (s *server) respondWithTrip(w http.ResponseWriter, r *http.Request, load func() (*trip, error)) {
 	t, err := load()
 	if errors.Is(err, errTripNotFound) {
@@ -284,6 +288,7 @@ func main() {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /trips/{id}", s.handleGetTrip)
 	mux.HandleFunc("GET /trips/by-order/{orderId}", s.handleGetTripByOrder)
+	mux.HandleFunc("GET /drivers/{id}/active-trip", s.handleGetActiveTrip)
 	mux.HandleFunc("POST /trips/{id}/pickup", s.handlePickup)
 	mux.HandleFunc("POST /trips/{id}/complete", s.handleComplete)
 	mux.HandleFunc("POST /trips/{id}/cancel", s.handleCancel)

@@ -13,6 +13,7 @@ import {
   type LatLngTuple,
 } from "@grab-mini/ui";
 import {
+  getActiveTrip,
   getDriverRating,
   getOrder,
   tripAction,
@@ -58,6 +59,19 @@ export function App() {
     getDriverRating(driverId).then(setRating).catch(() => {});
   }, []);
   useEffect(refreshRating, [refreshRating]);
+
+  // Pick up a trip that was already under way when this page opened.
+  useEffect(() => {
+    let stale = false;
+    getActiveTrip(driverId)
+      .then((trip) => {
+        if (trip && !stale) dispatch({ type: "restored", tripId: trip.id, orderId: trip.orderId, status: trip.status });
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [dispatch]);
 
   const socket = useNotificationSocket("driver", driverId, (message) => {
     if (message.type === "trip.rated") {

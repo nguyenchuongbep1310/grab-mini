@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import type { NotificationMessage } from "@grab-mini/events";
+import type { NotificationMessage, TripStatus } from "@grab-mini/events";
 import type { LatLng, Order } from "@grab-mini/client";
 
 export type Phase = "idle" | "assigned" | "in_progress" | "completed" | "cancelled";
@@ -27,6 +27,7 @@ export const initialDriver: DriverState = {
 type Action =
   | { type: "notification"; message: NotificationMessage; driverId: string }
   | { type: "tripLoaded"; tripId: string }
+  | { type: "restored"; tripId: string; orderId: string; status: TripStatus }
   | { type: "orderLoaded"; order: Order }
   | { type: "reset" };
 
@@ -34,6 +35,13 @@ function reduce(state: DriverState, action: Action): DriverState {
   switch (action.type) {
     case "tripLoaded":
       return { ...state, tripId: action.tripId };
+    case "restored": {
+      // The app was closed or reloaded mid-trip. Ignore the answer if a push
+      // already told us about a trip while the request was in flight.
+      if (state.phase !== "idle") return state;
+      const phase = action.status === "IN_PROGRESS" ? "in_progress" : "assigned";
+      return { ...state, phase, orderId: action.orderId, tripId: action.tripId, anchor: state.pos };
+    }
     case "orderLoaded":
       return { ...state, order: action.order };
     case "reset":

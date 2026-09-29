@@ -38,7 +38,7 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 
 1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**.
 2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
-3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. A driver only receives a trip while their app is open. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
+3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
 4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. The driver's app shows a toast and their updated average.
 
 Also try: rating a trip twice (the second is rejected), booking a bike (only `driver-4`/`driver-5` can take it), **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
@@ -150,6 +150,7 @@ curl localhost:3001/orders/<orderId>
 # Trip Service
 curl localhost:3002/trips/by-order/<orderId>
 curl localhost:3002/trips/<tripId>
+curl localhost:3002/drivers/<driverId>/active-trip    # the driver's ASSIGNED or IN_PROGRESS trip, else 404
 curl -X POST localhost:3002/trips/<tripId>/pickup     # ASSIGNED -> IN_PROGRESS
 curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED, driver becomes AVAILABLE
 curl -X POST localhost:3002/trips/<tripId>/cancel     # from ASSIGNED or IN_PROGRESS; 409 once COMPLETED
@@ -198,6 +199,6 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
 - **A port is already in use** (3001-3004, 5171-5173, 5432, 6379, 8080, 8081, 8088, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
-- **The driver app shows no trip**: it must be open, as the matched driver, when the trip is assigned. Reload doesn't recover an in-flight trip.
+- **The driver app shows no trip**: check the `?driver=` id matches the driver the rider was matched with (the rider's card shows it). A trip already under way is restored when the page opens or reloads.
 - **The Ops dashboard says ksqlDB is unreachable, or shows no data**: ksqlDB is a JVM and takes a minute to start; `docker logs grab-mini-ksqldb` shows its progress, and `docker logs grab-mini-ksql-init` shows whether the tables were created. The tables fill as events flow, so book a ride first.
 - **Start from scratch**: `scripts/dev.sh --reset`.

@@ -107,3 +107,13 @@ export function rateTrip(tripId: string, riderId: string, stars: number, comment
 export function getDriverRating(driverId: string): Promise<DriverRating> {
   return request(`${RATING_API}/drivers/${driverId}/rating`);
 }
+
+/** The driver's trip that is still in flight, or null if they have none. */
+export async function getActiveTrip(driverId: string): Promise<Trip | null> {
+  try {
+    return await request<Trip>(`${TRIP_API}/drivers/${driverId}/active-trip`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}

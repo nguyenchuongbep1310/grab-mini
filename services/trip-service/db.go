@@ -78,6 +78,17 @@ func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*t
 	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status, rating FROM trips WHERE order_id = $1`, orderID)
 }
 
+// getActiveTripByDriver is the driver's trip still in flight (ASSIGNED or
+// IN_PROGRESS), so a driver app that was closed or reloaded can pick up where
+// it left off. A driver only holds one at a time; if data ever says otherwise,
+// the newest wins.
+func getActiveTripByDriver(ctx context.Context, db *pgxpool.Pool, driverID string) (*trip, error) {
+	return queryTrip(ctx, db, `
+		SELECT id, order_id, driver_id, status, rating FROM trips
+		WHERE driver_id = $1 AND status IN ('ASSIGNED', 'IN_PROGRESS')
+		ORDER BY created_at DESC LIMIT 1`, driverID)
+}
+
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
 	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status, &t.Rating)
