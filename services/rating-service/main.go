@@ -23,10 +23,11 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "rating-service-group",
-		Topic:    events.TopicTripRated,
-		LogLabel: "[rating-service]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "rating-service-group",
+		Topic:      events.TopicTripRated,
+		LogLabel:   "[rating-service]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.TripRated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {

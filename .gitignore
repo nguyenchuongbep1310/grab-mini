@@ -10,3 +10,6 @@ dist/
 /services/*/notification-service
 /services/*/rating-service
 .dev/
+
+# Redis snapshots from local test instances
+dump.rdb

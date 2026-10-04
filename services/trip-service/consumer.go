@@ -21,10 +21,11 @@ import (
 // no-op rather than a second trip (US-6.1).
 func runOrderMatchedConsumer(ctx context.Context, env Env, db *pgxpool.Pool, rdb *redis.Client, codec *eventcodec.Codec) {
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "trip-service-group",
-		Topic:    events.TopicOrderMatched,
-		LogLabel: "[trip-service]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "trip-service-group",
+		Topic:      events.TopicOrderMatched,
+		LogLabel:   "[trip-service]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.OrderMatched
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
@@ -101,10 +102,11 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 // the step that cannot be lost.
 func runDriverReleaseConsumer(ctx context.Context, env Env, db *pgxpool.Pool, rdb *redis.Client, codec *eventcodec.Codec) {
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "trip-driver-release-group",
-		Topic:    events.TopicTripStatusChanged,
-		LogLabel: "[trip-driver-release]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "trip-driver-release-group",
+		Topic:      events.TopicTripStatusChanged,
+		LogLabel:   "[trip-driver-release]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.TripStatusChanged
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {

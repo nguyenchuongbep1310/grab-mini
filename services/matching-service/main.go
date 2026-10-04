@@ -123,10 +123,11 @@ func runConsumer(ctx context.Context, env Env) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "matching-service-group",
-		Topic:    events.TopicOrderCreated,
-		LogLabel: "[" + env.InstanceID + "]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "matching-service-group",
+		Topic:      events.TopicOrderCreated,
+		LogLabel:   "[" + env.InstanceID + "]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var order events.OrderCreated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &order); err != nil {
