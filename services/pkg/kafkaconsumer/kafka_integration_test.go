@@ -131,7 +131,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func readDLQ(t *testing.T, brokers []string, topic string) dlqEnvelope {
+func readDLQ(t *testing.T, brokers []string, topic string) DeadLetter {
 	t.Helper()
 	r := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: events.DeadLetterTopic(topic), Partition: 0, MaxWait: 200 * time.Millisecond})
 	defer r.Close()
@@ -141,7 +141,7 @@ func readDLQ(t *testing.T, brokers []string, topic string) dlqEnvelope {
 	if err != nil {
 		t.Fatalf("nothing arrived on the dead-letter topic: %v", err)
 	}
-	var env dlqEnvelope
+	var env DeadLetter
 	if err := json.Unmarshal(m.Value, &env); err != nil {
 		t.Fatal(err)
 	}

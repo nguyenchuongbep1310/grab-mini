@@ -459,11 +459,11 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// dlqEnvelope wraps a message that couldn't be processed. Values are Avro
+// DeadLetter wraps a message that couldn't be processed. Values are Avro
 // (binary), not JSON, so the original bytes travel base64-encoded (that's
 // what encoding/json does for []byte); valueText is a readable copy when
 // the bytes happen to be text, e.g. a hand-published JSON message.
-type dlqEnvelope struct {
+type DeadLetter struct {
 	OriginalTopic     string `json:"originalTopic"`
 	OriginalPartition int    `json:"originalPartition"`
 	OriginalOffset    int64  `json:"originalOffset"`
@@ -489,7 +489,7 @@ func printable(b []byte) bool {
 func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause error, retries int, label string) {
 	dlqTopic := events.DeadLetterTopic(msg.Topic)
 
-	envelope := dlqEnvelope{
+	envelope := DeadLetter{
 		OriginalTopic:     msg.Topic,
 		OriginalPartition: msg.Partition,
 		OriginalOffset:    msg.Offset,

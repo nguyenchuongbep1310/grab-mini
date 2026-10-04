@@ -50,11 +50,11 @@ func TestPrintable(t *testing.T) {
 
 func TestDLQEnvelopeCarriesBinaryValuesIntact(t *testing.T) {
 	raw := []byte{0, 0, 0, 0, 1, 0xff, 0xfe}
-	out, err := json.Marshal(dlqEnvelope{OriginalTopic: "t", ValueBase64: raw})
+	out, err := json.Marshal(DeadLetter{OriginalTopic: "t", ValueBase64: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var back dlqEnvelope
+	var back DeadLetter
 	if err := json.Unmarshal(out, &back); err != nil {
 		t.Fatal(err)
 	}
