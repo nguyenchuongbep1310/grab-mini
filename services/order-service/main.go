@@ -29,6 +29,7 @@ import (
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
 
 type createOrderRequest struct {
@@ -253,6 +254,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "order-service")()
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {
@@ -285,7 +287,7 @@ func main() {
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("order-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("order-service", metrics.HTTP(mux))); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait() // the consumer stops and the relay drains before the pool closes

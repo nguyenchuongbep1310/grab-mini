@@ -16,6 +16,7 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/metrics"
+	"grab-mini/pkg/tracing"
 )
 
 var (
@@ -53,6 +55,9 @@ const schema = `
 		payload BYTEA NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	);
+	-- The trace context of whatever queued the event, so the trace continues
+	-- through the wait for the relay and on into Kafka.
+	ALTER TABLE outbox ADD COLUMN IF NOT EXISTS headers JSONB;
 	CREATE INDEX IF NOT EXISTS outbox_source_id ON outbox (source, id);
 `
 
@@ -65,7 +70,8 @@ type Execer interface {
 // Migrate creates the outbox table if it doesn't exist yet. Services don't
 // call it: they create the table through their own migrations
 // (order-service/migrations/00003_create_outbox.sql, and the same in
-// trip-service), which must stay in step with schema below. It is for tests
+// trip-service, plus 00004_outbox_headers.sql / 00005_outbox_headers.sql),
+// which must stay in step with schema below. It is for tests
 // and one-off setups.
 func Migrate(ctx context.Context, db Execer) error {
 	_, err := db.Exec(ctx, schema)
@@ -76,9 +82,13 @@ func Migrate(ctx context.Context, db Execer) error {
 // change, so both commit together. source names the owning service; only its
 // relay publishes the row.
 func Add(ctx context.Context, tx Execer, source, topic string, key, payload []byte) error {
-	_, err := tx.Exec(ctx,
-		`INSERT INTO outbox (source, topic, key, payload) VALUES ($1, $2, $3, $4)`,
-		source, topic, key, payload)
+	headers, err := json.Marshal(tracing.Map(ctx))
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO outbox (source, topic, key, payload, headers) VALUES ($1, $2, $3, $4, $5)`,
+		source, topic, key, payload, headers)
 	return err
 }
 
@@ -185,7 +195,7 @@ func (r *Relay) Flush(ctx context.Context) (int, error) {
 	}
 
 	rows, err := tx.Query(ctx,
-		`SELECT id, topic, key, payload FROM outbox WHERE source = $1 ORDER BY id LIMIT $2`,
+		`SELECT id, topic, key, payload, headers FROM outbox WHERE source = $1 ORDER BY id LIMIT $2`,
 		r.source, r.BatchSize)
 	if err != nil {
 		return 0, err
@@ -242,8 +252,18 @@ func collect(rows pgx.Rows) ([]int64, []kafka.Message, error) {
 	for rows.Next() {
 		var id int64
 		var m kafka.Message
-		if err := rows.Scan(&id, &m.Topic, &m.Key, &m.Value); err != nil {
+		var headers []byte
+		if err := rows.Scan(&id, &m.Topic, &m.Key, &m.Value, &headers); err != nil {
 			return nil, nil, err
+		}
+		var carried map[string]string
+		if len(headers) > 0 {
+			if err := json.Unmarshal(headers, &carried); err != nil {
+				return nil, nil, fmt.Errorf("outbox row %d has unreadable headers: %w", id, err)
+			}
+		}
+		for k, v := range carried {
+			m.Headers = append(m.Headers, kafka.Header{Key: k, Value: []byte(v)})
 		}
 		ids = append(ids, id)
 		msgs = append(msgs, m)

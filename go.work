@@ -22,6 +22,7 @@ use (
 	./services/pkg/outbox
 	./services/pkg/secret
 	./services/pkg/serve
+	./services/pkg/tracing
 	./services/rating-service
 	./services/trip-service
 )

@@ -22,6 +22,7 @@ import (
 	"grab-mini/pkg/kafkaconsumer"
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
+	"grab-mini/pkg/tracing"
 )
 
 var (
@@ -95,9 +96,10 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			}
 			started := time.Now()
 			err = producer.WriteMessages(ctx, kafka.Message{
-				Topic: events.TopicOrderMatched,
-				Key:   []byte(order.OrderID),
-				Value: payload,
+				Topic:   events.TopicOrderMatched,
+				Key:     []byte(order.OrderID),
+				Value:   payload,
+				Headers: tracing.InjectKafka(ctx, nil),
 			})
 			metrics.ObservePublish(events.TopicOrderMatched, started, err)
 			return err
@@ -130,9 +132,10 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 	}
 	started := time.Now()
 	err = producer.WriteMessages(ctx, kafka.Message{
-		Topic: events.TopicOrderNoDriverFound,
-		Key:   []byte(order.OrderID),
-		Value: payload,
+		Topic:   events.TopicOrderNoDriverFound,
+		Key:     []byte(order.OrderID),
+		Value:   payload,
+		Headers: tracing.InjectKafka(ctx, nil),
 	})
 	metrics.ObservePublish(events.TopicOrderNoDriverFound, started, err)
 	if err != nil {
@@ -185,5 +188,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "matching-service")()
 	runConsumer(ctx, env)
 }

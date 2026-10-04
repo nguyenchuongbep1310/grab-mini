@@ -26,6 +26,7 @@ import (
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/secret"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
 
 var tokensIssued = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -100,9 +101,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "auth-service")()
 
 	log.Printf("auth-service listening on :%s (development token issuer, tokens last %s)", env.Port, env.TokenTTL)
-	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(newMux(issuer))); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("auth-service", metrics.HTTP(newMux(issuer)))); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -37,9 +37,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel/codes"
 
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/tracing"
 )
 
 // permanent is implemented by errors that retrying can't fix (see
@@ -223,12 +225,19 @@ func (c *consumer) runSource(ctx context.Context, handle Handler) {
 	log.Printf("%s consumer running", c.label)
 
 	c.loop(ctx, reader, func(ctx context.Context, msg kafka.Message) (kafka.Message, bool) {
-		slog.Info("received", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key))
+		// The span covers everything done for this message here, and is a
+		// child of whatever published it (its traceparent header).
+		ctx, span := tracing.StartConsume(ctx, c.cfg.GroupID, msg)
+		defer span.End()
+
+		slog.InfoContext(ctx, "received", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key))
 		err := handleWithRetry(ctx, handle, msg, c.maxRetries, c.retryDelay, c.label)
 		if err != nil && ctx.Err() != nil {
 			return msg, false
 		}
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			c.fail(ctx, msg, err, 0)
 		} else {
 			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
@@ -251,13 +260,15 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 	c.loop(ctx, reader, func(ctx context.Context, msg kafka.Message) (kafka.Message, bool) {
 		// Hand the handler the message as it was first published.
 		msg.Topic = headerValue(msg, headerOriginalTopic, msg.Topic)
+		ctx, span := tracing.StartConsume(ctx, c.cfg.GroupID, msg)
+		defer span.End()
 
 		if due := time.UnixMilli(headerInt(msg, headerNotBefore, 0)); time.Until(due) > 0 {
 			if !sleep(ctx, time.Until(due)) {
 				return msg, false
 			}
 		}
-		slog.Info("retrying", "consumer", label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key), "retryPartition", msg.Partition, "retryOffset", msg.Offset)
+		slog.InfoContext(ctx, "retrying", "consumer", label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key), "retryPartition", msg.Partition, "retryOffset", msg.Offset)
 
 		// One attempt: the wait above was the back-off.
 		err := handle(ctx, msg)
@@ -265,6 +276,8 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 			return msg, false
 		}
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			c.fail(ctx, msg, err, tier)
 		} else {
 			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
@@ -330,12 +343,12 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 		Topic: events.RetryTopic(msg.Topic, next),
 		Key:   msg.Key,
 		Value: msg.Value,
-		Headers: []kafka.Header{
+		Headers: append(carriedHeaders(msg), []kafka.Header{
 			{Key: headerOriginalTopic, Value: []byte(msg.Topic)},
 			{Key: headerAttempt, Value: []byte(strconv.Itoa(next))},
 			{Key: headerNotBefore, Value: []byte(strconv.FormatInt(time.Now().Add(c.cfg.RetryTiers[attempt]).UnixMilli(), 10))},
 			{Key: headerLastError, Value: []byte(cause.Error())},
-		},
+		}...),
 	}
 	if err := c.out.WriteMessages(ctx, retry); err != nil {
 		log.Printf("%s failed to publish to %s, dead-lettering instead: %v", c.label, retry.Topic, err)
@@ -344,7 +357,7 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 		return
 	}
 	messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "retried").Inc()
-	slog.Warn("will retry", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key),
+	slog.WarnContext(ctx, "will retry", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key),
 		"retryTopic", retry.Topic, "after", c.cfg.RetryTiers[attempt].String(), "error", cause.Error())
 }
 
@@ -377,6 +390,22 @@ func (c *consumer) ensureTopics(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// carriedHeaders are the headers a message arrived with that belong to its
+// publisher (the trace context above all), without the ones this package adds
+// for a retry. A retried message keeps its trace, so every attempt shows up
+// under the request that caused it.
+func carriedHeaders(msg kafka.Message) []kafka.Header {
+	var out []kafka.Header
+	for _, h := range msg.Headers {
+		switch h.Key {
+		case headerOriginalTopic, headerAttempt, headerNotBefore, headerLastError:
+		default:
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 func headerValue(msg kafka.Message, key, fallback string) string {
@@ -491,6 +520,6 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 		log.Printf("%s failed to publish to %s: %v", label, dlqTopic, err)
 		return
 	}
-	slog.Error("message dead-lettered", "consumer", label, "dlqTopic", dlqTopic, "topic", msg.Topic,
+	slog.ErrorContext(ctx, "message dead-lettered", "consumer", label, "dlqTopic", dlqTopic, "topic", msg.Topic,
 		"partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key), "retries", retries, "error", cause.Error())
 }

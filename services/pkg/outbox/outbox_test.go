@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
+
+	"grab-mini/pkg/tracing"
 )
 
 // These tests need a real Postgres: set TEST_DATABASE_URL to run them.
@@ -190,5 +192,46 @@ func TestTheBacklogGaugeReportsTheOldestWaitingEvent(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(publishedTotal.WithLabelValues("gauge-svc", "t")) - before; got != 1 {
 		t.Errorf("published counter moved by %v, want 1", got)
+	}
+}
+
+// The trace of whatever queued an event follows it through the table and onto
+// the Kafka message, so the consumer's span can be a child of the request's.
+func TestTheTraceOfTheCallerRidesWithTheEvent(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	stop := tracing.Setup(ctx, "outbox-test")
+	defer stop()
+
+	reqCtx, span := tracing.Tracer().Start(ctx, "POST /orders")
+	if err := Add(reqCtx, db, "svc", "order.created", []byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	span.End()
+
+	w := &fakeWriter{}
+	if n, err := NewRelay(db, w, "svc").Flush(ctx); err != nil || n != 1 {
+		t.Fatalf("Flush = %d, %v", n, err)
+	}
+	got := tracing.SpanContextOf(tracing.ExtractKafka(ctx, w.sent[0]))
+	if got.TraceID() != span.SpanContext().TraceID() || got.SpanID() != span.SpanContext().SpanID() {
+		t.Errorf("the published message carries trace %s span %s, want the request's (%s %s)",
+			got.TraceID(), got.SpanID(), span.SpanContext().TraceID(), span.SpanContext().SpanID())
+	}
+}
+
+func TestAnEventQueuedWithoutATraceStillPublishes(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	// A row from before the headers column existed has NULL headers.
+	if _, err := db.Exec(ctx, `INSERT INTO outbox (source, topic, payload) VALUES ('svc', 't', 'x')`); err != nil {
+		t.Fatal(err)
+	}
+	w := &fakeWriter{}
+	if n, err := NewRelay(db, w, "svc").Flush(ctx); err != nil || n != 1 {
+		t.Fatalf("Flush = %d, %v", n, err)
+	}
+	if len(w.sent[0].Headers) != 0 {
+		t.Errorf("headers %v, want none", w.sent[0].Headers)
 	}
 }

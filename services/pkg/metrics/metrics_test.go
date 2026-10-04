@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bufio"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,4 +85,41 @@ func grep(s, sub string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// A WebSocket upgrade hijacks the connection. The middleware must not take
+// that ability away (it once did: the sockets of the Notification Service
+// failed to open), and the upgrade is counted as a 101.
+func TestTheMiddlewareStillLetsAHandlerHijackTheConnection(t *testing.T) {
+	m := http.NewServeMux()
+	hijacked := make(chan error, 1)
+	m.HandleFunc("GET /ws/{id}", func(w http.ResponseWriter, r *http.Request) {
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			hijacked <- errors.New("the writer is not a Hijacker")
+			return
+		}
+		conn, _, err := h.Hijack()
+		if err == nil {
+			conn.Close()
+		}
+		hijacked <- err
+	})
+	srv := httptest.NewServer(HTTP(m))
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.Write([]byte("GET /ws/abc HTTP/1.1\r\nHost: x\r\n\r\n"))
+	bufio.NewReader(conn).ReadByte() // wait for the handler to close it
+
+	if err := <-hijacked; err != nil {
+		t.Fatal(err)
+	}
+	if out := scrape(t); !strings.Contains(out, `http_requests_total{code="101",method="GET",route="GET /ws/{id}"} 1`) {
+		t.Errorf("the upgrade wasn't counted as a 101:\n%s", grep(out, "ws/"))
+	}
 }

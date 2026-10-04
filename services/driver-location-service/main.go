@@ -19,6 +19,7 @@ import (
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconsumer"
 	"grab-mini/pkg/logging"
+	"grab-mini/pkg/tracing"
 )
 
 var locationUpdates = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -74,5 +75,6 @@ func main() {
 	logging.Setup("driver-location-service")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "driver-location-service")()
 	runConsumer(ctx, loadEnv())
 }

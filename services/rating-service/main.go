@@ -23,6 +23,7 @@ import (
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
 
 var ratingsRecorded = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -72,6 +73,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "rating-service")()
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {
@@ -106,7 +108,7 @@ func main() {
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("rating-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("rating-service", metrics.HTTP(mux))); err != nil {
 		log.Fatal(err)
 	}
 	consumer.Wait() // stops before the pool closes

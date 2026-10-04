@@ -17,6 +17,8 @@ import (
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/metrics"
+	"grab-mini/pkg/tracing"
 )
 
 // Needs a real Redis (it checks Pub/Sub across two "instances"): set
@@ -45,7 +47,8 @@ func newInstance(t *testing.T, ctx context.Context, addr string) *instance {
 	go h.run(ctx)
 	verifier, _ := auth.NewVerifier(testSecret)
 	issuer, _ := auth.NewIssuer(testSecret, time.Hour)
-	srv := httptest.NewServer(newMux(ctx, h, verifier, []string{"http://app.example"}))
+	// Wrapped as main wraps it: the WebSocket upgrade must survive both middlewares.
+	srv := httptest.NewServer(tracing.HTTP("notification-service", metrics.HTTP(newMux(ctx, h, verifier, []string{"http://app.example"}))))
 	t.Cleanup(func() { srv.Close(); rdb.Close() })
 	return &instance{h, srv, issuer}
 }

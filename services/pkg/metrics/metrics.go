@@ -11,6 +11,9 @@
 package metrics
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -56,9 +59,11 @@ func ObservePublish(topic string, start time.Time, err error) {
 	}
 }
 
-// statusWriter remembers the status code a handler wrote. It keeps the
-// optional interfaces the wrapped writer has (WebSocket upgrades need Hijack,
-// streaming needs Flush) via Unwrap, which http.ResponseController uses.
+// statusWriter remembers the status code a handler wrote. It passes through
+// the optional interfaces the wrapped writer has: a WebSocket upgrade needs
+// http.Hijacker (gorilla/websocket type-asserts for it; it does not use
+// http.ResponseController, so Unwrap alone is not enough) and streaming needs
+// http.Flusher.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -79,6 +84,24 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("the underlying ResponseWriter doesn't support hijacking")
+	}
+	conn, rw, err := h.Hijack()
+	if err == nil && w.status == 0 {
+		w.status = http.StatusSwitchingProtocols // the connection is now the handler's; count it as an upgrade
+	}
+	return conn, rw, err
+}
+
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 // HTTP records a request count and duration for every request h serves. The
 // route label is the pattern the mux matched ("GET /orders/{id}"), not the
@@ -103,8 +126,6 @@ func HTTP(h http.Handler) http.Handler {
 		if code == 0 {
 			code = http.StatusOK
 		}
-		// A hijacked connection (a WebSocket upgrade) reports 101 through the
-		// upgrader writing to the raw connection, so no status is seen here.
 		httpRequests.WithLabelValues(route, r.Method, strconv.Itoa(code)).Inc()
 		httpDuration.WithLabelValues(route, r.Method).Observe(time.Since(start).Seconds())
 	})

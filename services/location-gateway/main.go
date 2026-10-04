@@ -35,6 +35,7 @@ import (
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
 
 // publisher is the part of *kafka.Writer the gateway needs.
@@ -141,7 +142,7 @@ func (g *gateway) handleReport(w http.ResponseWriter, r *http.Request) {
 	payload, err := g.enc.Encode(r.Context(), events.TopicDriverLocationUpdate, event)
 	if err == nil {
 		started := time.Now()
-		err = g.pub.WriteMessages(r.Context(), kafka.Message{Key: []byte(caller.Subject), Value: payload})
+		err = g.pub.WriteMessages(r.Context(), kafka.Message{Key: []byte(caller.Subject), Value: payload, Headers: tracing.InjectKafka(r.Context(), nil)})
 		metrics.ObservePublish(events.TopicDriverLocationUpdate, started, err)
 	}
 	if err != nil {
@@ -172,6 +173,7 @@ func main() {
 	env := loadEnv()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "location-gateway")()
 
 	verifier, err := auth.VerifierFromEnv()
 	if err != nil {
@@ -220,7 +222,7 @@ func main() {
 	health.Register(ctx, mux, health.Kafka(env.KafkaBrokers))
 
 	log.Printf("location-gateway listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("location-gateway", metrics.HTTP(mux))); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait()

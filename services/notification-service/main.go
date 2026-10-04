@@ -19,6 +19,7 @@ import (
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
 
 // newUpgrader accepts a WebSocket only from a page served by an allowed
@@ -114,6 +115,7 @@ func main() {
 	env := loadEnv()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer tracing.Setup(ctx, "notification-service")()
 
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
@@ -128,7 +130,7 @@ func main() {
 	background.Go(func() { runConsumer(ctx, env, h) })
 
 	log.Printf("notification-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(newMux(ctx, h, verifier, env.AllowedOrigins, health.Redis(rdb), health.Kafka(env.KafkaBrokers)))); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("notification-service", metrics.HTTP(newMux(ctx, h, verifier, env.AllowedOrigins, health.Redis(rdb), health.Kafka(env.KafkaBrokers))))); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait()
