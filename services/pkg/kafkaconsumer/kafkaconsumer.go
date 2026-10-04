@@ -74,6 +74,26 @@ type Config struct {
 	Topic  string
 	Topics []string
 
+	// CommitInterval, when above zero, commits offsets in the background at
+	// this interval instead of one blocking round trip to the broker per
+	// message. Delivery stays at-least-once: after a crash up to this much is
+	// handled again (a clean shutdown flushes the pending commits), which an
+	// idempotent handler doesn't mind. It is what lets one consumer keep up with
+	// a high-volume topic: load tests showed per-message commits capping a
+	// single consumer at about 2,300 messages a second. Leave it unset for
+	// topics where redoing the last few messages would matter.
+	CommitInterval time.Duration
+
+	// Workers is how many partitions a consumer handles at the same time
+	// (default 1, or KAFKA_CONSUMER_WORKERS). One worker handles one message at
+	// a time, so a consumer's throughput is one over what a message costs, plus
+	// a commit: load testing put Matching at about 50 orders a second per
+	// instance. Several workers split the partitions between them, keeping each
+	// partition (and so each key) in order, and are the cheap way to use more
+	// cores; more instances are the other way. No more is useful than the
+	// partitions the instance is assigned.
+	Workers int
+
 	// RetryTiers turns on retry topics: the delay before each successive
 	// retry (see the package comment). Leave it empty to retry in place.
 	RetryTiers []time.Duration
@@ -138,6 +158,7 @@ type consumer struct {
 	maxRetries int
 	retryDelay time.Duration
 	topics     []string
+	workers    int
 	out        messageWriter // retry and dead-letter topics
 	security   *kafkaconn.Security
 }
@@ -169,6 +190,7 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 	if c.retryDelay <= 0 {
 		c.retryDelay = 2 * time.Second
 	}
+	c.workers = firstPositive(cfg.Workers, envInt("KAFKA_CONSUMER_WORKERS"), 1)
 	c.topics = cfg.Topics
 	if cfg.Topic != "" {
 		c.topics = []string{cfg.Topic}
@@ -185,6 +207,9 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
 		Transport:              c.security.Transport(),
+		// Not the one-second default: a failing message would wait that long
+		// at every step of its way through the retry topics.
+		BatchTimeout: kafkaconn.DefaultBatchTimeout,
 	}
 	defer c.out.Close()
 
@@ -218,6 +243,8 @@ func (c *consumer) newReader(groupID string, topics []string) *kafka.Reader {
 		// fetches a second per partition.
 		MaxWait: 500 * time.Millisecond,
 		Dialer:  c.security.Dialer(),
+
+		CommitInterval: c.cfg.CommitInterval,
 	}
 	if len(topics) == 1 {
 		rc.Topic = topics[0]
@@ -302,7 +329,36 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 // loop fetches from reader and calls process for each message. process
 // reports false when it was interrupted by shutdown, meaning the message
 // must stay uncommitted; otherwise the message is committed.
+//
+// With Workers above 1, messages are handed to worker goroutines by partition
+// (partition % Workers), so partitions are handled in parallel but every
+// message of one partition, and so every message of one key, is handled in
+// the order it was written, by one goroutine at a time.
 func (c *consumer) loop(ctx context.Context, reader *kafka.Reader, process func(context.Context, kafka.Message) (kafka.Message, bool)) {
+	var queues []chan kafka.Message
+	var workers sync.WaitGroup
+	if c.workers > 1 {
+		for range c.workers {
+			q := make(chan kafka.Message, 32) // a full queue stops the fetching: backpressure
+			queues = append(queues, q)
+			workers.Go(func() {
+				for msg := range q {
+					if !c.finish(ctx, reader, process, msg) {
+						for range q { // shutting down: what is queued stays uncommitted
+						}
+						return
+					}
+				}
+			})
+		}
+		defer func() {
+			for _, q := range queues {
+				close(q)
+			}
+			workers.Wait()
+		}()
+	}
+
 	fetchBackoff := time.Duration(0)
 	for {
 		msg, err := reader.FetchMessage(ctx)
@@ -320,22 +376,39 @@ func (c *consumer) loop(ctx context.Context, reader *kafka.Reader, process func(
 		}
 		fetchBackoff = 0
 
-		handled, ok := process(ctx, msg)
-		if !ok {
-			// Shutting down mid-message: don't dead-letter or commit it,
-			// so the next instance handles it from the start.
-			log.Printf("%s stopped while handling topic=%s partition=%d offset=%d, leaving it uncommitted", c.label, handled.Topic, msg.Partition, msg.Offset)
+		if queues == nil {
+			if !c.finish(ctx, reader, process, msg) {
+				return
+			}
+			continue
+		}
+		select {
+		case queues[msg.Partition%len(queues)] <- msg:
+		case <-ctx.Done():
 			return
 		}
-
-		// Finishing a message must not depend on ctx, or a shutdown that
-		// lands right after a successful handle would redeliver it.
-		doneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		if err := reader.CommitMessages(doneCtx, msg); err != nil {
-			log.Printf("%s failed to commit offset: %v", c.label, err)
-		}
-		cancel()
 	}
+}
+
+// finish handles one message and commits it. It reports false if shutdown
+// interrupted the handling, in which case the message is left uncommitted.
+func (c *consumer) finish(ctx context.Context, reader *kafka.Reader, process func(context.Context, kafka.Message) (kafka.Message, bool), msg kafka.Message) bool {
+	handled, ok := process(ctx, msg)
+	if !ok {
+		// Shutting down mid-message: don't dead-letter or commit it,
+		// so the next instance handles it from the start.
+		log.Printf("%s stopped while handling topic=%s partition=%d offset=%d, leaving it uncommitted", c.label, handled.Topic, msg.Partition, msg.Offset)
+		return false
+	}
+
+	// Finishing a message must not depend on ctx, or a shutdown that
+	// lands right after a successful handle would redeliver it.
+	doneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := reader.CommitMessages(doneCtx, msg); err != nil {
+		log.Printf("%s failed to commit offset: %v", c.label, err)
+	}
+	return true
 }
 
 // fail moves a message that failed to its next stop: the next retry topic

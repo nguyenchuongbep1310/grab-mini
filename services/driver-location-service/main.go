@@ -44,6 +44,9 @@ func runConsumer(ctx context.Context, env Env) {
 		GroupID:  "driver-location-service-group",
 		Topic:    events.TopicDriverLocationUpdate,
 		LogLabel: "[driver-location-service]",
+		// The busiest topic, and every update replaces the last: redoing a few
+		// after a crash changes nothing (and old ones are discarded by timestamp).
+		CommitInterval: 200 * time.Millisecond,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.DriverLocationUpdated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {

@@ -34,7 +34,7 @@ step "kubeconform (Kubernetes 1.30 and the Strimzi, KEDA and Prometheus Operator
 summary=$(kubeconform -strict -summary -kubernetes-version 1.30.0 \
   -schema-location default \
   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-  "$rendered")
+  "$rendered" deploy/k8s/dr/*.yaml)   # dr/ is applied by hand in the standby region, so it isn't in the build
 echo "$summary"
 # Checking nothing must not look like success.
 case "$summary" in *"Valid: 0,"*|*"0 resource found"*) echo "kubeconform checked nothing"; exit 1;; esac

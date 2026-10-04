@@ -2,10 +2,12 @@ go 1.26.4
 
 use (
 	./services/auth-service
+	./services/dev-registry
 	./services/dlq-redrive
 	./services/driver-app-sim
 	./services/driver-location-service
 	./services/matching-service
+	./services/loadtest
 	./services/location-gateway
 	./services/notification-service
 	./services/order-service

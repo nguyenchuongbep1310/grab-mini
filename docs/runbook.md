@@ -278,4 +278,4 @@ Số replica hữu ích của một consumer không vượt số partition của
   (đã có lease để tài xế không kẹt, và message `order.created` đi qua retry), còn vị trí tài xế thì tự bù sau vài giây.
 - **Không có TTL cho vị trí trong Redis GEO** (xem Slow matching).
 - **Notification Service best-effort**: tin gửi khi không ai subscribe thì mất; app khôi phục bằng REST sau khi kết nối lại.
-- **Sao lưu và DR đa vùng chưa làm** (giai đoạn 5).
+- **Sao lưu và DR**: xem [disaster-recovery.md](disaster-recovery.md); chưa từng được diễn tập, manifest DR chưa chạy trên cluster thật.

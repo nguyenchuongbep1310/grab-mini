@@ -177,9 +177,25 @@ func (s *Security) Transport() *kafka.Transport {
 	return t
 }
 
-// Writer applies the default security to w and returns it.
+// DefaultBatchTimeout is how long a Writer built by Writer holds a message to
+// fill a batch. kafka-go's own default is **one second**, and WriteMessages
+// waits for it: every synchronous publish then takes at least a second. Found
+// by load testing: with the default, an order took over a second per hop (the
+// outbox relay, Matching, the retry topics) and the 3 s matching SLO could not
+// be met at any load. 10 ms still batches under load (a flush also happens when
+// the batch is full), and costs a single publish almost nothing. 2 ms rather
+// than 10 because load testing showed Matching (one publish per message, with
+// 12 workers) bounded by the time one message takes: 10 ms of waiting was a
+// third of it.
+const DefaultBatchTimeout = 2 * time.Millisecond
+
+// Writer applies the default security to w, and a batch timeout fit for
+// synchronous publishing if w has none, and returns it.
 func Writer(w *kafka.Writer) *kafka.Writer {
 	w.Transport = Default().Transport()
+	if w.BatchTimeout == 0 {
+		w.BatchTimeout = DefaultBatchTimeout
+	}
 	return w
 }
 

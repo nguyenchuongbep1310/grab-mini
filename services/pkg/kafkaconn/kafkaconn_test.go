@@ -1,10 +1,15 @@
 package kafkaconn
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 func TestPlaintextMeansNoSecurity(t *testing.T) {
@@ -99,5 +104,43 @@ func TestProductionRefusesPlaintext(t *testing.T) {
 	t.Setenv("KAFKA_ALLOW_PLAINTEXT", "true")
 	if s, err := FromEnv(); err != nil || s != nil {
 		t.Errorf("with the override: %v, %v", s, err)
+	}
+}
+
+func TestWriterDefaultsToASynchronousFriendlyBatchTimeout(t *testing.T) {
+	w := Writer(&kafka.Writer{})
+	if w.BatchTimeout != DefaultBatchTimeout || DefaultBatchTimeout >= 100*time.Millisecond {
+		t.Errorf("BatchTimeout = %v; kafka-go's one second default makes every synchronous publish take a second", w.BatchTimeout)
+	}
+	set := Writer(&kafka.Writer{BatchTimeout: 20 * time.Millisecond})
+	if set.BatchTimeout != 20*time.Millisecond {
+		t.Errorf("an explicit BatchTimeout was overridden: %v", set.BatchTimeout)
+	}
+}
+
+// What the default costs, measured against a real broker: set TEST_KAFKA_BROKERS.
+func TestASynchronousPublishThroughWriterTakesMillisecondsNotASecond(t *testing.T) {
+	b := os.Getenv("TEST_KAFKA_BROKERS")
+	if b == "" {
+		t.Skip("TEST_KAFKA_BROKERS not set")
+	}
+	w := Writer(&kafka.Writer{Addr: kafka.TCP(b), Topic: fmt.Sprintf("lat-%d", time.Now().UnixNano()), RequiredAcks: kafka.RequireAll, AllowAutoTopicCreation: true})
+	defer w.Close()
+	for i := 0; i < 20; i++ { // until the new topic exists and has a leader
+		if w.WriteMessages(context.Background(), kafka.Message{Value: []byte("warm")}) == nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	var worst time.Duration
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		if err := w.WriteMessages(context.Background(), kafka.Message{Value: []byte("x")}); err != nil {
+			t.Fatal(err)
+		}
+		worst = max(worst, time.Since(start))
+	}
+	if worst > 300*time.Millisecond {
+		t.Errorf("the slowest of 5 single-message publishes took %v, want a few milliseconds (the library's default batch timeout would make it a second)", worst)
 	}
 }

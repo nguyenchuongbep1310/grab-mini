@@ -53,6 +53,18 @@ LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per repli
 # Which services have migrations (and so a migration Job).
 MIGRATING = ["order-service", "trip-service", "rating-service"]
 
+# Dedupe tables grow one row per event and are only read for a redelivery, so
+# rows older than anything Kafka or the DLQ can still hand back are dead
+# weight. Kafka keeps events 7 days (TOPICS) and a DLQ record may wait for a
+# person, so 30 days is the floor: shortening it risks a late redrive being
+# processed twice. name: (service, table, column).
+DEDUPE_RETENTION_DAYS = 30
+RETENTION = {
+    "trip-processed-events": ("trip-service", "processed_events", "processed_at"),
+    "rating-rating-events": ("rating-service", "rating_events", "processed_at"),
+}
+POSTGRES_IMAGE = "postgres:16-alpine"
+
 
 def parse_acl_table():
     """The access table in scripts/kafka-acls.sh: the single source of truth."""
@@ -241,6 +253,51 @@ def migration_job(name):
                     "volumes": [{"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{name}", "items": [{"key": "url", "path": "url"}]}}],
                 },
             },
+        },
+    }
+
+
+def retention_cronjob(name, service, table, column):
+    # Deletes in small batches so one run never holds a long lock or bloats
+    # the WAL; the loop ends when a batch deletes nothing.
+    sql = (f"WITH d AS (DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} "
+           f"WHERE {column} < now() - interval '{DEDUPE_RETENTION_DAYS} days' LIMIT 10000) RETURNING 1) "
+           f"SELECT count(*) FROM d")
+    script = (f'set -eu; url=$(cat /etc/secrets/db/url); '
+              f'while :; do n=$(psql "$url" -v ON_ERROR_STOP=1 -At -c "{sql}"); '
+              f'echo "deleted $n rows from {table}"; [ "$n" -eq 0 ] && break; done')
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": meta(f"retention-{name}", "retention"),
+        "spec": {
+            "schedule": "17 3 * * *",
+            "concurrencyPolicy": "Forbid",
+            "successfulJobsHistoryLimit": 1,
+            "failedJobsHistoryLimit": 3,
+            "jobTemplate": {"spec": {
+                "backoffLimit": 1,
+                "activeDeadlineSeconds": 1800,
+                "template": {
+                    "metadata": {"labels": labels(f"retention-{name}", "retention")},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": "grab-mini",
+                        "automountServiceAccountToken": False,
+                        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [{
+                            "name": "retention",
+                            "image": POSTGRES_IMAGE,
+                            "command": ["sh", "-c", script],
+                            "volumeMounts": [{"name": "db", "mountPath": "/etc/secrets/db", "readOnly": True}],
+                            "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}},
+                            "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                                "runAsNonRoot": True, "runAsUser": 70, "capabilities": {"drop": ["ALL"]}},
+                        }],
+                        "volumes": [{"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{service}", "items": [{"key": "url", "path": "url"}]}}],
+                    },
+                },
+            }},
         },
     }
 
@@ -483,6 +540,8 @@ def build():
         files[f"services/{name}.yaml"] = dump(docs)
     for name in MIGRATING:
         files[f"migrations/{name}.yaml"] = dump(migration_job(name))
+    for name, (owner, table, column) in RETENTION.items():
+        files[f"retention/{name}.yaml"] = dump(retention_cronjob(name, owner, table, column))
     scaled = [trigger_authentication()] + [scaled_object(n, s, consumes) for n, s in SERVICES.items()]
     files["scaling/keda.yaml"] = dump(scaled)
     files["kafka/cluster.yaml"] = dump(kafka_cluster())
@@ -491,7 +550,7 @@ def build():
     files["network/policies.yaml"] = dump(network_policies())
     files["monitoring/podmonitors.yaml"] = dump(pod_monitors())
     files["monitoring/alerts.yaml"] = dump(prometheus_rule())
-    resources = ["namespace.yaml", "config.yaml"] + sorted(f for f in files if f.startswith(("services/", "migrations/", "scaling/", "kafka/", "network/", "monitoring/")))
+    resources = ["namespace.yaml", "config.yaml"] + sorted(f for f in files if f.startswith(("services/", "migrations/", "retention/", "scaling/", "kafka/", "network/", "monitoring/")))
     files["kustomization.yaml"] = dump({
         "apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
         "namespace": "grab-mini", "resources": resources,

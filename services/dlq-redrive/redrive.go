@@ -82,7 +82,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	writer := &kafka.Writer{
 		Addr: kafka.TCP(cfg.Brokers...), Topic: cfg.Topic, Balancer: &kafka.Hash{},
-		RequiredAcks: kafka.RequireAll, Transport: sec.Transport(),
+		RequiredAcks: kafka.RequireAll, Transport: sec.Transport(), BatchTimeout: kafkaconn.DefaultBatchTimeout,
 	}
 	defer writer.Close()
 

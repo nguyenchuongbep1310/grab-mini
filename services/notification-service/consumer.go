@@ -41,7 +41,9 @@ func runConsumer(ctx context.Context, env Env, h *hub) {
 		},
 		MaxRetries: 1,
 		RetryDelay: 500 * time.Millisecond,
-		LogLabel:   "[notification-service]",
+		// Most of its traffic is driver locations; a push repeated after a crash is harmless.
+		CommitInterval: 200 * time.Millisecond,
+		LogLabel:       "[notification-service]",
 	}, func(ctx context.Context, msg kafka.Message) error {
 		return handleMessage(ctx, codec, h, msg)
 	})

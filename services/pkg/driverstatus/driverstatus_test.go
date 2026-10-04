@@ -258,3 +258,43 @@ func TestTransitionOnlyMovesADriverWhoIsInTheExpectedStatus(t *testing.T) {
 		t.Errorf("d2 = %s, want ASSIGNED untouched", s)
 	}
 }
+
+func TestClaimFirstForOrderSkipsBusyAndWrongVehicleDrivers(t *testing.T) {
+	rdb := newClient(t)
+	ctx := context.Background()
+	seed(t, rdb, "busy", "CAR", OnTrip)
+	seed(t, rdb, "bike", "BIKE", Available)
+	seed(t, rdb, "free", "CAR", Available)
+	seed(t, rdb, "later", "CAR", Available)
+
+	got, res, err := ClaimFirstForOrder(ctx, rdb, orderA, []string{"busy", "bike", "free", "later"}, "CAR", time.Minute)
+	if err != nil || res != Claimed || got != "free" {
+		t.Fatalf("ClaimFirstForOrder = %q, %v, %v; want free, Claimed", got, res, err)
+	}
+	if s, _ := Get(ctx, rdb, "free"); s != Assigned {
+		t.Errorf("free status = %q, want ASSIGNED", s)
+	}
+	if s, _ := Get(ctx, rdb, "later"); s != Available {
+		t.Errorf("later status = %q, want AVAILABLE (only one driver is claimed)", s)
+	}
+	if d, _ := MatchedDriver(ctx, rdb, orderA); d != "free" {
+		t.Errorf("MatchedDriver = %q, want free", d)
+	}
+	// Redelivery claims nobody else.
+	if _, res, _ := ClaimFirstForOrder(ctx, rdb, orderA, []string{"later"}, "CAR", time.Minute); res != AlreadyMatched {
+		t.Errorf("redelivery = %v, want AlreadyMatched", res)
+	}
+}
+
+func TestClaimFirstForOrderWithNoClaimableDriver(t *testing.T) {
+	rdb := newClient(t)
+	ctx := context.Background()
+	seed(t, rdb, "busy", "CAR", OnTrip)
+	got, res, err := ClaimFirstForOrder(ctx, rdb, orderA, []string{"busy"}, "CAR", time.Minute)
+	if err != nil || res != NotClaimed || got != "" {
+		t.Fatalf("= %q, %v, %v; want empty, NotClaimed", got, res, err)
+	}
+	if d, _ := MatchedDriver(ctx, rdb, orderA); d != "" {
+		t.Errorf("no match should be recorded, got %q", d)
+	}
+}

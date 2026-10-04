@@ -14,6 +14,8 @@ resources:
 - monitoring/alerts.yaml
 - monitoring/podmonitors.yaml
 - network/policies.yaml
+- retention/rating-rating-events.yaml
+- retention/trip-processed-events.yaml
 - scaling/keda.yaml
 - services/driver-location-service.yaml
 - services/location-gateway.yaml

@@ -104,8 +104,10 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 
 	event := events.OrderCreated{
 		Envelope: events.Envelope{
-			EventID:    uuid.NewString(),
-			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+			EventID: uuid.NewString(),
+			// Nanosecond precision: Matching measures how long a rider waited from
+			// this moment, and whole seconds would make that figure wrong by up to a second.
+			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
 		OrderID: orderID,
 		RiderID: req.RiderID,

@@ -127,6 +127,67 @@ const (
 	AlreadyMatched ClaimResult = -1
 )
 
+// claimFirstForOrderScript is claimForOrderScript over a list of candidates,
+// nearest first: it claims the first one that is claimable and returns its
+// index (1-based), 0 when none is, and -1 when the order is already matched.
+// Doing the walk inside Redis costs one round trip however many of the
+// nearest drivers are busy, instead of one per busy driver.
+//
+// It builds the driver keys itself (driver:<id>:status etc.), so it can't run
+// on Redis Cluster unless those keys are hash-tagged; see key().
+var claimFirstForOrderScript = redis.NewScript(`
+	if redis.call("EXISTS", KEYS[1]) == 1 then
+		return -1
+	end
+	local t = redis.call("TIME")
+	local now = t[1] * 1000 + math.floor(t[2] / 1000)
+	for i = 5, #ARGV do
+		local id = ARGV[i]
+		local statusKey = "driver:" .. id .. ":status"
+		local leaseKey = "driver:" .. id .. ":assigned_until"
+		local status = redis.call("GET", statusKey)
+		local free = (status == "AVAILABLE")
+		if status == "ASSIGNED" then
+			local leaseEnd = redis.call("GET", leaseKey)
+			if leaseEnd and tonumber(leaseEnd) <= now then
+				free = true
+			end
+		end
+		if free and redis.call("GET", "driver:" .. id .. ":vehicle") == ARGV[1] then
+			redis.call("SET", statusKey, "ASSIGNED")
+			redis.call("SET", leaseKey, now + tonumber(ARGV[3]))
+			redis.call("SET", KEYS[1], id, "PX", ARGV[4])
+			return i - 4
+		end
+	end
+	return 0
+`)
+
+// ClaimFirstForOrder claims the first claimable driver of candidates (in the
+// order given) for orderID, like ClaimForOrder but in one round trip. It
+// returns the claimed driver, or "" when none could be claimed; AlreadyMatched
+// is returned when the order was matched before (read it with MatchedDriver).
+func ClaimFirstForOrder(ctx context.Context, rdb *redis.Client, orderID string, candidates []string, vehicle string, lease time.Duration) (string, ClaimResult, error) {
+	if len(candidates) == 0 {
+		return "", NotClaimed, nil
+	}
+	args := []interface{}{vehicle, orderID, lease.Milliseconds(), MatchRecordTTL.Milliseconds()}
+	for _, c := range candidates {
+		args = append(args, c)
+	}
+	n, err := claimFirstForOrderScript.Run(ctx, rdb, []string{matchKey(orderID)}, args...).Int()
+	if err != nil {
+		return "", NotClaimed, err
+	}
+	switch {
+	case n < 0:
+		return "", AlreadyMatched, nil
+	case n == 0:
+		return "", NotClaimed, nil
+	}
+	return candidates[n-1], Claimed, nil
+}
+
 // MatchRecordTTL is how long the record of "order X went to driver Y" lives,
 // which is how long a redelivered order.created is recognised.
 const MatchRecordTTL = 24 * time.Hour

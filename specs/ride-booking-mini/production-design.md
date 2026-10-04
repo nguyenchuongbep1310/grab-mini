@@ -363,7 +363,23 @@ Giới hạn đã biết của giai đoạn này:
 - Mỗi Deployment dùng một ServiceAccount chung và không có egress NetworkPolicy.
 - Matching và Location Gateway vẫn không có outbox (xem runbook).
 
-## 15. Còn lại
+## 15. Giai đoạn 5 (đã làm một phần)
 
-Giai đoạn 5 (mục 9): shard Redis GEO, sao lưu S3 và DR đa vùng, kiểm thử tải. Cùng với các giới hạn ở mục 13 và 14, và hai việc
-nhỏ từ giai đoạn 2 (dọn bảng `processed_events`, `outbox`/`outbox_dead` theo lịch; cache ánh xạ tài xế→rider nếu đo thấy cần).
+Nguyên tắc của giai đoạn này là **đo trước, tối ưu sau**, nên phần lớn thành quả là công cụ đo và những gì nó tìm ra.
+
+- **Kiểm thử tải** (`deploy/loadtest`, `services/loadtest`, `services/dev-registry`): chạy các service thật không cần Docker; sinh tải mở
+  (đặt đơn + tài xế báo vị trí qua gateway), đọc quantile từ `/metrics`. Tìm ra và sửa: `BatchTimeout` 1 s mặc định của kafka-go (mọi publish
+  đồng bộ ≥ 1 s), commit đồng bộ từng message (`CommitInterval`), consumer tuần tự (`Workers`, một worker mỗi partition vẫn giữ thứ tự),
+  và tối đa 50 round trip Redis mỗi đơn khi tài xế gần đã bận (`ClaimFirstForOrder`, một script). Kết quả và diễn giải trung thực:
+  [docs/performance.md](../../docs/performance.md): 250 đơn/s + 750 vị trí/s sạch trên một máy 4 core; 400 đơn/s thì máy bão hòa.
+- **Redis GEO**: đã đo. Chi phí tìm kiếm tỉ lệ với số ứng viên trong bán kính, không phải tổng tài xế; đã làm tìm theo vòng mở rộng
+  (1 → 3 → bán kính cấu hình). **Chưa shard**: chia key không giảm chi phí mỗi truy vấn, chỉ đáng khi một Redis hết sức; điều kiện và lưu ý
+  trong docs/performance.md.
+- **Dọn dữ liệu**: CronJob xóa `processed_events` và `rating_events` cũ hơn 30 ngày theo lô (đã thử trên Postgres thật); `outbox` đã tự
+  xóa khi publish, `outbox_dead` để người xử lý.
+- **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, quy trình chuyển vùng),
+  `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
+
+Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); chưa diễn tập khôi phục/chuyển
+vùng; chưa shard Redis theo ô; Redis chưa có Sentinel/Cluster; bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
+mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).

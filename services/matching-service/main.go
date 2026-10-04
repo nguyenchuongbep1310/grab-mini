@@ -168,6 +168,12 @@ func runConsumer(ctx context.Context, env Env) {
 		Topic:      events.TopicOrderCreated,
 		LogLabel:   "[" + env.InstanceID + "]",
 		RetryTiers: kafkaconsumer.DefaultRetryTiers,
+		// Redoing the last few orders after a crash is a no-op: the match is
+		// recorded per order (driverstatus.ClaimForOrder). A synchronous commit
+		// after every order is not a cost to ignore: a reader's commits go through
+		// one loop, so they cap its throughput (about 200 orders a second here)
+		// however many workers it has.
+		CommitInterval: 100 * time.Millisecond,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var order events.OrderCreated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &order); err != nil {

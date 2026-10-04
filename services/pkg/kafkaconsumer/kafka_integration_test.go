@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -316,4 +317,112 @@ func TestAMessageInterruptedByShutdownIsDeliveredAgain(t *testing.T) {
 		return nil
 	})
 	waitFor(t, "redelivery", func() bool { return rec.count() >= 1 })
+}
+
+// Partitions are handled in parallel, but one partition is never handled out of order.
+func TestWorkersHandlePartitionsInParallelEachInOrder(t *testing.T) {
+	b := brokers(t)
+	topic := newTopic(t, b, 3)
+	cfg := config(b, topic)
+	cfg.Workers = 3
+
+	var mu sync.Mutex
+	byPartition := map[int][]int64{}
+	var running, peak int
+	all := make(chan struct{})
+	var handled int
+	start(t, cfg, func(_ context.Context, msg kafka.Message) error {
+		mu.Lock()
+		running++
+		peak = max(peak, running)
+		mu.Unlock()
+
+		time.Sleep(100 * time.Millisecond)
+
+		mu.Lock()
+		running--
+		byPartition[msg.Partition] = append(byPartition[msg.Partition], msg.Offset)
+		handled++
+		if handled == 30 {
+			close(all)
+		}
+		mu.Unlock()
+		return nil
+	})
+	time.Sleep(2 * time.Second) // let the group form before the clock starts
+
+	w := &kafka.Writer{Addr: kafka.TCP(b...), Topic: topic, Balancer: &kafka.RoundRobin{}, RequiredAcks: kafka.RequireAll}
+	defer w.Close()
+	var batch []kafka.Message
+	for i := 0; i < 30; i++ {
+		batch = append(batch, kafka.Message{Value: []byte(fmt.Sprint(i))})
+	}
+	began := time.Now()
+	if err := w.WriteMessages(context.Background(), batch...); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-all:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("only %d of 30 messages were handled", handled)
+	}
+	elapsed := time.Since(began)
+
+	// 30 messages of 100 ms: one at a time that is 3 seconds; three partitions at once, about 1.
+	if elapsed > 2200*time.Millisecond {
+		t.Errorf("took %s: partitions were not handled in parallel", elapsed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak < 2 || peak > 3 {
+		t.Errorf("at most %d handlers ran at once; want 2 or 3 (one per partition)", peak)
+	}
+	for p, offsets := range byPartition {
+		for i := 1; i < len(offsets); i++ {
+			if offsets[i] <= offsets[i-1] {
+				t.Errorf("partition %d handled offset %d after %d: order within a partition was lost", p, offsets[i], offsets[i-1])
+			}
+		}
+	}
+}
+
+// What is queued for a worker when the consumer stops is not committed, so it is handled again.
+func TestMessagesQueuedWhenShuttingDownAreDeliveredAgain(t *testing.T) {
+	b := brokers(t)
+	topic := newTopic(t, b, 1)
+	cfg := config(b, topic)
+	cfg.Workers = 2
+	cfg.RetryTiers = nil
+
+	var first sync.Map
+	running := make(chan struct{}, 1)
+	release := make(chan struct{})
+	stop := start(t, cfg, func(ctx context.Context, msg kafka.Message) error {
+		first.Store(string(msg.Value), true)
+		select {
+		case running <- struct{}{}:
+		default:
+		}
+		select { // block the worker so the rest queue up behind this message
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	})
+	time.Sleep(2 * time.Second)
+	for _, v := range []string{"m1", "m2", "m3"} {
+		publish(t, b, topic, "k", v)
+	}
+	<-running
+	stop() // m1 is being handled, m2 and m3 are queued: none of them may be committed
+	close(release)
+
+	rec := newRecorder()
+	start(t, Config{Brokers: b, GroupID: cfg.GroupID, Topic: topic, LogLabel: "[second]"}, func(_ context.Context, msg kafka.Message) error {
+		rec.record(msg)
+		return nil
+	})
+	waitFor(t, "all three to be delivered again", func() bool { return rec.count() >= 3 })
 }

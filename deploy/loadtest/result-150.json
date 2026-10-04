@@ -1,0 +1,134 @@
+{
+  "config": {
+    "drivers": 3000,
+    "duration": "40s",
+    "orders_per_sec": 150,
+    "rate_fraction": 0.8,
+    "report_interval": "4s"
+  },
+  "load_seconds": 40,
+  "total_seconds": 41.5,
+  "client": {
+    "complete": {
+      "count": 5998,
+      "p50_ms": 2.5,
+      "p95_ms": 6.5,
+      "p99_ms": 10.9,
+      "max_ms": 41.2,
+      "outcomes": {
+        "200": 5998
+      }
+    },
+    "create_to_matched": {
+      "count": 5998,
+      "p50_ms": 1005.1,
+      "p95_ms": 1010.6,
+      "p99_ms": 1015.5,
+      "max_ms": 1039.5,
+      "outcomes": {
+        "MATCHED": 5998
+      }
+    },
+    "gateway_report": {
+      "count": 29998,
+      "p50_ms": 20.5,
+      "p95_ms": 25.4,
+      "p99_ms": 29.4,
+      "max_ms": 63,
+      "outcomes": {
+        "202": 29998
+      }
+    },
+    "order_create": {
+      "count": 5998,
+      "p50_ms": 1.9,
+      "p95_ms": 5.3,
+      "p99_ms": 8.5,
+      "max_ms": 33.8,
+      "outcomes": {
+        "201": 5998
+      }
+    },
+    "pickup": {
+      "count": 5998,
+      "p50_ms": 2.1,
+      "p95_ms": 5.6,
+      "p99_ms": 8.9,
+      "max_ms": 28,
+      "outcomes": {
+        "200": 5998
+      }
+    },
+    "rate": {
+      "count": 4760,
+      "p50_ms": 2.1,
+      "p95_ms": 5.8,
+      "p99_ms": 9.2,
+      "max_ms": 28.6,
+      "outcomes": {
+        "201": 4760
+      }
+    },
+    "trip_lookup": {
+      "count": 5998,
+      "p50_ms": 0.9,
+      "p95_ms": 3.5,
+      "p99_ms": 6,
+      "max_ms": 28.9,
+      "outcomes": {
+        "200": 5998
+      }
+    }
+  },
+  "rates_per_sec": {
+    "complete": 149.9,
+    "create_to_matched": 149.9,
+    "gateway_report": 749.5,
+    "order_create": 149.9,
+    "pickup": 149.9,
+    "rate": 118.9,
+    "trip_lookup": 149.9
+  },
+  "server": {
+    "cpu_cores": {
+      "auth": 0.02,
+      "driver-location": 0.1,
+      "gateway": 0.21,
+      "matching": 0.11,
+      "notification": 0.24,
+      "order": 0.28,
+      "rating": 0.06,
+      "trip": 0.46
+    },
+    "consumer_handler_p95_ms": {
+      "driver-location-service-group": 2.3,
+      "matching-service-group": 9.3,
+      "notification-service-group": 3.4,
+      "order-service-group": 4.4,
+      "rating-service-group": 4.7,
+      "trip-driver-release-group": 4.3,
+      "trip-service-group": 5
+    },
+    "match_latency_seconds": {
+      "p50": 0.05,
+      "p95": 0.09,
+      "p99": 0.1
+    },
+    "http_5xx": 0,
+    "http_requests": 74245,
+    "dead_lettered": 0,
+    "retried": 0,
+    "publish_errors": 0,
+    "outbox_quarantined": 0,
+    "location_reports": {
+      "published": 29529,
+      "stationary": 469
+    },
+    "matching_outcomes": {
+      "matched": 5998
+    }
+  },
+  "max_location_backlog_messages": 0,
+  "location_backlog_cleared_after_s": 0,
+  "max_outbox_age_s": 0
+}

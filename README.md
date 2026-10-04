@@ -219,7 +219,7 @@ In dev, the apps reach the Go services through Vite's proxy, since the services 
 
 ## Operating it
 
-Every service logs JSON in production (with `trace_id` on lines inside a span) and serves Prometheus metrics; a request keeps one trace across HTTP, the outbox, Kafka and the retry topics. `deploy/` has a Dockerfile, a Kustomize base (Kubernetes, Strimzi Kafka across three zones, KEDA scaling on consumer lag, alerts) and `deploy/verify.sh` to check it without a cluster; [docs/runbook.md](docs/runbook.md) says what to do when an alert fires. `dlq-redrive` sends dead letters back to their topic once the cause is fixed:
+Every service logs JSON in production (with `trace_id` on lines inside a span) and serves Prometheus metrics; a request keeps one trace across HTTP, the outbox, Kafka and the retry topics. `deploy/` has a Dockerfile, a Kustomize base (Kubernetes, Strimzi Kafka across three zones, KEDA scaling on consumer lag, alerts) and `deploy/verify.sh` to check it without a cluster; [docs/runbook.md](docs/runbook.md) says what to do when an alert fires, [docs/disaster-recovery.md](docs/disaster-recovery.md) covers backups and failing over, and `deploy/loadtest` measures throughput without Docker ([results and what they mean](docs/performance.md)). `dlq-redrive` sends dead letters back to their topic once the cause is fixed:
 
 ```bash
 KAFKA_BROKERS=localhost:9092 go run ./services/dlq-redrive -topic order.created -dry-run

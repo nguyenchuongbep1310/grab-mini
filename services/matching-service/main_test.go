@@ -196,3 +196,43 @@ func TestMatchOutcomesAndLatencyAreRecorded(t *testing.T) {
 		t.Error("no match latency was recorded")
 	}
 }
+
+func TestSearchRingsGrowOutwardAndEndAtTheConfiguredRadius(t *testing.T) {
+	for _, tc := range []struct {
+		radius float64
+		want   []float64
+	}{{5, []float64{1, 3, 5}}, {3, []float64{1, 3}}, {2, []float64{1, 2}}, {0.5, []float64{0.5}}} {
+		got := searchRings(tc.radius)
+		if len(got) != len(tc.want) {
+			t.Fatalf("searchRings(%v) = %v, want %v", tc.radius, got, tc.want)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Fatalf("searchRings(%v) = %v, want %v", tc.radius, got, tc.want)
+			}
+		}
+	}
+}
+
+// Nothing free inside the first rings: the driver 4 km away is still found,
+// and one 8 km away (outside the 5 km radius) is not.
+func TestMatchingWidensTheSearchUntilItFindsAClaimableDriver(t *testing.T) {
+	rdb, env := setup(t)
+	ctx := context.Background()
+	driverstatus.Set(ctx, rdb, "driver-1", driverstatus.OnTrip)
+	driverstatus.Set(ctx, rdb, "driver-2", driverstatus.OnTrip)
+	for id, lng := range map[string]float64{"far-4km": 106.7009 + 0.036, "too-far-8km": 106.7009 + 0.072} {
+		driverlocation.Update(ctx, rdb, id, 10.7769, lng, 1)
+		driverstatus.SetVehicle(ctx, rdb, id, "CAR")
+		driverstatus.Set(ctx, rdb, id, driverstatus.Available)
+	}
+
+	got, err := findAndClaimNearestDriver(ctx, rdb, "o1", 10.7769, 106.7009, env.MatchRadiusKm, events.VehicleCar, time.Minute)
+	if err != nil || got != "far-4km" {
+		t.Fatalf("got %q, %v; want far-4km", got, err)
+	}
+	got, err = findAndClaimNearestDriver(ctx, rdb, "o2", 10.7769, 106.7009, env.MatchRadiusKm, events.VehicleCar, time.Minute)
+	if err != nil || got != "" {
+		t.Fatalf("got %q, %v; want nobody (too-far-8km is outside the radius)", got, err)
+	}
+}

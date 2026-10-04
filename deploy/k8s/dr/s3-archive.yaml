@@ -1,0 +1,76 @@
+# Archives the business topics to S3 as Avro files (Kafka Connect S3 sink): a
+# cold copy independent of both Kafka clusters, for audit and for rebuilding a
+# read model after a disaster. NOT part of deploy/k8s/base.
+#
+# The Connect image must contain the Confluent S3 sink plugin (Strimzi builds
+# one for you through spec.build; the plugin is under the Confluent Community
+# License, check that it suits you). The credentials come from an IAM role bound
+# to the service account (IRSA) rather than keys.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnect
+metadata:
+  name: grab-mini-archive
+  namespace: grab-mini
+  annotations:
+    strimzi.io/use-connector-resources: "true"
+spec:
+  version: 3.8.0
+  replicas: 2
+  bootstrapServers: grab-mini-kafka-bootstrap:9093
+  tls:
+    trustedCertificates:
+      - secretName: grab-mini-cluster-ca-cert
+        certificate: ca.crt
+  authentication:
+    type: tls
+    certificateAndKey:
+      secretName: grab-mini-archive
+      certificate: user.crt
+      key: user.key
+  config:
+    group.id: grab-mini-archive
+    offset.storage.topic: connect-archive-offsets
+    config.storage.topic: connect-archive-configs
+    status.storage.topic: connect-archive-status
+    offset.storage.replication.factor: 3
+    config.storage.replication.factor: 3
+    status.storage.replication.factor: 3
+    key.converter: org.apache.kafka.connect.storage.StringConverter
+    value.converter: io.confluent.connect.avro.AvroConverter
+    value.converter.schema.registry.url: http://schema-registry:8081
+  build:
+    output:
+      type: docker
+      image: ghcr.io/example/grab-mini/connect-archive:latest   # edit
+      pushSecret: registry-credentials
+    plugins:
+      - name: s3-sink
+        artifacts:
+          - type: zip
+            url: https://hub-downloads.confluent.io/api/plugins/confluentinc/kafka-connect-s3/versions/10.5.13/confluentinc-kafka-connect-s3-10.5.13.zip
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaConnector
+metadata:
+  name: grab-mini-s3-archive
+  namespace: grab-mini
+  labels:
+    strimzi.io/cluster: grab-mini-archive
+spec:
+  class: io.confluent.connect.s3.S3SinkConnector
+  tasksMax: 6
+  config:
+    topics: order.created,order.matched,order.no_driver_found,trip.status.changed,trip.rated
+    s3.bucket.name: grab-mini-event-archive            # edit
+    s3.region: ap-southeast-1                           # edit
+    storage.class: io.confluent.connect.s3.storage.S3Storage
+    format.class: io.confluent.connect.s3.format.avro.AvroFormat
+    flush.size: 10000
+    rotate.interval.ms: 600000
+    # Time-based partitioning: s3://bucket/topics/<topic>/year=.../month=.../day=.../hour=...
+    partitioner.class: io.confluent.connect.storage.partitioner.TimeBasedPartitioner
+    path.format: "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH"
+    partition.duration.ms: 3600000
+    locale: en-US
+    timezone: UTC
+    timestamp.extractor: Record
