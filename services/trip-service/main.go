@@ -21,6 +21,7 @@ import (
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/health"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/serve"
 )
@@ -346,6 +347,7 @@ func main() {
 	mux.HandleFunc("POST /trips/{id}/complete", s.handleComplete)
 	mux.HandleFunc("POST /trips/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /trips/{id}/rating", s.handleRateTrip)
+	health.Register(ctx, mux, health.Postgres(db), health.Redis(rdb), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("trip-service listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {

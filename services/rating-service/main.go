@@ -15,6 +15,7 @@ import (
 
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconsumer"
 	"grab-mini/pkg/serve"
 )
@@ -83,6 +84,8 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rating)
 	})
+
+	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("rating-service listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {

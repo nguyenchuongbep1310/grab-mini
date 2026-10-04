@@ -18,6 +18,8 @@ type Env struct {
 	// How long a claimed driver stays ASSIGNED waiting for Trip Service to
 	// confirm the trip, before they can be claimed again.
 	AssignLease time.Duration
+	// Port for /livez and /readyz; empty (the default) means no health server.
+	HealthPort string
 }
 
 func loadEnv() Env {
@@ -30,6 +32,7 @@ func loadEnv() Env {
 		MatchRetryDelay:   getEnvInt("MATCH_RETRY_DELAY_MS", 2000),
 		InstanceID:        getEnv("INSTANCE_ID", fmt.Sprintf("matching-%d", os.Getpid())),
 		AssignLease:       time.Duration(getEnvInt("ASSIGN_LEASE_SECONDS", 120)) * time.Second,
+		HealthPort:        os.Getenv("HEALTH_PORT"),
 	}
 }
 

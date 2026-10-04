@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 
+	"grab-mini/pkg/health"
 	"grab-mini/pkg/serve"
 )
 
@@ -52,9 +53,10 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // newMux wires the HTTP and WebSocket routes. ctx is the process context,
 // which the sockets' Redis subscriptions use.
-func newMux(ctx context.Context, h *hub) *http.ServeMux {
+func newMux(ctx context.Context, h *hub, checks ...health.Check) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
+	health.Register(ctx, mux, checks...)
 
 	for _, kind := range []string{kindRider, kindDriver} {
 		mux.HandleFunc("GET /ws/"+kind+"/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +84,7 @@ func main() {
 	background.Go(func() { runConsumer(ctx, env, h) })
 
 	log.Printf("notification-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, newMux(ctx, h)); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, newMux(ctx, h, health.Redis(rdb), health.Kafka(env.KafkaBrokers))); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait()

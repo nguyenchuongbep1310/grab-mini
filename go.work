@@ -10,6 +10,7 @@ use (
 	./services/pkg/driverstatus
 	./services/pkg/eventcodec
 	./services/pkg/events
+	./services/pkg/health
 	./services/pkg/kafkaconsumer
 	./services/pkg/migrate
 	./services/pkg/outbox

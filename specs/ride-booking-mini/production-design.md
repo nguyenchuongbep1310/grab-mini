@@ -271,8 +271,31 @@ Code: `trip-service/consumer.go` (`releaseDriverAfterTrip`), `pkg/driverstatus` 
 
 ### Cách đã kiểm thử
 
-Test tự động chạy trên Postgres 16 và Redis 7 thật: relay (rollback, thứ tự, lỗi publish, nhiều relay, tách theo source), lease và claim theo đơn (kể cả 10 claim đồng thời), matching (giao lại, chưa announce, publish lỗi), Trip Service (tạo trip, replay không đảo trạng thái tài xế, transition và rating cùng event), retry/hủy trong consumer. **Chưa có test end-to-end với Kafka và Schema Registry thật** vì môi trường phát triển không có Docker daemon; cần chạy `pnpm dev:all` và thử lại các bài trong README ("Things to try") trước khi merge.
+Test tự động chạy trên Postgres 16, Redis 7 và **Kafka 3.8 thật** (KRaft, một node): relay (rollback, thứ tự, lỗi publish, nhiều relay, tách theo source, publish qua `kafka.Writer` thật), lease và claim theo đơn (kể cả 10 claim đồng thời), matching (giao lại, chưa announce, publish lỗi), Trip Service (tạo trip, replay không đảo trạng thái tài xế, transition và rating cùng event, giải phóng tài xế), và consumer (retry qua các tầng, DLQ, lỗi vĩnh viễn, không chặn partition, shutdown, message bị ngắt giữa chừng được giao lại). Các test này tự bỏ qua nếu không đặt `TEST_DATABASE_URL`, `TEST_REDIS_ADDR`, `TEST_KAFKA_BROKERS` (xem README).
 
-### Giai đoạn 2 trở đi
+**Chưa chạy toàn bộ hệ thống** (Schema Registry, ksqlDB, các app React) vì môi trường phát triển không có Docker daemon. Các service chưa được chạy cùng nhau end-to-end: cần `pnpm dev:all` và thử lại các bài trong README ("Things to try") trước khi merge.
 
-Chưa làm: retry topic (3.3), Notification scale ngang (3.5), migration DB, health check phụ thuộc, và toàn bộ giai đoạn 3 đến 5.
+## 12. Giai đoạn 2 (đã làm)
+
+| Mục | Kết quả | Nơi trong code |
+|---|---|---|
+| 3.3 Retry topic | Với `RetryTiers`, lỗi tạm thời đưa message sang `<topic>.retry.1`, `.2`, `.3` (chờ 5 giây, 1 phút, 10 phút) và partition chạy tiếp. Mỗi tầng có reader riêng (group `<group>.retry.<n>`) chờ đến hạn rồi thử lại; hết tầng cuối thì sang DLQ. Lỗi vĩnh viễn vẫn đi thẳng DLQ. Handler luôn thấy `msg.Topic` gốc. Retry topic được tạo khi khởi động nếu chưa có. Order, Matching, Trip, Rating bật `DefaultRetryTiers`. | `pkg/kafkaconsumer` |
+| 3.5 Notification scale ngang | Event mang `riderId` (`order.matched`, `order.no_driver_found`, `trip.status.changed`; trường mới có default `""` nên tương thích BACKWARD). Notification không ghi socket trực tiếp từ event Kafka: nó `PUBLISH` lên kênh Redis `notify:rider:<id>` / `notify:driver:<id>`, instance nào giữ socket (đã `SUBSCRIBE` lúc kết nối) thì ghi. Trạng thái định tuyến (order→rider cho event cũ, driver→rider cho vị trí) nằm trong Redis. | `notification-service/hub.go`, `consumer.go`; `matching-service`, `trip-service` (cột `trips.rider_id`) |
+| Migration DB | Mỗi service có `migrations/*.sql` nhúng trong binary, chạy bằng goose, bảng version riêng (`schema_migrations_<service>`), khóa advisory để nhiều instance không chạy trùng. `<service> migrate` chạy rồi thoát; `RUN_MIGRATIONS=false` bỏ qua lúc khởi động. | `pkg/migrate`, `*/migrations/` |
+| Health check | `/livez` (luôn 200) tách khỏi `/readyz` (kiểm tra Postgres/Redis/Kafka, mỗi check có timeout 2 giây, chạy song song, 503 kèm tên dependency lỗi). `/readyz` trả 503 ngay khi nhận SIGTERM để load balancer rút traffic trước. Matching và driver-location không có API HTTP nên chỉ mở probe khi đặt `HEALTH_PORT`. `/health` cũ giữ nguyên (liveness) cho `dev.sh`. | `pkg/health` |
+
+Phát hiện khi kiểm thử trên Kafka thật:
+
+- **`kafka.Reader` mặc định `MaxWait` 10 giây, và `Close()` chờ fetch đang treo.** Service mất tới 6 đến 10 giây để dừng, kể cả phần graceful shutdown của giai đoạn 1. Đặt `MaxWait` 500ms thì `Close()` mất vài mili giây.
+- Một `Reader` có `GroupID` không tự tạo topic chưa tồn tại, nên `kafkaconsumer` tạo retry topic khi khởi động.
+
+Thay đổi hành vi và đánh đổi cần biết:
+
+- **Retry topic làm đảo thứ tự**: message được thử lại sau những message đứng sau nó. Các handler bật `RetryTiers` đã chịu được việc này (chuyển trạng thái được bảo vệ bằng trạng thái hiện tại, mọi event có `eventId`). Với `driver.location.updated` và Notification không bật retry tầng: thông báo gửi lại sau vài phút chỉ hiển thị trạng thái cũ.
+- **Redis trở thành dependency của Notification Service** (trước đây chỉ Kafka). Tin nhắn đăng lên kênh Redis lúc không có ai subscribe sẽ bị bỏ, đúng ngữ nghĩa best-effort của WebSocket: app khôi phục qua REST sau khi kết nối lại (design.md mục 4d).
+- Mỗi cập nhật vị trí tốn thêm một `GET` Redis (tra tài xế→rider) và tối đa hai `PUBLISH`. Ở mức 25.000 msg/s (mục 1) đây là chỗ cần đo; nếu thành vấn đề, thêm cache cục bộ cho ánh xạ tài xế→rider.
+- Trip Service lưu `rider_id` trên trip; trip tạo trước thay đổi này có `rider_id` rỗng nên event của chúng dùng đường dự phòng (tra order→rider trong Redis).
+
+## 13. Còn lại
+
+Giai đoạn 3 đến 5 (mục 9) chưa làm: xác thực người dùng, TLS/ACL Kafka, secret manager, Location Gateway; cluster 3 broker nhiều zone, Kubernetes, KEDA, metric và trace; shard Redis GEO, sao lưu S3, kiểm thử tải. Hai việc nhỏ còn treo từ giai đoạn 2: dọn bảng `processed_events` và `outbox` theo lịch (mục 5), và cache ánh xạ tài xế→rider nếu đo thấy cần.

@@ -15,6 +15,7 @@ import (
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconsumer"
 )
 
@@ -123,6 +124,8 @@ func runConsumer(ctx context.Context, env Env) {
 	defer producer.Close()
 
 	codec := eventcodec.New(env.SchemaRegistryURL)
+
+	go health.Serve(ctx, env.HealthPort, health.Redis(rdb), health.Kafka(env.KafkaBrokers))
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers:    env.KafkaBrokers,
