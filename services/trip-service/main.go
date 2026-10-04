@@ -434,7 +434,7 @@ func main() {
 		log.Fatal(err)
 	}
 	mux := s.routes(verifier)
-	health.Register(ctx, mux, health.Postgres(db), health.Redis(rdb), health.Kafka(env.KafkaBrokers))
+	health.Mount(ctx, mux, health.Postgres(db), health.Redis(rdb), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("trip-service listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("trip-service", metrics.HTTP(mux))); err != nil {

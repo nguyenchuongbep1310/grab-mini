@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -125,6 +126,20 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// Mount puts the probes and /metrics where the environment says. With
+// HEALTH_PORT unset they share the service's own mux (convenient locally).
+// With it set they move to a separate admin server on that port and are
+// *not* on the mux: the service's port can then be exposed to the internet
+// (through an ingress) without exposing /metrics, which is unauthenticated, or
+// the readiness detail, and an orchestrator probes the admin port instead.
+func Mount(ctx context.Context, mux *http.ServeMux, checks ...Check) {
+	if port := os.Getenv("HEALTH_PORT"); port != "" {
+		go Serve(ctx, port, checks...)
+		return
+	}
+	Register(ctx, mux, checks...)
 }
 
 // Serve runs just the two probes on port until ctx is cancelled, for a

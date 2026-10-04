@@ -81,7 +81,7 @@ func newMux(ctx context.Context, h *hub, verifier *auth.Verifier, allowedOrigins
 	upgrader := newUpgrader(allowedOrigins)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
-	health.Register(ctx, mux, checks...)
+	health.Mount(ctx, mux, checks...)
 
 	for _, kind := range []string{kindRider, kindDriver} {
 		role := auth.Role(kind)

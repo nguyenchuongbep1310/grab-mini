@@ -1,0 +1,12 @@
+.git
+.dev
+node_modules
+**/node_modules
+apps
+packages
+specs
+scripts
+deploy
+*.md
+**/*_test.go
+**/dump.rdb

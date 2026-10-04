@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -132,5 +133,70 @@ func TestRedisAndPostgresChecksAgainstRealServers(t *testing.T) {
 	defer dead.Close()
 	if err := Redis(dead).Fn(ctx); err == nil {
 		t.Error("a dead redis reported ready")
+	}
+}
+
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+	return port
+}
+
+func status(url string) int {
+	res, err := http.Get(url)
+	if err != nil {
+		return 0
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+func TestWithoutAnAdminPortTheProbesShareTheServicesMux(t *testing.T) {
+	t.Setenv("HEALTH_PORT", "")
+	mux := http.NewServeMux()
+	Mount(context.Background(), mux, ok("x"))
+	for _, p := range []string{"/livez", "/readyz", "/metrics"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s on the service mux = %d, want 200", p, rec.Code)
+		}
+	}
+}
+
+func TestWithAnAdminPortTheProbesLeaveThePublicMux(t *testing.T) {
+	port := freePort(t)
+	t.Setenv("HEALTH_PORT", port)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mux := http.NewServeMux()
+	Mount(ctx, mux, ok("x"))
+
+	// Not reachable through the service's own port...
+	for _, p := range []string{"/livez", "/readyz", "/metrics"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s on the public mux = %d, want 404: it must not be exposed there", p, rec.Code)
+		}
+	}
+	// ...but served on the admin port.
+	deadline := time.Now().Add(3 * time.Second)
+	for status("http://127.0.0.1:"+port+"/readyz") != http.StatusOK {
+		if time.Now().After(deadline) {
+			t.Fatal("the admin server never came up")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, p := range []string{"/livez", "/readyz", "/metrics"} {
+		if got := status("http://127.0.0.1:" + port + p); got != http.StatusOK {
+			t.Errorf("GET %s on the admin port = %d, want 200", p, got)
+		}
 	}
 }

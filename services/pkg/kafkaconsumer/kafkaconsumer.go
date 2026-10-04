@@ -29,6 +29,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -88,6 +89,8 @@ type Config struct {
 	// (see package kafkaconn); nil means use that. For tests.
 	Security *kafkaconn.Security
 
+	// KAFKA_TOPIC_PARTITIONS and KAFKA_REPLICATION_FACTOR set these for every
+	// consumer in a deployment (production sets the replication factor to 3).
 	// Retry and dead-letter topics are created on startup if missing (with the
 	// Create permission the ACLs grant on "<topic>."), with
 	// these settings (defaults 3 partitions, replication factor 1: right for
@@ -365,13 +368,8 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 // subscribed topic that don't exist yet, so the failure path works on a broker
 // that doesn't auto-create topics (production's shouldn't).
 func (c *consumer) ensureTopics(ctx context.Context) error {
-	partitions, rf := c.cfg.Partitions, c.cfg.ReplicationFactor
-	if partitions <= 0 {
-		partitions = 3
-	}
-	if rf <= 0 {
-		rf = 1
-	}
+	partitions := firstPositive(c.cfg.Partitions, envInt("KAFKA_TOPIC_PARTITIONS"), 3)
+	rf := firstPositive(c.cfg.ReplicationFactor, envInt("KAFKA_REPLICATION_FACTOR"), 1)
 	var specs []kafka.TopicConfig
 	for _, t := range c.topics {
 		specs = append(specs, kafka.TopicConfig{Topic: events.DeadLetterTopic(t), NumPartitions: partitions, ReplicationFactor: rf})
@@ -390,6 +388,21 @@ func (c *consumer) ensureTopics(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func envInt(name string) int {
+	n, _ := strconv.Atoi(os.Getenv(name))
+	return n
+}
+
+// firstPositive is the first argument above zero.
+func firstPositive(values ...int) int {
+	for _, v := range values {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // carriedHeaders are the headers a message arrived with that belong to its

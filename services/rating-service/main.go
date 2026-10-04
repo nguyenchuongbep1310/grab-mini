@@ -105,7 +105,7 @@ func main() {
 		json.NewEncoder(w).Encode(rating)
 	}), auth.Rider, auth.Driver))
 
-	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
+	health.Mount(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("rating-service listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("rating-service", metrics.HTTP(mux))); err != nil {

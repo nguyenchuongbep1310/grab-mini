@@ -219,7 +219,7 @@ func main() {
 	})
 
 	mux := g.routes(verifier)
-	health.Register(ctx, mux, health.Kafka(env.KafkaBrokers))
+	health.Mount(ctx, mux, health.Kafka(env.KafkaBrokers))
 
 	log.Printf("location-gateway listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("location-gateway", metrics.HTTP(mux))); err != nil {

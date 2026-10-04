@@ -118,3 +118,21 @@ func TestHandleWithRetryReturnsPromptlyWhenCancelledDuringTheRetryPause(t *testi
 		t.Fatal("still sleeping through the retry delay after cancel")
 	}
 }
+
+func TestTopicSettingsComeFromTheConfigThenTheEnvironmentThenADefault(t *testing.T) {
+	t.Setenv("KAFKA_REPLICATION_FACTOR", "3")
+	t.Setenv("KAFKA_TOPIC_PARTITIONS", "")
+	if got := firstPositive(0, envInt("KAFKA_REPLICATION_FACTOR"), 1); got != 3 {
+		t.Errorf("replication factor from the environment = %d, want 3 (production creates retry topics replicated)", got)
+	}
+	if got := firstPositive(2, envInt("KAFKA_REPLICATION_FACTOR"), 1); got != 2 {
+		t.Errorf("an explicit config value should win, got %d", got)
+	}
+	if got := firstPositive(0, envInt("KAFKA_TOPIC_PARTITIONS"), 3); got != 3 {
+		t.Errorf("default partitions = %d, want 3", got)
+	}
+	t.Setenv("KAFKA_TOPIC_PARTITIONS", "not a number")
+	if got := firstPositive(0, envInt("KAFKA_TOPIC_PARTITIONS"), 3); got != 3 {
+		t.Errorf("an unparsable value should fall back to the default, got %d", got)
+	}
+}

@@ -1,0 +1,328 @@
+# Unit tests for alerts.rules.yaml:  promtool test rules deploy/monitoring/alerts.test.yaml
+# Each alert has a case that must fire and one that must stay quiet, because an
+# alert that never fires and one that always fires are equally useless.
+rule_files:
+  - alerts.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------- dead letters
+  - name: a dead-lettered message pages, immediately
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="trip-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, group: trip-service-group, topic: order.matched}
+            exp_annotations:
+              summary: "trip-service-group dead-lettered messages from order.matched"
+              description: "At least one message could not be processed after its retries. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#dead-letters"
+
+  - name: lost driver locations are not a page
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="driver-location-service-group", topic="driver.location.updated", result="dead_lettered"}'
+        values: '0 5 9 20 30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []
+
+  - name: a service whose messages keep failing is a ticket after ten minutes
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="rating-service-group", topic="trip.rated", result="ok"}'
+        values: '0+10x30'
+      - series: 'kafka_consumer_messages_total{group="rating-service-group", topic="trip.rated", result="retried"}'
+        values: '0+3x30'
+      - series: 'kafka_consumer_messages_total{group="order-service-group", topic="order.matched", result="ok"}'
+        values: '0+10x30'
+      - series: 'kafka_consumer_messages_total{group="order-service-group", topic="order.matched", result="retried"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: KafkaConsumerFailureRatioHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, group: rating-service-group}
+            exp_annotations:
+              summary: "More than 5% of rating-service-group's messages are failing"
+              description: "A dependency is probably unhealthy; messages are going through the retry topics."
+              runbook: "docs/runbook.md#dead-letters"
+
+  # ------------------------------------------------------------------------- lag
+  - name: lag that is high and growing pages
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-group", topic="order.created", partition="0"}'
+        values: '800+200x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: KafkaConsumerLagGrowing
+        exp_alerts:
+          - exp_labels: {severity: page, consumergroup: matching-service-group, topic: order.created}
+            exp_annotations:
+              summary: "Consumer group matching-service-group is falling behind on order.created"
+              description: "Lag is above 1000 messages and still growing. Riders see late or missing updates."
+              runbook: "docs/runbook.md#consumer-lag"
+
+  - name: lag that is high but steady, or shrinking, does not page
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="a-group", topic="order.created", partition="0"}'
+        values: '5000x30'
+      - series: 'kafka_consumergroup_lag{consumergroup="b-group", topic="order.matched", partition="0"}'
+        values: '9000-200x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: KafkaConsumerLagGrowing
+        exp_alerts: []
+
+  - name: a retry-tier group waiting on purpose does not page
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-group.retry.2", topic="order.created.retry.2", partition="0"}'
+        values: '800+200x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: KafkaConsumerLagGrowing
+        exp_alerts: []
+
+  - name: the busy location topic has its own, higher threshold
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="driver-location-service-group", topic="driver.location.updated", partition="0"}'
+        values: '20000+500x30'
+      - series: 'kafka_consumergroup_lag{consumergroup="notification-service-group", topic="driver.location.updated", partition="0"}'
+        values: '60000+1000x30'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: KafkaConsumerLagGrowing   # the generic alert ignores this topic entirely
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: KafkaLocationConsumerLagGrowing
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: notification-service-group}
+            exp_annotations:
+              summary: "notification-service-group is behind on driver locations"
+              description: "More than 50000 location updates are waiting and the backlog is growing; positions on the map are stale."
+              runbook: "docs/runbook.md#consumer-lag"
+
+  # ----------------------------------------------------------------------- kafka
+  - name: an under-replicated partition pages after five minutes
+    interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_under_replicated_partition{topic="order.created", partition="3"}'
+        values: '0 0 1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KafkaUnderReplicatedPartitions
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: KafkaUnderReplicatedPartitions
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "1 Kafka partition(s) are under-replicated"
+              description: "A broker is down or lagging. With min.insync.replicas=2, losing one more replica stops producers."
+              runbook: "docs/runbook.md#kafka-broker-down"
+
+  - name: a missing broker pages, a full cluster does not
+    interval: 1m
+    input_series:
+      - series: 'kafka_brokers{pod="exporter-a"}'
+        values: '3 3 2x10'
+      - series: 'kafka_brokers{pod="exporter-b"}'
+        values: '3x12'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: KafkaBrokersMissing
+        exp_alerts:
+          - exp_labels: {severity: page, pod: exporter-a}
+            exp_annotations:
+              summary: "Only 2 of 3 Kafka brokers are in the cluster"
+              runbook: "docs/runbook.md#kafka-broker-down"
+
+  - name: failing publishes are a ticket once they persist
+    interval: 1m
+    input_series:
+      - series: 'kafka_publish_errors_total{topic="order.matched"}'
+        values: '0+1x20'
+      - series: 'kafka_publish_errors_total{topic="trip.rated"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: KafkaPublishErrors
+        exp_alerts:
+          - exp_labels: {severity: ticket, topic: order.matched}
+            exp_annotations:
+              summary: "Publishing to order.matched is failing"
+              description: "Services could not publish. Outbox-backed topics retry on their own; Matching and the Location Gateway do not."
+              runbook: "docs/runbook.md#kafka-broker-down"
+
+  # ---------------------------------------------------------------------- outbox
+  - name: an outbox event waiting more than 30s pages, a drained outbox does not
+    interval: 1m
+    input_series:
+      - series: 'outbox_oldest_pending_age_seconds{source="order-service"}'
+        values: '0 0 45 90 120 150 180'
+      - series: 'outbox_oldest_pending_age_seconds{source="trip-service"}'
+        values: '0 0 2 0 1 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxBacklog
+        exp_alerts:
+          - exp_labels: {severity: page, source: order-service}
+            exp_annotations:
+              summary: "order-service has events waiting 2m 30s to be published"
+              description: "State changes are committed but not announced: riders and other services are not being told."
+              runbook: "docs/runbook.md#outbox-backlog"
+
+  # -------------------------------------------------------------------- business
+  - name: slow matching breaches the SLO
+    interval: 1m
+    input_series:
+      # Per minute: 10 orders in 1s, 10 more in 3s, 80 in 10s: p95 is well over 3s.
+      - series: 'matching_latency_seconds_bucket{le="1"}'
+        values: '0+10x40'
+      - series: 'matching_latency_seconds_bucket{le="3"}'
+        values: '0+20x40'
+      - series: 'matching_latency_seconds_bucket{le="10"}'
+        values: '0+100x40'
+      - series: 'matching_latency_seconds_bucket{le="+Inf"}'
+        values: '0+100x40'
+      - series: 'matching_latency_seconds_count'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MatchLatencySLOBreach
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "p95 time to match an order is 9.562s (SLO: 3s)"
+              runbook: "docs/runbook.md#slow-matching"
+
+  - name: fast matching does not
+    interval: 1m
+    input_series:
+      - series: 'matching_latency_seconds_bucket{le="1"}'
+        values: '0+90x40'
+      - series: 'matching_latency_seconds_bucket{le="3"}'
+        values: '0+98x40'
+      - series: 'matching_latency_seconds_bucket{le="10"}'
+        values: '0+100x40'
+      - series: 'matching_latency_seconds_bucket{le="+Inf"}'
+        values: '0+100x40'
+      - series: 'matching_latency_seconds_count'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MatchLatencySLOBreach
+        exp_alerts: []
+
+  - name: slow matching with almost no orders is not a page
+    interval: 1m
+    input_series:
+      - series: 'matching_latency_seconds_bucket{le="3"}'
+        values: '0x40'
+      - series: 'matching_latency_seconds_bucket{le="+Inf"}'
+        values: '0+1x40'
+      - series: 'matching_latency_seconds_count'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: MatchLatencySLOBreach
+        exp_alerts: []
+
+  - name: half the orders finding no driver is a ticket
+    interval: 1m
+    input_series:
+      - series: 'matching_orders_total{result="matched"}'
+        values: '0+10x50'
+      - series: 'matching_orders_total{result="no_driver"}'
+        values: '0+10x50'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: NoDriverRatioHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "More than 30% of orders find no driver"
+              description: "Either supply is short, or driver locations/status are wrong (stale Redis, a stuck lease)."
+              runbook: "docs/runbook.md#slow-matching"
+
+  - name: a few unmatched orders is normal
+    interval: 1m
+    input_series:
+      - series: 'matching_orders_total{result="matched"}'
+        values: '0+18x50'
+      - series: 'matching_orders_total{result="no_driver"}'
+        values: '0+2x50'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: NoDriverRatioHigh
+        exp_alerts: []
+
+  - name: sustained booking errors burn the error budget
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{route="POST /orders", code="201"}'
+        values: '0+90x80'
+      - series: 'http_requests_total{route="POST /orders", code="500"}'
+        values: '0+10x80'   # 10% of bookings fail
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: OrderCreationErrorBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Booking is failing: the error budget is burning 14x too fast"
+              runbook: "docs/runbook.md#booking-errors"
+
+  - name: a tiny error rate within budget does not
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{route="POST /orders", code="201"}'
+        values: '0+1000x80'
+      - series: 'http_requests_total{route="POST /orders", code="500"}'
+        values: '0+1x80'    # 0.1%: exactly what the SLO allows
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: OrderCreationErrorBudgetBurn
+        exp_alerts: []
+
+  - name: a short burst of errors does not page (the long window disagrees)
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{route="POST /orders", code="201"}'
+        values: '0+100x80'
+      # Healthy for an hour, then 8 minutes of failures: 5m window is hot, 1h window is not.
+      - series: 'http_requests_total{route="POST /orders", code="500"}'
+        values: '0x62 0+8x8'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: OrderCreationErrorBudgetBurn
+        exp_alerts: []
+
+  - name: unavailable replicas are a ticket after ten minutes
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_unavailable{namespace="grab-mini", deployment="trip-service"}'
+        values: '0 0 1x20'
+      - series: 'kube_deployment_status_replicas_unavailable{namespace="other", deployment="x"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: DeploymentReplicasUnavailable
+        exp_alerts:
+          - exp_labels: {severity: ticket, namespace: grab-mini, deployment: trip-service}
+            exp_annotations:
+              summary: "trip-service has 1 replica(s) not ready"
+              description: "Check /readyz: a dependency (Postgres, Redis, Kafka) is probably down."
+              runbook: "docs/runbook.md#pods-not-ready"
