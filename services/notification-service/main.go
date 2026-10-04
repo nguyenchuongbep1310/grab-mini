@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"grab-mini/pkg/redisconn"
 	"log"
 	"net/http"
 	"os"
@@ -12,7 +13,6 @@ import (
 	"syscall"
 
 	"github.com/gorilla/websocket"
-	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/health"
@@ -117,7 +117,7 @@ func main() {
 	defer stop()
 	defer tracing.Setup(ctx, "notification-service")()
 
-	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
 
 	verifier, err := auth.VerifierFromEnv()

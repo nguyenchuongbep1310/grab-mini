@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"grab-mini/pkg/redisconn"
 	"log"
 	"os"
 	"os/signal"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/driverlocation"
@@ -32,7 +32,7 @@ var locationUpdates = promauto.NewCounterVec(prometheus.CounterOpts{
 // driver, discarding updates older than what's already recorded
 // (US-3.1).
 func runConsumer(ctx context.Context, env Env) {
-	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
 
 	codec := eventcodec.New(env.SchemaRegistryURL)

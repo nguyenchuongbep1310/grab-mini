@@ -510,6 +510,10 @@ def config_map():
                 # These point at things this repository doesn't deploy; set them per environment.
                 "SCHEMA_REGISTRY_URL": "http://schema-registry:8081",
                 "REDIS_ADDR": "redis:6379",
+                # With a Sentinel-managed Redis, list the Sentinels and the services follow failovers
+                # on their own (REDIS_ADDR is then ignored). Empty = the single node above.
+                "REDIS_SENTINEL_ADDRS": "",
+                "REDIS_MASTER_NAME": "mymaster",
                 # Cell size (degrees) to split the driver GEO set into; 0 = one key. Matching and
                 # Driver Location Service must agree: see docs/performance.md before changing it.
                 "GEO_SHARD_DEGREES": "0",

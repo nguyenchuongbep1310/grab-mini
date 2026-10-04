@@ -381,5 +381,5 @@ Nguyên tắc của giai đoạn này là **đo trước, tối ưu sau**, nên 
   `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
 
 Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); chưa diễn tập khôi phục/chuyển
-vùng; Redis chưa có Sentinel/Cluster (và shard theo ô chưa hỗ trợ Cluster); bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
+vùng; Redis Cluster chưa hỗ trợ (script dựng key động); Sentinel được client hỗ trợ và đã thử failover thật, nhưng manifest không triển khai Redis; bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
 mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).

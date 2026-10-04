@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"grab-mini/pkg/redisconn"
 	"log"
 	"os"
 	"os/signal"
@@ -147,7 +148,7 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 }
 
 func runConsumer(ctx context.Context, env Env) {
-	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
 
 	producer := kafkaconn.Writer(&kafka.Writer{
