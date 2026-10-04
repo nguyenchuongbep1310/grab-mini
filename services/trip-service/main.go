@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"grab-mini/pkg/redisconn"
 	"log"
 	"net/http"
 	"os"
@@ -408,7 +409,7 @@ func main() {
 	}
 	defer db.Close()
 
-	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
 
 	// The writer has no Topic: the outbox rows name theirs.

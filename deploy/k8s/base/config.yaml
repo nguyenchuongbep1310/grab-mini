@@ -17,6 +17,8 @@ data:
   KAFKA_TOPIC_PARTITIONS: '6'
   SCHEMA_REGISTRY_URL: http://schema-registry:8081
   REDIS_ADDR: redis:6379
+  REDIS_SENTINEL_ADDRS: ''
+  REDIS_MASTER_NAME: mymaster
   GEO_SHARD_DEGREES: '0'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4318
   ALLOWED_ORIGINS: https://app.example.com

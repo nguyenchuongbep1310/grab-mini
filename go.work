@@ -12,6 +12,7 @@ use (
 	./services/notification-service
 	./services/order-service
 	./services/pkg/driverlocation
+	./services/pkg/redisconn
 	./services/pkg/auth
 	./services/pkg/driverstatus
 	./services/pkg/eventcodec

@@ -9,11 +9,26 @@ Phạm vi: mất một vùng (region) hoặc mất dữ liệu. Mất một brok
 |---|---|---|---|
 | Đơn, chuyến đi, đánh giá, outbox | Postgres (order, trip, rating) | **Mất thật**: nguồn sự thật | Sao lưu Postgres + PITR (bên dưới) |
 | Event nghiệp vụ (`order.*`, `trip.*`) | Kafka, giữ 7 ngày | Dựng lại được từ Postgres cho phần đã commit; consumer chậm hơn 7 ngày mất event | MirrorMaker 2 sang vùng dự phòng; lưu trữ S3 |
-| Vị trí tài xế, trạng thái tài xế, lease | Redis | **Tự hồi phục**: tài xế báo lại mỗi vài giây; lease hết hạn thì tài xế nhận được đơn lại | Không cần sao lưu |
+| Vị trí tài xế, trạng thái tài xế, lease | Redis (một master + replica, Sentinel giám sát) | **Tự hồi phục**: tài xế báo lại mỗi vài giây; lease hết hạn thì tài xế nhận được đơn lại | Không cần sao lưu |
 | Schema Avro | Schema Registry (topic `_schemas` của Kafka) | Producer/consumer mới không giải mã được | Nằm trong Kafka: được MirrorMaker 2 nếu thêm `_schemas` vào `topicsPattern`; hoặc đăng ký lại từ `services/pkg/events/schemas/` (các service tự đăng ký khi khởi động) |
 
 Mục tiêu đề xuất (hãy chỉnh theo hợp đồng thật): **RPO** (mất dữ liệu tối đa) vài giây với Postgres có replica đồng bộ/PITR, vài chục giây với
 Kafka sang vùng dự phòng (MirrorMaker 2 sao chép bất đồng bộ); **RTO** (thời gian khôi phục) vài chục phút, phần lớn là thao tác tay bên dưới.
+
+## 0. Redis: Sentinel (mất một node, không phải mất vùng)
+
+Redis không cần sao lưu (xem bảng trên) nhưng cần **sẵn sàng**: khi master chết, Matching và Driver Location Service dừng. Mọi service dùng
+`pkg/redisconn`: đặt `REDIS_SENTINEL_ADDRS` (ConfigMap, danh sách Sentinel cách nhau dấu phẩy) và `REDIS_MASTER_NAME` thì client hỏi Sentinel
+master hiện tại và **tự theo failover**, không phải khởi động lại service. Để trống thì dùng `REDIS_ADDR` một node như trước. Mật khẩu qua
+`REDIS_PASSWORD(_FILE)` và `REDIS_SENTINEL_PASSWORD(_FILE)`.
+
+Đã kiểm chứng: `TestTheClientFollowsAFailover` (`pkg/redisconn`) chạy trên một master, một replica và một Sentinel thật, yêu cầu
+`SENTINEL FAILOVER`, chờ Sentinel đổi master rồi yêu cầu cùng một client ghi được vào master mới và master cũ từ chối ghi. Chưa kiểm chứng:
+Sentinel có đủ 3 node (quorum 2) và độ trễ failover khi master chết đột ngột (`down-after-milliseconds` + bầu chọn, thường vài giây đến chục giây).
+Manifest **không** triển khai Redis/Sentinel (như Postgres, nên dùng dịch vụ quản lý hoặc operator); chỉ cấu hình phía client có trong repo.
+
+Sentinel thêm tính sẵn sàng, không thêm dung lượng: vẫn một master. Replica sao chép bất đồng bộ nên lúc failover có thể mất vài giây ghi cuối
+(vị trí tự bù; nhưng một lease hoặc `match:<orderId>` ghi cuối cũng có thể mất, và hệ quả của việc đó, ví dụ một đơn bị ghép hai lần, **chưa được kiểm thử**).
 
 ## 1. Postgres
 
@@ -67,5 +82,5 @@ bên không rẽ nhánh.
 ## Chưa làm
 
 - Chưa có diễn tập chuyển vùng hay khôi phục nào; mọi RPO/RTO ở trên là mục tiêu, không phải số đo.
-- Redis không có sao lưu (cố ý) và cũng chưa có Sentinel/Cluster trong manifest.
+- Redis không có sao lưu (cố ý) và manifest không triển khai Redis/Sentinel; Redis Cluster không dùng được (xem docs/performance.md).
 - Active-active nhiều vùng: không làm. Hai vùng cùng ghi Postgres và cùng ghép tài xế cần thiết kế riêng về xung đột.

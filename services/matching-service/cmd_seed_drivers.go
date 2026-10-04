@@ -2,9 +2,8 @@ package main
 
 import (
 	"context"
+	"grab-mini/pkg/redisconn"
 	"log"
-
-	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/driverstatus"
@@ -29,7 +28,7 @@ var seedDrivers = []seedDriver{
 
 func runSeedDrivers(env Env) {
 	ctx := context.Background()
-	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
 
 	if err := driverlocation.Clear(ctx, rdb); err != nil {
