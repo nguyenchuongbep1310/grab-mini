@@ -326,6 +326,44 @@ Giới hạn đã biết, chưa làm:
 - Chưa có mTLS giữa các service, chưa mã hóa trường dữ liệu cá nhân, chưa đặt retention ngắn cho topic vị trí.
 - Chưa chạy end-to-end cả hệ thống (Schema Registry, ksqlDB, các app) vì sandbox không có Docker. Gateway và các route xác thực được kiểm thử bằng test tự động và bằng binary thật với Postgres, Redis, Kafka; còn luồng trình duyệt (đăng nhập, WebSocket với subprotocol) mới được kiểm tra bằng typecheck, chưa chạy trong trình duyệt.
 
-## 14. Còn lại
+## 14. Giai đoạn 4 (đã làm)
 
-Giai đoạn 4 và 5 (mục 9): cluster 3 broker nhiều zone, Kubernetes, KEDA, metric và trace, runbook; shard Redis GEO, sao lưu S3, kiểm thử tải. Cùng với các giới hạn đã liệt kê ở mục 13, và hai việc nhỏ từ giai đoạn 2 (dọn bảng `processed_events`, `outbox` theo lịch; cache ánh xạ tài xế→rider nếu đo thấy cần).
+| Mục | Kết quả | Nơi trong code |
+|---|---|---|
+| Log có cấu trúc (7) | `logging.Setup` đưa mọi dòng log, kể cả `log.Printf`, qua `slog`: JSON có `service` ở production. Dòng nằm trong một span có thêm `trace_id` và `span_id`. Các dòng chính của consumer có `topic`, `partition`, `offset`, `key` làm trường riêng. | `pkg/logging`, `pkg/kafkaconsumer` |
+| Metric (7) | `/metrics` trên mọi service: HTTP theo route (không theo URL), publish theo topic, `kafka_consumer_messages_total{result=ok\|retried\|dead_lettered}`, `outbox_oldest_pending_age_seconds`, độ trễ ghép (SLO 3 giây), đơn tạo, trip chuyển trạng thái, vị trí theo kết quả, socket đang mở. | `pkg/metrics`, từng service |
+| Truy vết (7) | W3C `traceparent` qua HTTP và header Kafka, kể cả qua outbox (lưu cạnh dòng, cột `headers`) và qua retry topic. Một request qua Postgres, Kafka thật và một retry topic là **một trace**, mọi consumer span là con của request span. Xuất OTLP khi đặt `OTEL_EXPORTER_OTLP_ENDPOINT`; lấy mẫu 100% (dev) hoặc 10% (production). | `pkg/tracing`, `pkg/outbox` |
+| Cổng admin (6.1) | `HEALTH_PORT` chuyển `/livez`, `/readyz`, `/metrics` sang một cổng riêng và bỏ chúng khỏi mux công khai: ingress không thể lộ `/metrics`. | `pkg/health` (`Mount`) |
+| Triển khai (6.1) | Dockerfile (distroless, non-root); Kustomize base sinh từ `generate.py`: Deployment (non-root, filesystem chỉ đọc, probe, `maxUnavailable: 0`, trải qua zone, PDB, `preStop`), Job migration, KEDA scale theo lag (chặn bởi số partition), NetworkPolicy, PodMonitor. | `deploy/` |
+| Cluster Kafka (4.1) | Strimzi: 3 controller KRaft và 3 broker trải 3 zone, `replication.factor=3`, `min.insync.replicas=2`, không bầu leader không đồng bộ, không tự tạo topic. `KafkaUser` và ACL **đọc từ `scripts/kafka-acls.sh`**: một bảng quyền duy nhất. | `deploy/k8s/base/kafka/` |
+| Cảnh báo (7) | 15 luật: dead letter (page với bất kỳ message nào), lag tăng, tỷ lệ lỗi, URP, thiếu broker, lỗi publish, outbox kẹt, dòng bị cách ly, SLO ghép 3 giây, tỷ lệ không có tài xế, burn-rate đa cửa sổ cho đặt xe. Mỗi luật có test ca "phải kêu" và ca "không kêu" chạy bằng `promtool test rules`. | `deploy/monitoring/` |
+| Runbook | Một mục cho mỗi cảnh báo: kiểm tra gì, theo thứ tự nào, làm gì; cùng với deploy, replay, xoay vòng secret. | `docs/runbook.md` |
+| Redrive DLQ (3.3) | `dlq-redrive` đẩy dead letter về topic gốc với đúng key và bytes; nhớ vị trí trong consumer group; `-dry-run`, `-error`, `-max`. | `services/dlq-redrive` |
+
+Lỗi tìm thấy và sửa khi làm giai đoạn này:
+
+- **`metrics.HTTP` làm hỏng WebSocket.** Response writer của nó che mất `http.Hijacker`, nên không socket nào mở được qua middleware.
+  Tìm thấy khi chạy test của Notification Service qua đúng chuỗi middleware của production. (Một thay đổi giữa chừng tưởng
+  vô hại sẽ làm Notification Service hỏng hoàn toàn.)
+- **Outbox relay bị chặn bởi một event hỏng.** Một event Kafka không bao giờ nhận (quá lớn, ví dụ) làm mọi lần flush thất bại:
+  các event sau bị kẹt và các event tốt trong cùng lô bị gửi lại mãi. Giờ lô lỗi được thử từng event; event bị từ chối vĩnh viễn
+  chuyển sang `outbox_dead` (có metric và cảnh báo), lỗi tạm thời giữ lại và commit phần đã gửi.
+- **Mất message khi retry topic và DLQ cùng từ chối ghi.** Consumer vẫn commit message đó. Giờ nó giữ partition lại và thử đến khi
+  message nằm an toàn trên một trong hai (hoặc dừng khi tắt máy, để message được giao lại).
+- DLQ và retry topic được tạo với `KAFKA_REPLICATION_FACTOR` (production: 3) thay vì luôn là 1.
+
+Giới hạn đã biết của giai đoạn này:
+
+- **Chưa chạy trên cluster thật.** Manifest đã qua kubeconform (strict, kèm schema CRD của Strimzi, KEDA, Prometheus Operator),
+  kiểm tra chéo với code, và `promtool`. Chưa được áp dụng vào một cluster, nên cách Strimzi/KEDA thật sự hành xử, quyền
+  RBAC, PVC theo zone, và Dockerfile (chưa build vì sandbox không có Docker daemon) đều chưa được kiểm chứng.
+- Ngưỡng cảnh báo là ước lượng theo giả định ở mục 1, chưa được hiệu chỉnh theo lưu lượng thật.
+- Không có dashboard Grafana, chưa có Postgres/Redis/Schema Registry/OpenTelemetry collector trong manifest (đặt qua `config.yaml`).
+- Không có static membership (`group.instance.id`) cho consumer: `kafka-go` v0.4 không hỗ trợ, nên mỗi lần restart pod vẫn gây một rebalance.
+- Mỗi Deployment dùng một ServiceAccount chung và không có egress NetworkPolicy.
+- Matching và Location Gateway vẫn không có outbox (xem runbook).
+
+## 15. Còn lại
+
+Giai đoạn 5 (mục 9): shard Redis GEO, sao lưu S3 và DR đa vùng, kiểm thử tải. Cùng với các giới hạn ở mục 13 và 14, và hai việc
+nhỏ từ giai đoạn 2 (dọn bảng `processed_events`, `outbox`/`outbox_dead` theo lịch; cache ánh xạ tài xế→rider nếu đo thấy cần).

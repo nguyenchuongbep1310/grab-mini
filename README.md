@@ -217,6 +217,14 @@ Explore the design system on its own with `pnpm dev:ui` (http://localhost:5170).
 
 In dev, the apps reach the Go services through Vite's proxy, since the services send no CORS headers.
 
+## Operating it
+
+Every service logs JSON in production (with `trace_id` on lines inside a span) and serves Prometheus metrics; a request keeps one trace across HTTP, the outbox, Kafka and the retry topics. `deploy/` has a Dockerfile, a Kustomize base (Kubernetes, Strimzi Kafka across three zones, KEDA scaling on consumer lag, alerts) and `deploy/verify.sh` to check it without a cluster; [docs/runbook.md](docs/runbook.md) says what to do when an alert fires. `dlq-redrive` sends dead letters back to their topic once the cause is fixed:
+
+```bash
+KAFKA_BROKERS=localhost:9092 go run ./services/dlq-redrive -topic order.created -dry-run
+```
+
 ## Tests
 
 ```bash

@@ -126,13 +126,19 @@ const (
 	headerLastError     = "x-last-error"
 )
 
+// messageWriter is the part of *kafka.Writer the failure path needs.
+type messageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
 type consumer struct {
 	cfg        Config
 	label      string
 	maxRetries int
 	retryDelay time.Duration
 	topics     []string
-	out        *kafka.Writer // retry and dead-letter topics
+	out        messageWriter // retry and dead-letter topics
 	security   *kafkaconn.Security
 }
 
@@ -241,7 +247,9 @@ func (c *consumer) runSource(ctx context.Context, handle Handler) {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			c.fail(ctx, msg, err, 0)
+			if !c.failSafely(ctx, msg, err, 0) {
+				return msg, false
+			}
 		} else {
 			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
 		}
@@ -281,7 +289,9 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			c.fail(ctx, msg, err, tier)
+			if !c.failSafely(ctx, msg, err, tier) {
+				return msg, false
+			}
 		} else {
 			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
 		}
@@ -332,14 +342,19 @@ func (c *consumer) loop(ctx context.Context, reader *kafka.Reader, process func(
 // (attempt is how many it has already been through), or the dead-letter
 // topic when the error is permanent or the tiers are used up. It must run
 // before the message is committed.
-func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, attempt int) {
+//
+// It returns an error if the message could not be put on either: the caller
+// must then not commit it, or it would be lost.
+func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, attempt int) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
 	if isPermanent(cause) || attempt >= len(c.cfg.RetryTiers) {
+		if err := publishToDLQ(ctx, c.out, msg, cause, attempt, c.label); err != nil {
+			return err
+		}
 		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
-		publishToDLQ(ctx, c.out, msg, cause, attempt, c.label)
-		return
+		return nil
 	}
 	next := attempt + 1
 	retry := kafka.Message{
@@ -355,13 +370,44 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 	}
 	if err := c.out.WriteMessages(ctx, retry); err != nil {
 		log.Printf("%s failed to publish to %s, dead-lettering instead: %v", c.label, retry.Topic, err)
+		if err := publishToDLQ(ctx, c.out, msg, cause, attempt, c.label); err != nil {
+			return err
+		}
 		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
-		publishToDLQ(ctx, c.out, msg, cause, attempt, c.label)
-		return
+		return nil
 	}
 	messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "retried").Inc()
 	slog.WarnContext(ctx, "will retry", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key),
 		"retryTopic", retry.Topic, "after", c.cfg.RetryTiers[attempt].String(), "error", cause.Error())
+	return nil
+}
+
+// failBackoff is the first pause between attempts to put a failed message
+// somewhere safe; it doubles up to a minute. A variable so tests can shorten it.
+var failBackoff = time.Second
+
+// failSafely is fail, repeated until the message is on a retry or dead-letter
+// topic. It reports false only if ctx ended first (shutdown), in which case the
+// message must be left uncommitted so it is delivered again.
+//
+// Committing a message that is on neither would lose it for good, and it can
+// happen: the retry and dead-letter topics can refuse writes (a missing ACL, a
+// broker without enough replicas) while committing offsets still works. So
+// the partition waits instead. The wait is visible, in the log and as growing lag.
+func (c *consumer) failSafely(ctx context.Context, msg kafka.Message, cause error, attempt int) bool {
+	pause := failBackoff
+	for {
+		err := c.fail(ctx, msg, cause, attempt)
+		if err == nil {
+			return true
+		}
+		slog.ErrorContext(ctx, "cannot put a failed message on a retry or dead-letter topic; holding the partition until it can",
+			"consumer", c.label, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "retryIn", pause.String(), "error", err.Error())
+		if !sleep(ctx, pause) {
+			return false
+		}
+		pause = min(pause*2, time.Minute)
+	}
 }
 
 // ensureTopics creates the retry topics and the dead-letter topic of every
@@ -499,7 +545,12 @@ func printable(b []byte) bool {
 	return true
 }
 
-func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause error, retries int, label string) {
+// dlqRetryPause is the one pause before the single immediate retry of a DLQ write.
+var dlqRetryPause = 500 * time.Millisecond
+
+// publishToDLQ puts msg on its dead-letter topic and returns nil, or an error
+// if it could not.
+func publishToDLQ(ctx context.Context, w messageWriter, msg kafka.Message, cause error, retries int, label string) error {
 	dlqTopic := events.DeadLetterTopic(msg.Topic)
 
 	envelope := DeadLetter{
@@ -515,8 +566,7 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 	}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
-		log.Printf("%s failed to marshal DLQ envelope: %v", label, err)
-		return
+		return fmt.Errorf("marshal the dead letter: %w", err)
 	}
 
 	// The first write to a not-yet-existing DLQ topic can itself fail
@@ -526,13 +576,13 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 	dlqMsg := kafka.Message{Topic: dlqTopic, Key: msg.Key, Value: payload}
 	err = w.WriteMessages(ctx, dlqMsg)
 	if err != nil {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(dlqRetryPause)
 		err = w.WriteMessages(ctx, dlqMsg)
 	}
 	if err != nil {
-		log.Printf("%s failed to publish to %s: %v", label, dlqTopic, err)
-		return
+		return fmt.Errorf("publish to %s: %w", dlqTopic, err)
 	}
 	slog.ErrorContext(ctx, "message dead-lettered", "consumer", label, "dlqTopic", dlqTopic, "topic", msg.Topic,
 		"partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key), "retries", retries, "error", cause.Error())
+	return nil
 }
