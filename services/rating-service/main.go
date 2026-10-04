@@ -52,6 +52,10 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 
 func main() {
 	env := loadEnv()
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate(env)
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

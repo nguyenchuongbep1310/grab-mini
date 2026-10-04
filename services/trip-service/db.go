@@ -2,59 +2,57 @@ package main
 
 import (
 	"context"
+	"embed"
 	"errors"
+	"log"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"grab-mini/pkg/events"
-	"grab-mini/pkg/outbox"
+	"grab-mini/pkg/migrate"
 )
 
 var errTripNotFound = errors.New("trip not found")
 
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+const serviceName = "trip-service"
+
+// openPool connects without touching the schema.
+func openPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	return pgxpool.New(ctx, databaseURL)
+}
+
+// connectDB connects and brings the schema up to date, unless
+// RUN_MIGRATIONS=false (then a deploy step runs `trip-service migrate`).
 func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := openPool(ctx, databaseURL)
 	if err != nil {
 		return nil, err
 	}
-
-	_, err = pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS trips (
-			id UUID PRIMARY KEY,
-			order_id TEXT NOT NULL UNIQUE,
-			driver_id TEXT NOT NULL,
-			status TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			started_at TIMESTAMPTZ,
-			completed_at TIMESTAMPTZ,
-			cancelled_at TIMESTAMPTZ
-		);
-
-		-- US-6.1: dedupe table so a redelivered Kafka event never creates a
-		-- second trip for the same order.matched event.
-		-- Ratings arrived after the first release, hence ALTER rather than CREATE.
-		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating INT;
-		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating_comment TEXT;
-		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rated_at TIMESTAMPTZ;
-		-- Who to tell about the trip; copied from order.matched (empty for older trips).
-		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rider_id TEXT NOT NULL DEFAULT '';
-
-		CREATE TABLE IF NOT EXISTS processed_events (
-			event_id UUID PRIMARY KEY,
-			processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-	`)
-	if err != nil {
+	if err := migrate.AtStartup(ctx, pool, serviceName, migrationFiles); err != nil {
+		pool.Close()
 		return nil, err
 	}
-
-	if err := outbox.Migrate(ctx, pool); err != nil {
-		return nil, err
-	}
-
 	return pool, nil
+}
+
+// runMigrate is the `trip-service migrate` command: apply pending migrations and exit.
+func runMigrate(env Env) {
+	ctx := context.Background()
+	pool, err := openPool(ctx, env.DatabaseURL)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer pool.Close()
+	n, err := migrate.Up(ctx, pool, serviceName, migrationFiles)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%s: %d migration(s) applied", serviceName, n)
 }
 
 // execer is what the write helpers need, so they run on the pool or inside a

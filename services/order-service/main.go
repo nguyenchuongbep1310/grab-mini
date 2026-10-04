@@ -191,6 +191,10 @@ func (s *server) handleGetLatestOrder(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	env := loadEnv()
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate(env)
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

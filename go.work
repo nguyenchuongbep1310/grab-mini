@@ -11,6 +11,7 @@ use (
 	./services/pkg/eventcodec
 	./services/pkg/events
 	./services/pkg/kafkaconsumer
+	./services/pkg/migrate
 	./services/pkg/outbox
 	./services/pkg/serve
 	./services/rating-service

@@ -303,6 +303,10 @@ func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, pa
 
 func main() {
 	env := loadEnv()
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate(env)
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

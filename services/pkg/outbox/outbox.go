@@ -44,7 +44,11 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// Migrate creates the outbox table if it doesn't exist yet.
+// Migrate creates the outbox table if it doesn't exist yet. Services don't
+// call it: they create the table through their own migrations
+// (order-service/migrations/00003_create_outbox.sql, and the same in
+// trip-service), which must stay in step with schema below. It is for tests
+// and one-off setups.
 func Migrate(ctx context.Context, db Execer) error {
 	_, err := db.Exec(ctx, schema)
 	return err
