@@ -13,3 +13,10 @@ dist/
 
 # Redis snapshots from local test instances
 dump.rdb
+
+# binaries from `go build` run inside a service directory
+/services/*/auth-service
+/services/*/dev-registry
+/services/*/dlq-redrive
+/services/*/loadtest
+/services/*/location-gateway
