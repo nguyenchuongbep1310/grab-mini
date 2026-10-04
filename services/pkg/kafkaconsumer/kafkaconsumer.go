@@ -36,6 +36,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconn"
 )
 
 // permanent is implemented by errors that retrying can't fix (see
@@ -78,7 +79,12 @@ type Config struct {
 	MaxRetries int
 	RetryDelay time.Duration
 
-	// Retry and dead-letter topics are created on startup if missing, with
+	// Security overrides the connection security read from the environment
+	// (see package kafkaconn); nil means use that. For tests.
+	Security *kafkaconn.Security
+
+	// Retry and dead-letter topics are created on startup if missing (with the
+	// Create permission the ACLs grant on "<topic>."), with
 	// these settings (defaults 3 partitions, replication factor 1: right for
 	// the local single-broker cluster; on a real cluster create them ahead
 	// of time and these are left alone).
@@ -103,6 +109,7 @@ type consumer struct {
 	retryDelay time.Duration
 	topics     []string
 	out        *kafka.Writer // retry and dead-letter topics
+	security   *kafkaconn.Security
 }
 
 // Run fetches messages for cfg until ctx is cancelled, retrying each one
@@ -137,18 +144,22 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 		c.topics = []string{cfg.Topic}
 	}
 
+	c.security = cfg.Security
+	if c.security == nil {
+		c.security = kafkaconn.Default()
+	}
+
 	c.out = &kafka.Writer{
 		Addr:                   kafka.TCP(cfg.Brokers...),
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
+		Transport:              c.security.Transport(),
 	}
 	defer c.out.Close()
 
-	if len(cfg.RetryTiers) > 0 {
-		if err := c.ensureRetryTopics(ctx); err != nil {
-			log.Printf("%s could not create the retry topics (they must exist, or the broker must auto-create them): %v", c.label, err)
-		}
+	if err := c.ensureTopics(ctx); err != nil {
+		log.Printf("%s could not create its retry and dead-letter topics (they must exist, or the broker must auto-create them): %v", c.label, err)
 	}
 
 	var tiers sync.WaitGroup
@@ -168,6 +179,7 @@ func (c *consumer) newReader(groupID string, topics []string) *kafka.Reader {
 		// service took up to 10s to stop. Half a second costs two empty
 		// fetches a second per partition.
 		MaxWait: 500 * time.Millisecond,
+		Dialer:  c.security.Dialer(),
 	}
 	if len(topics) == 1 {
 		rc.Topic = topics[0]
@@ -301,8 +313,10 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 	log.Printf("%s will retry topic=%s key=%s in %s via %s (cause: %v)", c.label, msg.Topic, string(msg.Key), c.cfg.RetryTiers[attempt], retry.Topic, cause)
 }
 
-// ensureRetryTopics creates the retry topics that don't exist yet.
-func (c *consumer) ensureRetryTopics(ctx context.Context) error {
+// ensureTopics creates the retry topics and the dead-letter topic of every
+// subscribed topic that don't exist yet, so the failure path works on a broker
+// that doesn't auto-create topics (production's shouldn't).
+func (c *consumer) ensureTopics(ctx context.Context) error {
 	partitions, rf := c.cfg.Partitions, c.cfg.ReplicationFactor
 	if partitions <= 0 {
 		partitions = 3
@@ -312,11 +326,12 @@ func (c *consumer) ensureRetryTopics(ctx context.Context) error {
 	}
 	var specs []kafka.TopicConfig
 	for _, t := range c.topics {
+		specs = append(specs, kafka.TopicConfig{Topic: events.DeadLetterTopic(t), NumPartitions: partitions, ReplicationFactor: rf})
 		for tier := 1; tier <= len(c.cfg.RetryTiers); tier++ {
 			specs = append(specs, kafka.TopicConfig{Topic: events.RetryTopic(t, tier), NumPartitions: partitions, ReplicationFactor: rf})
 		}
 	}
-	client := &kafka.Client{Addr: kafka.TCP(c.cfg.Brokers...), Timeout: 10 * time.Second}
+	client := &kafka.Client{Addr: kafka.TCP(c.cfg.Brokers...), Timeout: 10 * time.Second, Transport: c.security.Transport()}
 	resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: specs})
 	if err != nil {
 		return err

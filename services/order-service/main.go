@@ -22,6 +22,7 @@ import (
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
+	"grab-mini/pkg/kafkaconn"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/serve"
 )
@@ -248,12 +249,12 @@ func main() {
 	defer db.Close()
 
 	// The writer has no Topic: the outbox rows name theirs.
-	producer := &kafka.Writer{
+	producer := kafkaconn.Writer(&kafka.Writer{
 		Addr:                   kafka.TCP(env.KafkaBrokers...),
 		Balancer:               &kafka.Hash{},
 		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
-	}
+	})
 	defer producer.Close()
 
 	codec := eventcodec.New(env.SchemaRegistryURL)

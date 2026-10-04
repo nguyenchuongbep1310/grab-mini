@@ -296,6 +296,36 @@ Thay đổi hành vi và đánh đổi cần biết:
 - Mỗi cập nhật vị trí tốn thêm một `GET` Redis (tra tài xế→rider) và tối đa hai `PUBLISH`. Ở mức 25.000 msg/s (mục 1) đây là chỗ cần đo; nếu thành vấn đề, thêm cache cục bộ cho ánh xạ tài xế→rider.
 - Trip Service lưu `rider_id` trên trip; trip tạo trước thay đổi này có `rider_id` rỗng nên event của chúng dùng đường dự phòng (tra order→rider trong Redis).
 
-## 13. Còn lại
+## 13. Giai đoạn 3 (đã làm)
 
-Giai đoạn 3 đến 5 (mục 9) chưa làm: xác thực người dùng, TLS/ACL Kafka, secret manager, Location Gateway; cluster 3 broker nhiều zone, Kubernetes, KEDA, metric và trace; shard Redis GEO, sao lưu S3, kiểm thử tải. Hai việc nhỏ còn treo từ giai đoạn 2: dọn bảng `processed_events` và `outbox` theo lịch (mục 5), và cache ánh xạ tài xế→rider nếu đo thấy cần.
+| Mục | Kết quả | Nơi trong code |
+|---|---|---|
+| Xác thực người dùng (6.2) | Mọi route của Order, Trip, Rating đòi JWT (HS256: khóa tối thiểu 32 byte, ghim thuật toán, kiểm tra issuer, audience và hạn dùng). Danh tính lấy từ token, không từ body: body ghi `riderId` khác với token thì 403. Kiểm tra quyền sở hữu: rider chỉ thấy đơn và trip của mình (người khác nhận 404 như thể không tồn tại); chỉ tài xế của trip được pickup và complete; chỉ rider của trip được chấm điểm; cả hai bên được hủy. | `pkg/auth`, `*/main.go` (`routes`) |
+| Nhà phát hành token | `auth-service` (cổng 3005): chỉ là **giả lập identity provider cho dev**, cấp token cho bất kỳ ai xin. Từ chối khởi động khi `APP_ENV=production` trừ khi đặt `ALLOW_DEV_TOKENS=true`. Production phải thay bằng IdP thật. | `services/auth-service` |
+| WebSocket (6.2) | Token đi qua subprotocol (`bearer, <token>`), không nằm trên query string nên không vào access log. Socket của rider X hay driver X chỉ mở được bằng token đúng vai trò và đúng id. Kiểm tra `Origin` theo `ALLOWED_ORIGINS` (bắt buộc khi production). | `notification-service/main.go` |
+| Frontend | `@grab-mini/client` đăng nhập, gắn token vào mọi request (thử lại một lần khi 401) và vào WebSocket. | `packages/client/src/auth.ts` |
+| Secret manager (6.2) | `NAME_FILE` hoặc `NAME`; mặc định cho dev chỉ dùng ngoài production. Áp dụng cho `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. | `pkg/secret` |
+| Location Gateway (4.3) | App tài xế không bao giờ nói chuyện với Kafka. Gateway (cổng 3006) xác thực tài xế, kiểm tra tọa độ, giới hạn 1 báo cáo mỗi giây mỗi tài xế (429 kèm `Retry-After`), bỏ qua báo cáo của tài xế đứng yên (dưới 5 m) trừ một nhịp mỗi 30 giây, bỏ qua timestamp thiết bị lệch hơn 30 giây so với đồng hồ server, publish theo lô 20ms với lz4 và `acks=1`. `driver-app-sim` giờ gọi gateway qua HTTP như một client thật. | `services/location-gateway` |
+| TLS + SASL/SCRAM + ACL cho Kafka (6.2) | `pkg/kafkaconn` bật TLS và SASL qua biến môi trường (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD[_FILE]`, `KAFKA_CA_FILE`); production từ chối kết nối plaintext trừ khi đặt `KAFKA_ALLOW_PLAINTEXT=true`. Mỗi service một principal; `scripts/kafka-acls.sh` cấp đúng quyền (ghi topic nó sản xuất, đọc topic nó tiêu thụ, và Read/Write/Describe/Create trên prefix `<topic>.` cho retry topic và DLQ của nó). `deploy/kafka-secure/start-local.sh` dựng một broker một node có cả ba lớp bảo mật để thử trên máy. | `pkg/kafkaconn`, `scripts/kafka-acls.sh`, `deploy/kafka-secure/` |
+
+Đã kiểm chứng trên broker thật có TLS, SASL/SCRAM, ACL và `auto.create.topics.enable=false` (dựng bằng chính `start-local.sh`): consumer của matching-service chạy trọn đường lỗi (retry topic, DLQ) với đúng quyền của nó; order-service ghi vào `order.created` được nhưng bị từ chối khi ghi vào `order.matched`; rating-service không đọc được `order.created`; sai mật khẩu, user lạ và chứng chỉ broker không tin cậy đều bị từ chối; `trip-service` chạy với principal riêng và `/readyz` trả 200.
+
+Phát hiện khi làm:
+
+- `auto.create.topics.enable=false` là cấu hình đúng cho production, nhưng DLQ trước đây chỉ tồn tại nhờ auto-create của broker. `kafkaconsumer` giờ tự tạo cả DLQ (dùng quyền Create trên prefix `<topic>.`), như đã làm với retry topic.
+- ACL prefix `order.created.` khớp `order.created.retry.1` và `order.created.DLQ` nhưng **không** khớp chính `order.created`, nên quyền trên topic gốc và quyền trên topic phụ tách bạch.
+
+Giới hạn đã biết, chưa làm:
+
+- **Token chỉ được kiểm tra lúc mở WebSocket.** Kết nối đang mở vẫn sống sau khi token hết hạn (1 giờ). Cần đóng socket khi token hết hạn, hoặc yêu cầu client gửi token mới.
+- **HS256 dùng khóa chung.** Mọi service giữ khóa có thể tự ký token. Khi có IdP thật, chuyển sang khóa bất đối xứng (RS256/EdDSA) để service chỉ giữ khóa công khai.
+- **Giới hạn tần suất của gateway nằm trong RAM mỗi instance.** Chạy nhiều instance mà không sticky routing thì một tài xế có thể báo nhanh hơn giới hạn (mỗi instance cho một lần). Cần Redis hoặc sticky theo tài xế khi scale.
+- **Một tài xế đọc được mọi đơn nếu biết UUID của đơn** (cần để Driver App lấy điểm đón). UUID khó đoán, nhưng chặt hơn nếu Order Service lưu tài xế được ghép (đã nhận `order.matched`) và chỉ cho tài xế đó đọc; tôi chưa làm vì có race giữa việc ghi `driver_id` và việc Driver App lấy đơn ngay sau khi nhận tin.
+- **Schema Registry, ksqlDB, Kafka UI vẫn chưa có xác thực** và vẫn mở cổng trong `docker-compose.yml` (mục 6.2 của giai đoạn này). Services nói chuyện với Schema Registry qua HTTP không xác thực. `docker-compose.yml` vẫn chạy Kafka PLAINTEXT cho dev.
+- Redis và Postgres chưa bật TLS, và Redis chưa có mật khẩu (chỉ `DATABASE_URL` đi qua `pkg/secret`).
+- Chưa có mTLS giữa các service, chưa mã hóa trường dữ liệu cá nhân, chưa đặt retention ngắn cho topic vị trí.
+- Chưa chạy end-to-end cả hệ thống (Schema Registry, ksqlDB, các app) vì sandbox không có Docker. Gateway và các route xác thực được kiểm thử bằng test tự động và bằng binary thật với Postgres, Redis, Kafka; còn luồng trình duyệt (đăng nhập, WebSocket với subprotocol) mới được kiểm tra bằng typecheck, chưa chạy trong trình duyệt.
+
+## 14. Còn lại
+
+Giai đoạn 4 và 5 (mục 9): cluster 3 broker nhiều zone, Kubernetes, KEDA, metric và trace, runbook; shard Redis GEO, sao lưu S3, kiểm thử tải. Cùng với các giới hạn đã liệt kê ở mục 13, và hai việc nhỏ từ giai đoạn 2 (dọn bảng `processed_events`, `outbox` theo lịch; cache ánh xạ tài xế→rider nếu đo thấy cần).

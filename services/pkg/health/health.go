@@ -24,6 +24,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/kafkaconn"
 	"grab-mini/pkg/serve"
 )
 
@@ -47,7 +48,7 @@ func Redis(rdb *redis.Client) Check {
 
 // Kafka is ready when a broker answers a metadata request.
 func Kafka(brokers []string) Check {
-	client := &kafka.Client{Addr: kafka.TCP(brokers...), Timeout: CheckTimeout}
+	client := kafkaconn.Client(brokers, CheckTimeout)
 	return Check{"kafka", func(ctx context.Context) error {
 		resp, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
 		if err != nil {

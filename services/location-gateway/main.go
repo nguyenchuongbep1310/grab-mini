@@ -29,6 +29,7 @@ import (
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
+	"grab-mini/pkg/kafkaconn"
 	"grab-mini/pkg/serve"
 )
 
@@ -161,7 +162,7 @@ func main() {
 	// one broker acknowledgement is enough. Messages are held for up to 20ms
 	// to go out in batches: at thousands of reports a second, one request
 	// per report would cost far more than the reports themselves.
-	producer := &kafka.Writer{
+	producer := kafkaconn.Writer(&kafka.Writer{
 		Addr:                   kafka.TCP(env.KafkaBrokers...),
 		Topic:                  events.TopicDriverLocationUpdate,
 		Balancer:               &kafka.Hash{},
@@ -170,7 +171,7 @@ func main() {
 		BatchSize:              500,
 		Compression:            kafka.Lz4,
 		AllowAutoTopicCreation: true,
-	}
+	})
 	defer producer.Close()
 
 	g := &gateway{
