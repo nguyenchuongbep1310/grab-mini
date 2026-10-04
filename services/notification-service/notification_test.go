@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
 )
 
@@ -27,9 +29,12 @@ func (jsonDecoder) Decode(_ context.Context, _ string, data []byte, v any) error
 	return json.Unmarshal(data, v)
 }
 
+const testSecret = "0123456789abcdef0123456789abcdef"
+
 type instance struct {
 	h      *hub
 	server *httptest.Server
+	issuer *auth.Issuer
 }
 
 func newInstance(t *testing.T, ctx context.Context, addr string) *instance {
@@ -37,9 +42,11 @@ func newInstance(t *testing.T, ctx context.Context, addr string) *instance {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	h := newHub(ctx, rdb)
 	go h.run(ctx)
-	srv := httptest.NewServer(newMux(ctx, h))
+	verifier, _ := auth.NewVerifier(testSecret)
+	issuer, _ := auth.NewIssuer(testSecret, time.Hour)
+	srv := httptest.NewServer(newMux(ctx, h, verifier, []string{"http://app.example"}))
 	t.Cleanup(func() { srv.Close(); rdb.Close() })
-	return &instance{h, srv}
+	return &instance{h, srv, issuer}
 }
 
 func setup(t *testing.T) (context.Context, string) {
@@ -58,12 +65,24 @@ func setup(t *testing.T) (context.Context, string) {
 	return ctx, addr
 }
 
+func (in *instance) dial(kind, id string, subprotocols []string, header http.Header) (*websocket.Conn, *http.Response, error) {
+	url := "ws" + strings.TrimPrefix(in.server.URL, "http") + "/ws/" + kind + "/" + id
+	d := websocket.Dialer{Subprotocols: subprotocols}
+	return d.Dial(url, header)
+}
+
 func (in *instance) connect(t *testing.T, kind, id string) *websocket.Conn {
 	t.Helper()
-	url := "ws" + strings.TrimPrefix(in.server.URL, "http") + "/ws/" + kind + "/" + id
-	ws, _, err := websocket.DefaultDialer.Dial(url, nil)
+	token, _, err := in.issuer.Issue(auth.Role(kind), id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	ws, resp, err := in.dial(kind, id, []string{auth.WebSocketSubprotocol, token}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("Sec-WebSocket-Protocol") != auth.WebSocketSubprotocol {
+		t.Fatalf("the server answered with subprotocol %q; a browser would refuse the connection", resp.Header.Get("Sec-WebSocket-Protocol"))
 	}
 	t.Cleanup(func() { ws.Close() })
 
@@ -227,5 +246,66 @@ func TestAReconnectingRiderKeepsTheirSubscription(t *testing.T) {
 	}
 	if m := receive(t, second); m.Type != events.TopicOrderNoDriverFound {
 		t.Errorf("rider got %+v after reconnecting", m)
+	}
+}
+
+// Who may open a socket.
+func TestOnlyTheRightPersonCanOpenASocket(t *testing.T) {
+	ctx, addr := setup(t)
+	a := newInstance(t, ctx, addr)
+	riderTok, _, _ := a.issuer.Issue(auth.Rider, "rider-1")
+	driverTok, _, _ := a.issuer.Issue(auth.Driver, "driver-1")
+	other, _ := auth.NewIssuer("another-secret-another-secret-123", time.Hour)
+	forged, _, _ := other.Issue(auth.Rider, "rider-1")
+	expired, _ := auth.NewIssuer(testSecret, -time.Hour)
+	stale, _, _ := expired.Issue(auth.Rider, "rider-1")
+
+	cases := []struct {
+		name         string
+		kind, id     string
+		subprotocols []string
+		want         int
+	}{
+		{"no token", kindRider, "rider-1", nil, 401},
+		{"garbage token", kindRider, "rider-1", []string{"bearer", "junk"}, 401},
+		{"signed with another secret", kindRider, "rider-1", []string{"bearer", forged}, 401},
+		{"expired", kindRider, "rider-1", []string{"bearer", stale}, 401},
+		{"someone else's id", kindRider, "rider-2", []string{"bearer", riderTok}, 403},
+		{"a driver token on a rider socket", kindRider, "rider-1", []string{"bearer", driverTok}, 403},
+		{"a rider token on a driver socket", kindDriver, "rider-1", []string{"bearer", riderTok}, 403},
+	}
+	for _, c := range cases {
+		ws, resp, err := a.dial(c.kind, c.id, c.subprotocols, nil)
+		if err == nil {
+			ws.Close()
+			t.Errorf("%s: the socket opened", c.name)
+			continue
+		}
+		if resp == nil || resp.StatusCode != c.want {
+			t.Errorf("%s: %v, want status %d", c.name, resp, c.want)
+		}
+	}
+}
+
+func TestASocketFromAnotherSitesPageIsRefused(t *testing.T) {
+	ctx, addr := setup(t)
+	a := newInstance(t, ctx, addr)
+	tok, _, _ := a.issuer.Issue(auth.Rider, "rider-1")
+	protocols := []string{"bearer", tok}
+
+	if ws, _, err := a.dial(kindRider, "rider-1", protocols, http.Header{"Origin": {"http://evil.example"}}); err == nil {
+		ws.Close()
+		t.Error("a page on another origin opened a socket with a valid token")
+	}
+	if ws, _, err := a.dial(kindRider, "rider-1", protocols, http.Header{"Origin": {"http://app.example"}}); err != nil {
+		t.Errorf("the allowed origin was refused: %v", err)
+	} else {
+		ws.Close()
+	}
+	// A non-browser client sends no Origin; the token is what protects it.
+	if ws, _, err := a.dial(kindRider, "rider-1", protocols, nil); err != nil {
+		t.Errorf("a client without an Origin was refused: %v", err)
+	} else {
+		ws.Close()
 	}
 }

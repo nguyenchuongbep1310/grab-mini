@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
@@ -74,7 +75,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /drivers/{id}/rating", func(w http.ResponseWriter, r *http.Request) {
+	// A driver's average is shown to riders and to the driver, so any signed-in caller may read it.
+	verifier, err := auth.VerifierFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	mux.Handle("GET /drivers/{id}/rating", verifier.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rating, err := getRating(r.Context(), db, r.PathValue("id"))
 		if err != nil {
 			log.Printf("failed to load rating: %v", err)
@@ -83,7 +89,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rating)
-	})
+	}), auth.Rider, auth.Driver))
 
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 

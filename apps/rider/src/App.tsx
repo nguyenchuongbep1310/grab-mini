@@ -13,7 +13,7 @@ import {
   useToast,
   type LatLngTuple,
 } from "@grab-mini/ui";
-import { createOrder, rateTrip, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
+import { createOrder, rateTrip, signIn, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { useRide, type Phase } from "./useRide";
 
@@ -46,6 +46,8 @@ const BADGE_STATUS: Record<Phase, string> = {
 };
 
 const riderId = new URLSearchParams(location.search).get("rider") ?? "rider-1";
+// Every request and the WebSocket carry a token for this identity (see @grab-mini/client).
+signIn("rider", riderId);
 
 export function App() {
   const toast = useToast();

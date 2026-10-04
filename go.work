@@ -1,12 +1,14 @@
 go 1.26.4
 
 use (
+	./services/auth-service
 	./services/driver-app-sim
 	./services/driver-location-service
 	./services/matching-service
 	./services/notification-service
 	./services/order-service
 	./services/pkg/driverlocation
+	./services/pkg/auth
 	./services/pkg/driverstatus
 	./services/pkg/eventcodec
 	./services/pkg/events
@@ -14,6 +16,7 @@ use (
 	./services/pkg/kafkaconsumer
 	./services/pkg/migrate
 	./services/pkg/outbox
+	./services/pkg/secret
 	./services/pkg/serve
 	./services/rating-service
 	./services/trip-service

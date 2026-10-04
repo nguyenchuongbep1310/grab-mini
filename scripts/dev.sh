@@ -83,7 +83,7 @@ wait_for "ksqlDB" healthy grab-mini-ksqldb
 wait_for "analytics tables" ksql_ready
 
 echo "Building Go services..."
-SERVICES="order-service matching-service trip-service driver-location-service notification-service rating-service driver-app-sim"
+SERVICES="auth-service order-service matching-service trip-service driver-location-service notification-service rating-service driver-app-sim"
 ROOT=$PWD
 for svc in $SERVICES; do
   (cd "services/$svc" && go build -o "$ROOT/$BIN/$svc" .)
@@ -99,6 +99,7 @@ start rider apps/rider pnpm dev
 start driver apps/driver pnpm dev
 start ops apps/ops pnpm dev
 
+wait_for "Auth Service" curl -fs localhost:3005/health
 wait_for "Order Service" curl -fs localhost:3001/health
 wait_for "Trip Service" curl -fs localhost:3002/health
 wait_for "Notification Service" curl -fs localhost:3003/health

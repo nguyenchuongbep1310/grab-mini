@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
@@ -264,5 +267,87 @@ func TestReleasingTwiceIsHarmless(t *testing.T) {
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Available {
 		t.Errorf("driver is %s, want AVAILABLE", s)
+	}
+}
+
+// The API as a client sees it: who may do what to a trip.
+func TestTripAccessFollowsTheTokenAndWhoIsPartyToTheTrip(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1")) // rider-1's trip, ASSIGNED
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s, _ := newServer(db, rdb)
+	s.codec = nil // the transitions below are refused before they would encode
+
+	secret := "0123456789abcdef0123456789abcdef"
+	issuer, _ := auth.NewIssuer(secret, time.Hour)
+	verifier, _ := auth.NewVerifier(secret)
+	mux := s.routes(verifier)
+	do := func(method, path string, role auth.Role, subject, body string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if role != "" {
+			tok, _, _ := issuer.Issue(role, subject)
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	id := tr.ID
+	cases := []struct {
+		name          string
+		method, path  string
+		role          auth.Role
+		subject, body string
+		want          int
+	}{
+		{"no token", "GET", "/trips/" + id, "", "", "", 401},
+		{"its rider reads it", "GET", "/trips/" + id, auth.Rider, "rider-1", "", 200},
+		{"its driver reads it", "GET", "/trips/" + id, auth.Driver, "driver-1", "", 200},
+		{"another rider can't", "GET", "/trips/" + id, auth.Rider, "rider-2", "", 404},
+		{"another driver can't", "GET", "/trips/" + id, auth.Driver, "driver-2", "", 404},
+		{"by order, the rider", "GET", "/trips/by-order/o1", auth.Rider, "rider-1", "", 200},
+		{"by order, a stranger", "GET", "/trips/by-order/o1", auth.Rider, "rider-2", "", 404},
+		{"a driver's own active trip", "GET", "/drivers/driver-1/active-trip", auth.Driver, "driver-1", "", 200},
+		{"another driver's active trip", "GET", "/drivers/driver-1/active-trip", auth.Driver, "driver-2", "", 403},
+		{"a rider can't ask for an active trip", "GET", "/drivers/driver-1/active-trip", auth.Rider, "rider-1", "", 403},
+		{"a rider can't pick up", "POST", "/trips/" + id + "/pickup", auth.Rider, "rider-1", "", 403},
+		{"another driver can't pick up", "POST", "/trips/" + id + "/pickup", auth.Driver, "driver-2", "", 404},
+		{"another driver can't complete", "POST", "/trips/" + id + "/complete", auth.Driver, "driver-2", "", 404},
+		{"a stranger can't cancel", "POST", "/trips/" + id + "/cancel", auth.Rider, "rider-2", "", 404},
+		{"a driver can't rate", "POST", "/trips/" + id + "/rating", auth.Driver, "driver-1", `{"stars":5}`, 403},
+		{"another rider can't rate", "POST", "/trips/" + id + "/rating", auth.Rider, "rider-2", `{"stars":5}`, 404},
+		{"the rider names someone else", "POST", "/trips/" + id + "/rating", auth.Rider, "rider-1", `{"riderId":"rider-2","stars":5}`, 403},
+	}
+	for _, c := range cases {
+		if got := do(c.method, c.path, c.role, c.subject, c.body); got != c.want {
+			t.Errorf("%s: status %d, want %d", c.name, got, c.want)
+		}
+	}
+
+	// And nothing above changed the trip.
+	if got, _ := getTripByID(ctx, db, id); got.Status != events.TripStatusAssigned {
+		t.Errorf("a refused request moved the trip to %s", got.Status)
+	}
+}
+
+// The rider on the trip may rate it once it is completed, whatever the body says about who they are.
+func TestTheTripsRiderCanRateItAndTheEventNamesThem(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
+
+	if !isRiderOf(auth.Identity{Subject: "rider-1", Role: auth.Rider}, tr) {
+		t.Error("the trip's rider isn't recognised as its rider")
+	}
+	if isRiderOf(auth.Identity{Subject: "rider-1", Role: auth.Driver}, tr) {
+		t.Error("a driver token with the rider's id counted as the rider")
+	}
+	old := &trip{ID: "x", DriverID: "d", RiderID: ""}
+	if isRiderOf(auth.Identity{Subject: "", Role: auth.Rider}, old) {
+		t.Error("a trip with no recorded rider matched an empty subject")
 	}
 }

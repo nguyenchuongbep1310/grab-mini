@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { NotificationMessage } from "@grab-mini/events";
+import { forgetToken, getToken } from "./auth";
 
 export type SocketState = "connecting" | "open" | "closed";
 
@@ -27,12 +28,26 @@ export function useNotificationSocket(
     let attempt = 0;
     let disposed = false;
 
-    const connect = () => {
+    const connect = async () => {
       setState("connecting");
+      let token: string;
+      try {
+        token = await getToken();
+      } catch {
+        // auth-service unreachable: treat it like a dropped connection and try again.
+        if (!disposed) retryTimer = setTimeout(() => void connect(), Math.min(1000 * 2 ** attempt++, 10_000));
+        return;
+      }
+      if (disposed) return;
       const scheme = location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${scheme}://${location.host}/ws/${role}/${encodeURIComponent(id)}`);
+      // A browser can't set an Authorization header on a WebSocket; the token
+      // travels as a subprotocol ("bearer", <token>), which unlike a query
+      // string doesn't end up in access logs or the address bar.
+      socket = new WebSocket(`${scheme}://${location.host}/ws/${role}/${encodeURIComponent(id)}`, ["bearer", token]);
 
+      let opened = false;
       socket.onopen = () => {
+        opened = true;
         attempt = 0;
         setState("open");
       };
@@ -45,12 +60,15 @@ export function useNotificationSocket(
       };
       socket.onclose = () => {
         if (disposed) return;
+        // A refused handshake looks like any failed connection to the page;
+        // fetch a fresh token next time in case that was an expired one.
+        if (!opened) forgetToken();
         setState("closed");
-        retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, 10_000));
+        retryTimer = setTimeout(() => void connect(), Math.min(1000 * 2 ** attempt++, 10_000));
       };
     };
 
-    connect();
+    void connect();
     return () => {
       disposed = true;
       clearTimeout(retryTimer);

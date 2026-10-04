@@ -1,6 +1,7 @@
 package main
 
 import (
+	"grab-mini/pkg/auth"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ func rate(id, body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/trips/"+id+"/rating", strings.NewReader(body))
 	req.SetPathValue("id", id)
+	req = req.WithContext(auth.With(req.Context(), auth.Identity{Subject: "r", Role: auth.Rider}))
 	(&server{}).handleRateTrip(rec, req)
 	return rec
 }
@@ -22,7 +24,6 @@ const someTrip = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
 func TestRateTripRejectsBadInput(t *testing.T) {
 	cases := map[string]string{
 		"not JSON":         `nope`,
-		"no rider":         `{"stars":5}`,
 		"zero stars":       `{"riderId":"r","stars":0}`,
 		"six stars":        `{"riderId":"r","stars":6}`,
 		"negative stars":   `{"riderId":"r","stars":-1}`,

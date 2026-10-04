@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
@@ -53,14 +54,28 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // US-1.1: create an order and publish order.created.
 func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
+	caller, ok := auth.From(r.Context())
+	if !ok {
+		auth.Deny(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
+
 	var req createOrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 		return
 	}
 
-	if req.RiderID == "" || !isValidLatLng(req.Pickup) || !isValidLatLng(req.Dropoff) {
-		http.Error(w, `{"error":"riderId, pickup {lat,lng} and dropoff {lat,lng} are required"}`, http.StatusBadRequest)
+	// The rider is whoever the token says. A body that names someone else is
+	// refused rather than quietly overridden: it is a bug or an attack.
+	if req.RiderID != "" && req.RiderID != caller.Subject {
+		auth.Deny(w, http.StatusForbidden, "riderId doesn't match the token")
+		return
+	}
+	req.RiderID = caller.Subject
+
+	if !isValidLatLng(req.Pickup) || !isValidLatLng(req.Dropoff) {
+		http.Error(w, `{"error":"pickup {lat,lng} and dropoff {lat,lng} are required"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -173,6 +188,11 @@ func respondWithOrder(w http.ResponseWriter, o *orderView, err error) {
 // handleGetOrder lets a client that only knows the orderId (e.g. the Driver
 // App after an order.matched push) find where the trip starts and ends.
 func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
+	caller, ok := auth.From(r.Context())
+	if !ok {
+		auth.Deny(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
 	// orders.id is a UUID column: a malformed id would surface as a
 	// Postgres error (500) instead of the "not found" it really is.
 	if _, err := uuid.Parse(r.PathValue("id")); err != nil {
@@ -180,14 +200,36 @@ func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	o, err := queryOrder(r.Context(), s.db, "id = $1", r.PathValue("id"))
+	// A rider sees only their own orders; to anyone else it doesn't exist.
+	// Any driver can read one (they learn an order id from order.matched and
+	// need its pickup and dropoff); the id is an unguessable UUID.
+	if err == nil && caller.Role == auth.Rider && o.RiderID != caller.Subject {
+		err = pgx.ErrNoRows
+	}
 	respondWithOrder(w, o, err)
 }
 
 // handleGetLatestOrder is how a Rider App that was closed or reloaded finds
 // the ride it may still be in the middle of.
 func (s *server) handleGetLatestOrder(w http.ResponseWriter, r *http.Request) {
+	if caller, ok := auth.From(r.Context()); !ok || caller.Subject != r.PathValue("id") {
+		auth.Deny(w, http.StatusForbidden, "you can only read your own orders")
+		return
+	}
 	o, err := queryOrder(r.Context(), s.db, "rider_id = $1", r.PathValue("id"))
 	respondWithOrder(w, o, err)
+}
+
+// routes is the HTTP API. Every route but /health needs a token, and says
+// which roles may call it; the handlers then check the caller owns what they
+// touch.
+func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.Handle("POST /orders", verifier.Require(http.HandlerFunc(s.handleCreateOrder), auth.Rider))
+	mux.Handle("GET /orders/{id}", verifier.Require(http.HandlerFunc(s.handleGetOrder), auth.Rider, auth.Driver))
+	mux.Handle("GET /riders/{id}/latest-order", verifier.Require(http.HandlerFunc(s.handleGetLatestOrder), auth.Rider))
+	return mux
 }
 
 func main() {
@@ -222,11 +264,11 @@ func main() {
 	background.Go(func() { relay.Run(ctx) })
 	background.Go(func() { runOutcomeConsumer(ctx, env, db, codec) })
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /orders", s.handleCreateOrder)
-	mux.HandleFunc("GET /orders/{id}", s.handleGetOrder)
-	mux.HandleFunc("GET /riders/{id}/latest-order", s.handleGetLatestOrder)
+	verifier, err := auth.VerifierFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	mux := s.routes(verifier)
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("order-service listening on :%s", env.Port)

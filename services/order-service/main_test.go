@@ -8,11 +8,13 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
 )
@@ -22,6 +24,7 @@ import (
 func post(body string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(body))
+	req = req.WithContext(auth.With(req.Context(), auth.Identity{Subject: "r", Role: auth.Rider}))
 	(&server{}).handleCreateOrder(rec, req)
 	return rec
 }
@@ -30,7 +33,6 @@ func TestCreateOrderRejectsBadInput(t *testing.T) {
 	const where = `"pickup":{"lat":10.776,"lng":106.7},"dropoff":{"lat":10.79,"lng":106.71}`
 	cases := map[string]string{
 		"not JSON":              `nope`,
-		"missing rider":         `{` + where + `}`,
 		"missing pickup":        `{"riderId":"r","dropoff":{"lat":10.79,"lng":106.71}}`,
 		"latitude out of range": `{"riderId":"r","pickup":{"lat":91,"lng":0},"dropoff":{"lat":10.79,"lng":106.71}}`,
 		"unknown vehicle type":  `{"riderId":"r",` + where + `,"vehicleType":"TRUCK"}`,
@@ -40,6 +42,22 @@ func TestCreateOrderRejectsBadInput(t *testing.T) {
 		if rec := post(body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", name, rec.Code)
 		}
+	}
+}
+
+func TestCreateOrderTakesTheRiderFromTheToken(t *testing.T) {
+	const where = `"pickup":{"lat":10.776,"lng":106.7},"dropoff":{"lat":10.79,"lng":106.71}`
+	// Naming another rider is refused, before anything is saved.
+	if rec := post(`{"riderId":"someone-else",` + where + `}`); rec.Code != http.StatusForbidden {
+		t.Errorf("a body naming another rider: status %d, want 403", rec.Code)
+	}
+}
+
+func TestCreateOrderWithoutIdentityIsUnauthorized(t *testing.T) {
+	rec := httptest.NewRecorder()
+	(&server{}).handleCreateOrder(rec, httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status %d, want 401", rec.Code)
 	}
 }
 
@@ -130,5 +148,59 @@ func TestNoOrderIsLeftBehindWhenTheEventCannotBeQueued(t *testing.T) {
 	}
 	if _, err := queryOrder(ctx, db, "id = $1", id); err == nil {
 		t.Error("the order row survived although its event could not be queued")
+	}
+}
+
+// The API as a client sees it: tokens, roles and ownership, over the real mux
+// and a real database.
+func TestOrderAccessIsLimitedToTheOwnerAndDrivers(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource)}
+	id := uuid.NewString()
+	err := s.insertOrder(ctx, id, createOrderRequest{
+		RiderID: "rider-1", Pickup: &events.LatLng{Lat: 1, Lng: 2}, Dropoff: &events.LatLng{Lat: 3, Lng: 4}, VehicleType: events.VehicleCar,
+	}, []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "0123456789abcdef0123456789abcdef"
+	issuer, _ := auth.NewIssuer(secret, time.Hour)
+	verifier, _ := auth.NewVerifier(secret)
+	mux := s.routes(verifier)
+	do := func(method, path string, role auth.Role, subject string) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		if role != "" {
+			tok, _, _ := issuer.Issue(role, subject)
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	cases := []struct {
+		name     string
+		method   string
+		path     string
+		role     auth.Role
+		subject  string
+		wantCode int
+	}{
+		{"no token", "GET", "/orders/" + id, "", "", 401},
+		{"the owner reads their order", "GET", "/orders/" + id, auth.Rider, "rider-1", 200},
+		{"another rider can't see it (it doesn't exist for them)", "GET", "/orders/" + id, auth.Rider, "rider-2", 404},
+		{"a driver can read it", "GET", "/orders/" + id, auth.Driver, "driver-1", 200},
+		{"the owner's latest order", "GET", "/riders/rider-1/latest-order", auth.Rider, "rider-1", 200},
+		{"someone else's latest order", "GET", "/riders/rider-1/latest-order", auth.Rider, "rider-2", 403},
+		{"a driver has no latest order", "GET", "/riders/rider-1/latest-order", auth.Driver, "rider-1", 403},
+		{"a driver can't book", "POST", "/orders", auth.Driver, "driver-1", 403},
+		{"booking without a token", "POST", "/orders", "", "", 401},
+	}
+	for _, c := range cases {
+		if got := do(c.method, c.path, c.role, c.subject); got != c.wantCode {
+			t.Errorf("%s: status %d, want %d", c.name, got, c.wantCode)
+		}
 	}
 }
