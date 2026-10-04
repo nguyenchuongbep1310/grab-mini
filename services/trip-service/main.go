@@ -42,6 +42,7 @@ func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events
 		OrderID:  t.OrderID,
 		DriverID: t.DriverID,
 		Status:   status,
+		RiderID:  t.RiderID,
 	})
 }
 

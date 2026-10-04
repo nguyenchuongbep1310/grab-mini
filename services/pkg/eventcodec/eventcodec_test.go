@@ -260,3 +260,59 @@ func TestVehicleTypeSurvivesARoundTrip(t *testing.T) {
 		t.Errorf("vehicleType = %q, want BIKE", out.VehicleType)
 	}
 }
+
+// Events gained a riderId (default "") so Notification Service needn't
+// remember which rider made an order. Messages written before that must still
+// decode, with the empty default.
+func TestCurrentEventsReadMessagesWrittenBeforeRiderId(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+	env := `{"name": "eventId", "type": "string"}, {"name": "occurredAt", "type": "string"}`
+
+	t.Run("trip.status.changed", func(t *testing.T) {
+		v1 := `{"type":"record","name":"TripStatusChanged","namespace":"grabmini.events","fields":[` + env + `,
+			{"name":"tripId","type":"string"},{"name":"orderId","type":"string"},{"name":"driverId","type":"string"},{"name":"status","type":"string"}]}`
+		type old struct {
+			events.Envelope
+			TripID   string `avro:"tripId"`
+			OrderID  string `avro:"orderId"`
+			DriverID string `avro:"driverId"`
+			Status   string `avro:"status"`
+		}
+		data, err := New(url, WithSchemaSource(func(string) (string, error) { return v1, nil })).
+			Encode(ctx, events.TopicTripStatusChanged, old{Envelope: sampleOrder.Envelope, TripID: "t1", OrderID: "o1", DriverID: "d1", Status: "COMPLETED"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got events.TripStatusChanged
+		if err := New(url).Decode(ctx, events.TopicTripStatusChanged, data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.TripID != "t1" || got.Status != events.TripStatusCompleted || got.RiderID != "" {
+			t.Errorf("got %+v, want the old fields intact and an empty riderId", got)
+		}
+	})
+
+	t.Run("order.matched", func(t *testing.T) {
+		v2 := `{"type":"record","name":"OrderMatched","namespace":"grabmini.events","fields":[` + env + `,
+			{"name":"orderId","type":"string"},{"name":"driverId","type":"string"},{"name":"vehicleType","type":"string","default":"CAR"}]}`
+		type old struct {
+			events.Envelope
+			OrderID     string `avro:"orderId"`
+			DriverID    string `avro:"driverId"`
+			VehicleType string `avro:"vehicleType"`
+		}
+		data, err := New(url, WithSchemaSource(func(string) (string, error) { return v2, nil })).
+			Encode(ctx, events.TopicOrderMatched, old{Envelope: sampleOrder.Envelope, OrderID: "o1", DriverID: "d1", VehicleType: "BIKE"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got events.OrderMatched
+		if err := New(url).Decode(ctx, events.TopicOrderMatched, data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.DriverID != "d1" || got.VehicleType != events.VehicleBike || got.RiderID != "" {
+			t.Errorf("got %+v, want the old fields intact and an empty riderId", got)
+		}
+	})
+}

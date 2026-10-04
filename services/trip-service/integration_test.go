@@ -51,7 +51,7 @@ func (w *recordingWriter) WriteMessages(_ context.Context, msgs ...kafka.Message
 func matched(orderID, driverID string) events.OrderMatched {
 	return events.OrderMatched{
 		Envelope: events.Envelope{EventID: uuid.NewString()},
-		OrderID:  orderID, DriverID: driverID, VehicleType: events.VehicleCar,
+		OrderID:  orderID, DriverID: driverID, RiderID: "rider-1", VehicleType: events.VehicleCar,
 	}
 }
 
@@ -68,8 +68,8 @@ func TestMatchedOrderCreatesATripAndConfirmsTheDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if tr, err := getTripByOrderID(ctx, db, "o1"); err != nil || tr.Status != events.TripStatusAssigned || tr.DriverID != "d1" {
-		t.Fatalf("trip = %+v, %v; want an ASSIGNED trip for d1", tr, err)
+	if tr, err := getTripByOrderID(ctx, db, "o1"); err != nil || tr.Status != events.TripStatusAssigned || tr.DriverID != "d1" || tr.RiderID != "rider-1" {
+		t.Fatalf("trip = %+v, %v; want an ASSIGNED trip for d1 and rider-1 (status events name the rider from this)", tr, err)
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.OnTrip {
 		t.Errorf("driver is %s, want ON_TRIP (this is what ends Matching's lease)", s)

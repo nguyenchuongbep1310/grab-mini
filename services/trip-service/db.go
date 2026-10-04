@@ -38,6 +38,8 @@ func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating INT;
 		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rating_comment TEXT;
 		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rated_at TIMESTAMPTZ;
+		-- Who to tell about the trip; copied from order.matched (empty for older trips).
+		ALTER TABLE trips ADD COLUMN IF NOT EXISTS rider_id TEXT NOT NULL DEFAULT '';
 
 		CREATE TABLE IF NOT EXISTS processed_events (
 			event_id UUID PRIMARY KEY,
@@ -75,19 +77,20 @@ type trip struct {
 	ID       string            `json:"id"`
 	OrderID  string            `json:"orderId"`
 	DriverID string            `json:"driverId"`
+	RiderID  string            `json:"riderId"`
 	Status   events.TripStatus `json:"status"`
 	// Set once the rider has rated the trip.
 	Rating *int `json:"rating,omitempty"`
 }
 
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status, rating FROM trips WHERE id = $1`, id)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating FROM trips WHERE id = $1`, id)
 }
 
 // getTripByOrderID lets a client that only knows the orderId (e.g. from an
 // order.matched push) find the trip Trip Service created for it.
 func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, status, rating FROM trips WHERE order_id = $1`, orderID)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating FROM trips WHERE order_id = $1`, orderID)
 }
 
 // getActiveTripByDriver is the driver's trip still in flight (ASSIGNED or
@@ -96,14 +99,14 @@ func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*t
 // the newest wins.
 func getActiveTripByDriver(ctx context.Context, db *pgxpool.Pool, driverID string) (*trip, error) {
 	return queryTrip(ctx, db, `
-		SELECT id, order_id, driver_id, status, rating FROM trips
+		SELECT id, order_id, driver_id, rider_id, status, rating FROM trips
 		WHERE driver_id = $1 AND status IN ('ASSIGNED', 'IN_PROGRESS')
 		ORDER BY created_at DESC LIMIT 1`, driverID)
 }
 
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.Status, &t.Rating)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
 	}

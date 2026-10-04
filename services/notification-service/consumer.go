@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 
@@ -11,9 +12,19 @@ import (
 	"grab-mini/pkg/kafkaconsumer"
 )
 
+// decoder is the part of *eventcodec.Codec the handlers need.
+type decoder interface {
+	Decode(ctx context.Context, topic string, data []byte, v any) error
+}
+
 // runConsumer implements tasks 4.2/4.3: one consumer group subscribed to
 // every topic the Notification Service cares about, dispatching each
-// event to the hub so it reaches the right rider/driver socket.
+// event to the hub so it reaches the right rider/driver socket, on
+// whichever instance holds it.
+//
+// Notifications are best-effort and the apps recover over REST, so a failure
+// is retried once quickly and then dead-lettered: a notification retried
+// minutes later would only show a stale status.
 func runConsumer(ctx context.Context, env Env, h *hub) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
@@ -28,55 +39,81 @@ func runConsumer(ctx context.Context, env Env, h *hub) {
 			events.TopicDriverLocationUpdate,
 			events.TopicTripRated,
 		},
-		LogLabel: "[notification-service]",
+		MaxRetries: 1,
+		RetryDelay: 500 * time.Millisecond,
+		LogLabel:   "[notification-service]",
 	}, func(ctx context.Context, msg kafka.Message) error {
 		return handleMessage(ctx, codec, h, msg)
 	})
 }
 
-func handleMessage(ctx context.Context, codec *eventcodec.Codec, h *hub, msg kafka.Message) error {
+// riderOf is the rider an event is for: the one it names, or else the one
+// remembered from order.created (events from before they carried it).
+func riderOf(ctx context.Context, h *hub, riderID, orderID string) (string, error) {
+	if riderID != "" {
+		return riderID, nil
+	}
+	return h.riderForOrder(ctx, orderID)
+}
+
+func handleMessage(ctx context.Context, codec decoder, h *hub, msg kafka.Message) error {
 	switch msg.Topic {
 	case events.TopicOrderCreated:
 		var evt events.OrderCreated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
-		// US-5.1 needs to route order.matched/no_driver_found (which
-		// don't carry riderId) back to the right rider.
-		h.rememberOrderRider(evt.OrderID, evt.RiderID)
+		return h.rememberOrderRider(ctx, evt.OrderID, evt.RiderID)
 
 	case events.TopicOrderMatched:
 		var evt events.OrderMatched
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
-		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
-			h.rememberDriverRider(evt.DriverID, riderID)
-			h.pushToRider(riderID, message{Type: events.TopicOrderMatched, Payload: evt})
+		riderID, err := riderOf(ctx, h, evt.RiderID, evt.OrderID)
+		if err != nil {
+			return err
 		}
-		h.pushToDriver(evt.DriverID, message{Type: events.TopicOrderMatched, Payload: evt})
+		if riderID != "" {
+			if err := h.rememberDriverRider(ctx, evt.DriverID, riderID); err != nil {
+				return err
+			}
+			if err := h.pushToRider(ctx, riderID, message{Type: events.TopicOrderMatched, Payload: evt}); err != nil {
+				return err
+			}
+		}
+		return h.pushToDriver(ctx, evt.DriverID, message{Type: events.TopicOrderMatched, Payload: evt})
 
 	case events.TopicOrderNoDriverFound:
 		var evt events.OrderNoDriverFound
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
-		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
-			h.pushToRider(riderID, message{Type: events.TopicOrderNoDriverFound, Payload: evt})
+		riderID, err := riderOf(ctx, h, evt.RiderID, evt.OrderID)
+		if err != nil || riderID == "" {
+			return err
 		}
+		return h.pushToRider(ctx, riderID, message{Type: events.TopicOrderNoDriverFound, Payload: evt})
 
 	case events.TopicTripStatusChanged:
 		var evt events.TripStatusChanged
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
-		if riderID, ok := h.riderForOrder(evt.OrderID); ok {
-			h.pushToRider(riderID, message{Type: events.TopicTripStatusChanged, Payload: evt})
+		riderID, err := riderOf(ctx, h, evt.RiderID, evt.OrderID)
+		if err != nil {
+			return err
 		}
-		h.pushToDriver(evt.DriverID, message{Type: events.TopicTripStatusChanged, Payload: evt})
-
+		if riderID != "" {
+			if err := h.pushToRider(ctx, riderID, message{Type: events.TopicTripStatusChanged, Payload: evt}); err != nil {
+				return err
+			}
+		}
+		if err := h.pushToDriver(ctx, evt.DriverID, message{Type: events.TopicTripStatusChanged, Payload: evt}); err != nil {
+			return err
+		}
 		if evt.Status == events.TripStatusCompleted || evt.Status == events.TripStatusCancelled {
-			h.forgetDriverRider(evt.DriverID)
+			return h.forgetDriverRider(ctx, evt.DriverID)
 		}
 
 	case events.TopicDriverLocationUpdate:
@@ -85,18 +122,24 @@ func handleMessage(ctx context.Context, codec *eventcodec.Codec, h *hub, msg kaf
 			return err
 		}
 		// task 4.3: push to the rider watching this driver's current trip.
-		if riderID, ok := h.riderForDriver(evt.DriverID); ok {
-			h.pushToRider(riderID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
+		riderID, err := h.riderForDriver(ctx, evt.DriverID)
+		if err != nil {
+			return err
+		}
+		if riderID != "" {
+			if err := h.pushToRider(ctx, riderID, message{Type: events.TopicDriverLocationUpdate, Payload: evt}); err != nil {
+				return err
+			}
 		}
 		// Echo to the driver's own app so it can show where it is.
-		h.pushToDriver(evt.DriverID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
+		return h.pushToDriver(ctx, evt.DriverID, message{Type: events.TopicDriverLocationUpdate, Payload: evt})
 
 	case events.TopicTripRated:
 		var evt events.TripRated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 			return err
 		}
-		h.pushToDriver(evt.DriverID, message{Type: events.TopicTripRated, Payload: evt})
+		return h.pushToDriver(ctx, evt.DriverID, message{Type: events.TopicTripRated, Payload: evt})
 
 	default:
 		return fmt.Errorf("unhandled topic %q", msg.Topic)

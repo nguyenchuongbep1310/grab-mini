@@ -64,6 +64,7 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			OrderID:     order.OrderID,
 			DriverID:    driverID,
 			VehicleType: order.VehicleType,
+			RiderID:     order.RiderID,
 		}
 		publish := func() error {
 			payload, err := codec.Encode(ctx, events.TopicOrderMatched, event)
@@ -92,6 +93,7 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 	event := events.OrderNoDriverFound{
 		Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: now},
 		OrderID:  order.OrderID,
+		RiderID:  order.RiderID,
 	}
 	payload, err := codec.Encode(ctx, events.TopicOrderNoDriverFound, event)
 	if err != nil {

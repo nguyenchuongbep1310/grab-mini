@@ -6,6 +6,7 @@ type Env struct {
 	SchemaRegistryURL string
 	Port              string
 	KafkaBrokers      []string
+	RedisAddr         string
 }
 
 func loadEnv() Env {
@@ -13,6 +14,7 @@ func loadEnv() Env {
 		SchemaRegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
 		Port:              getEnv("PORT", "3003"),
 		KafkaBrokers:      []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
+		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
 	}
 }
 

@@ -28,14 +28,16 @@ func (f *fakeProducer) WriteMessages(_ context.Context, msgs ...kafka.Message) e
 	return nil
 }
 
+// fakeEncoder turns an event into a readable string: "matched:<driver>:<rider>"
+// or "none:<rider>".
 type fakeEncoder struct{}
 
 func (fakeEncoder) Encode(_ context.Context, _ string, v any) ([]byte, error) {
 	switch e := v.(type) {
 	case events.OrderMatched:
-		return []byte("matched:" + e.DriverID), nil
+		return []byte("matched:" + e.DriverID + ":" + e.RiderID), nil
 	case events.OrderNoDriverFound:
-		return []byte("none"), nil
+		return []byte("none:" + e.RiderID), nil
 	}
 	return nil, errors.New("unexpected event")
 }
@@ -73,6 +75,7 @@ func setup(t *testing.T) (*redis.Client, Env) {
 func order(id string) events.OrderCreated {
 	return events.OrderCreated{
 		OrderID:     id,
+		RiderID:     "rider-1",
 		Pickup:      events.LatLng{Lat: 10.7769, Lng: 106.7009},
 		VehicleType: events.VehicleCar,
 	}
@@ -85,7 +88,7 @@ func TestMatchOrderClaimsTheNearestDriverAndAnnouncesIt(t *testing.T) {
 	if err := matchOrder(context.Background(), env, rdb, p, fakeEncoder{}, order("o1")); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.sent) != 1 || p.sent[0].Topic != events.TopicOrderMatched || string(p.sent[0].Value) != "matched:driver-1" {
+	if len(p.sent) != 1 || p.sent[0].Topic != events.TopicOrderMatched || string(p.sent[0].Value) != "matched:driver-1:rider-1" {
 		t.Fatalf("sent %v, want one order.matched for driver-1", p.sent)
 	}
 }
@@ -105,7 +108,7 @@ func TestARedeliveredOrderKeepsItsDriverInsteadOfClaimingAnother(t *testing.T) {
 	}
 
 	for i, m := range p.sent {
-		if string(m.Value) != "matched:driver-1" {
+		if string(m.Value) != "matched:driver-1:rider-1" {
 			t.Errorf("announcement %d = %s, want driver-1 both times", i, m.Value)
 		}
 	}
@@ -129,7 +132,7 @@ func TestAMatchThatWasNeverAnnouncedIsAnnouncedOnRedelivery(t *testing.T) {
 	if err := matchOrder(ctx, env, rdb, p, fakeEncoder{}, order("o1")); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.sent) != 1 || string(p.sent[0].Value) != "matched:driver-1" {
+	if len(p.sent) != 1 || string(p.sent[0].Value) != "matched:driver-1:rider-1" {
 		t.Fatalf("sent %v, want the pending match announced", p.sent)
 	}
 }
@@ -163,7 +166,7 @@ func TestNoDriverNearbyReportsNoDriverFound(t *testing.T) {
 	if err := matchOrder(context.Background(), env, rdb, p, fakeEncoder{}, far); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.sent) != 1 || p.sent[0].Topic != events.TopicOrderNoDriverFound {
-		t.Fatalf("sent %v, want one order.no_driver_found", p.sent)
+	if len(p.sent) != 1 || p.sent[0].Topic != events.TopicOrderNoDriverFound || string(p.sent[0].Value) != "none:rider-1" {
+		t.Fatalf("sent %v, want one order.no_driver_found naming the rider", p.sent)
 	}
 }

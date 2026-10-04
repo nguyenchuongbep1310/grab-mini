@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/serve"
 )
@@ -49,38 +50,41 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// newMux wires the HTTP and WebSocket routes. ctx is the process context,
+// which the sockets' Redis subscriptions use.
+func newMux(ctx context.Context, h *hub) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", handleHealth)
+
+	for _, kind := range []string{kindRider, kindDriver} {
+		mux.HandleFunc("GET /ws/"+kind+"/{id}", func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			serveWS(w, r,
+				func(ws *websocket.Conn) *conn { return h.register(ctx, kind, id, ws) },
+				func(c *conn) { h.unregister(ctx, kind, id, c) },
+			)
+		})
+	}
+	return mux
+}
+
 func main() {
 	env := loadEnv()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	h := newHub()
-	var consumer sync.WaitGroup
-	consumer.Go(func() { runConsumer(ctx, env, h) })
+	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
+	defer rdb.Close()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handleHealth)
-
-	mux.HandleFunc("GET /ws/rider/{id}", func(w http.ResponseWriter, r *http.Request) {
-		riderID := r.PathValue("id")
-		serveWS(w, r,
-			func(ws *websocket.Conn) *conn { return h.registerRider(riderID, ws) },
-			func(c *conn) { h.unregisterRider(riderID, c) },
-		)
-	})
-
-	mux.HandleFunc("GET /ws/driver/{id}", func(w http.ResponseWriter, r *http.Request) {
-		driverID := r.PathValue("id")
-		serveWS(w, r,
-			func(ws *websocket.Conn) *conn { return h.registerDriver(driverID, ws) },
-			func(c *conn) { h.unregisterDriver(driverID, c) },
-		)
-	})
+	h := newHub(ctx, rdb)
+	var background sync.WaitGroup
+	background.Go(func() { h.run(ctx) })
+	background.Go(func() { runConsumer(ctx, env, h) })
 
 	log.Printf("notification-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, newMux(ctx, h)); err != nil {
 		log.Fatal(err)
 	}
-	consumer.Wait()
+	background.Wait()
 	log.Printf("notification-service stopped")
 }
