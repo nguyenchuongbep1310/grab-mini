@@ -25,6 +25,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
 )
 
@@ -92,6 +93,9 @@ func Ready(ctx context.Context, checks ...Check) http.Handler {
 func Register(ctx context.Context, mux *http.ServeMux, checks ...Check) {
 	mux.Handle("GET /livez", Live())
 	mux.Handle("GET /readyz", Ready(ctx, checks...))
+	// Prometheus scrapes this. It is unauthenticated, so keep it off any public
+	// route: reach it only from inside the cluster (see deploy/k8s NetworkPolicy).
+	mux.Handle("GET /metrics", metrics.Handler())
 }
 
 // run executes the checks concurrently and returns "ok" or the error text

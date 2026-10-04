@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -156,5 +157,38 @@ func TestOnlyOneRelayPublishesASourceAtATime(t *testing.T) {
 	n, err := NewRelay(db, w, "svc").Flush(ctx)
 	if err != nil || n != 0 || len(w.sent) != 0 {
 		t.Fatalf("a second relay published %d event(s), err %v; want it to stand aside", n, err)
+	}
+}
+
+func TestTheBacklogGaugeReportsTheOldestWaitingEvent(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	r := NewRelay(db, &fakeWriter{}, "gauge-svc")
+
+	r.observeBacklog(ctx)
+	if got := testutil.ToFloat64(oldestAge.WithLabelValues("gauge-svc")); got != 0 {
+		t.Fatalf("an empty outbox reports an age of %v, want 0", got)
+	}
+
+	// An event that has waited 90 seconds.
+	if _, err := db.Exec(ctx, `INSERT INTO outbox (source, topic, payload, created_at) VALUES ('gauge-svc', 't', 'x', now() - interval '90 seconds')`); err != nil {
+		t.Fatal(err)
+	}
+	r.observeBacklog(ctx)
+	if got := testutil.ToFloat64(oldestAge.WithLabelValues("gauge-svc")); got < 89 || got > 95 {
+		t.Errorf("age = %v, want about 90", got)
+	}
+
+	// Published, it goes back to zero, and the published counter moves.
+	before := testutil.ToFloat64(publishedTotal.WithLabelValues("gauge-svc", "t"))
+	if n, err := r.Flush(ctx); err != nil || n != 1 {
+		t.Fatalf("Flush = %d, %v", n, err)
+	}
+	r.observeBacklog(ctx)
+	if got := testutil.ToFloat64(oldestAge.WithLabelValues("gauge-svc")); got != 0 {
+		t.Errorf("age after publishing = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(publishedTotal.WithLabelValues("gauge-svc", "t")) - before; got != 1 {
+		t.Errorf("published counter moved by %v, want 1", got)
 	}
 }

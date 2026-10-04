@@ -16,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
@@ -23,6 +25,8 @@ import (
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/serve"
 )
@@ -38,6 +42,12 @@ type createOrderRequest struct {
 func isValidLatLng(p *events.LatLng) bool {
 	return p != nil && math.Abs(p.Lat) <= 90 && math.Abs(p.Lng) <= 180
 }
+
+// ordersCreated is the booking rate, by vehicle type.
+var ordersCreated = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "orders_created_total",
+	Help: "Orders accepted (saved with their order.created event), by vehicle type.",
+}, []string{"vehicle_type"})
 
 // outboxSource names this service in the shared outbox table.
 const outboxSource = "order-service"
@@ -122,6 +132,7 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.relay.Wake()
+	ordersCreated.WithLabelValues(string(req.VehicleType)).Inc()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -234,6 +245,7 @@ func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
 }
 
 func main() {
+	logging.Setup("order-service")
 	env := loadEnv()
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		runMigrate(env)
@@ -273,7 +285,7 @@ func main() {
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("order-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait() // the consumer stops and the relay drains before the pool closes

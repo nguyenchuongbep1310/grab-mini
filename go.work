@@ -15,7 +15,9 @@ use (
 	./services/pkg/events
 	./services/pkg/health
 	./services/pkg/kafkaconn
+	./services/pkg/logging
 	./services/pkg/kafkaconsumer
+	./services/pkg/metrics
 	./services/pkg/migrate
 	./services/pkg/outbox
 	./services/pkg/secret

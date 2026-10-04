@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"grab-mini/pkg/logging"
 )
 
 type simDriver struct {
@@ -171,6 +173,7 @@ func simulateDriver(ctx context.Context, wg *sync.WaitGroup, c *client, d simDri
 }
 
 func main() {
+	logging.Setup("driver-app-sim")
 	drivers := loadDrivers()
 	c := &client{
 		http:       &http.Client{Timeout: 10 * time.Second},

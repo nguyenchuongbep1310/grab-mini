@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
@@ -24,8 +26,22 @@ import (
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/serve"
+)
+
+var (
+	tripTransitions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "trip_transitions_total",
+		Help: "Trip status changes committed, by the status moved to.",
+	}, []string{"status"})
+
+	tripRatings = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "trip_ratings_total",
+		Help: "Ratings saved.",
+	})
 )
 
 // outboxSource names this service in the shared outbox table.
@@ -70,6 +86,7 @@ func (s *server) transitionWithEvent(ctx context.Context, id string, fromStatuse
 		return false, err
 	}
 	s.relay.Wake()
+	tripTransitions.WithLabelValues(string(targetStatus)).Inc()
 	return true, nil
 }
 
@@ -351,6 +368,7 @@ func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, pa
 		return false, err
 	}
 	s.relay.Wake()
+	tripRatings.Inc()
 	return true, nil
 }
 
@@ -373,6 +391,7 @@ func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
 }
 
 func main() {
+	logging.Setup("trip-service")
 	env := loadEnv()
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		runMigrate(env)
@@ -416,7 +435,7 @@ func main() {
 	health.Register(ctx, mux, health.Postgres(db), health.Redis(rdb), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("trip-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait() // the consumer stops and the relay drains before the pool closes

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
@@ -147,13 +148,18 @@ func readDLQ(t *testing.T, brokers []string, topic string) dlqEnvelope {
 	return env
 }
 
+func outcome(cfg Config, topic, result string) float64 {
+	return testutil.ToFloat64(messagesTotal.WithLabelValues(cfg.GroupID, topic, result))
+}
+
 func TestATransientFailureIsRetriedThroughTheTiersUntilItSucceeds(t *testing.T) {
 	b := brokers(t)
 	topic := newTopic(t, b, 1)
+	cfg := config(b, topic)
 	rec := newRecorder()
 	var n int
 	var mu sync.Mutex
-	start(t, config(b, topic), func(_ context.Context, msg kafka.Message) error {
+	start(t, cfg, func(_ context.Context, msg kafka.Message) error {
 		rec.record(msg)
 		mu.Lock()
 		defer mu.Unlock()
@@ -181,19 +187,32 @@ func TestATransientFailureIsRetriedThroughTheTiersUntilItSucceeds(t *testing.T) 
 	if rec.count() != 4 {
 		t.Errorf("%d attempts, want it to stop at 4 once it succeeded", rec.count())
 	}
+
+	// Left the source consumer failing (retried), left the first tier failing
+	// (retried), and finished from the second tier (ok): one message, three outcomes.
+	if got := [3]float64{outcome(cfg, topic, "retried"), outcome(cfg, topic, "ok"), outcome(cfg, topic, "dead_lettered")}; got != [3]float64{2, 1, 0} {
+		t.Errorf("retried/ok/dead_lettered = %v, want [2 1 0]", got)
+	}
+	if n := testutil.CollectAndCount(handleDuration); n == 0 {
+		t.Error("no handler durations were recorded")
+	}
 }
 
 func TestAMessageThatKeepsFailingEndsUpOnTheDeadLetterTopic(t *testing.T) {
 	b := brokers(t)
 	topic := newTopic(t, b, 1)
 	rec := newRecorder()
-	start(t, config(b, topic), func(_ context.Context, msg kafka.Message) error {
+	cfg := config(b, topic)
+	start(t, cfg, func(_ context.Context, msg kafka.Message) error {
 		rec.record(msg)
 		return errors.New("still down")
 	})
 
 	publish(t, b, topic, "k", "doomed")
 	env := readDLQ(t, b, topic)
+	if got := [2]float64{outcome(cfg, topic, "retried"), outcome(cfg, topic, "dead_lettered")}; got != [2]float64{2, 1} {
+		t.Errorf("retried/dead_lettered = %v, want [2 1]: the DLQ counter is what the alert watches", got)
+	}
 
 	if env.OriginalTopic != topic || env.ValueText != "doomed" || env.Retries != 2 {
 		t.Errorf("DLQ envelope = %+v, want the original topic and value after 2 retries", env)

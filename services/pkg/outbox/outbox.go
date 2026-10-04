@@ -23,7 +23,25 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
+
+	"grab-mini/pkg/metrics"
+)
+
+var (
+	publishedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "outbox_published_total",
+		Help: "Events the outbox relay published to Kafka, by source and topic.",
+	}, []string{"source", "topic"})
+
+	// The one number that says whether the relay is keeping up: how long the
+	// oldest event still waiting has been waiting. Zero when nothing waits.
+	oldestAge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "outbox_oldest_pending_age_seconds",
+		Help: "Age of the oldest outbox event not yet published, by source (0 if none).",
+	}, []string{"source"})
 )
 
 const schema = `
@@ -122,7 +140,9 @@ func (r *Relay) Run(ctx context.Context) {
 			case <-time.After(backoff):
 			}
 		}
-		if _, err := r.flushAll(ctx); err != nil {
+		_, err := r.flushAll(ctx)
+		r.observeBacklog(ctx)
+		if err != nil {
 			if ctx.Err() != nil {
 				continue
 			}
@@ -178,7 +198,16 @@ func (r *Relay) Flush(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	if err := r.w.WriteMessages(ctx, msgs...); err != nil {
+	started := time.Now()
+	err = r.w.WriteMessages(ctx, msgs...)
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		if !seen[m.Topic] {
+			seen[m.Topic] = true
+			metrics.ObservePublish(m.Topic, started, err)
+		}
+	}
+	if err != nil {
 		return 0, fmt.Errorf("publish %d event(s): %w", len(msgs), err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, ids); err != nil {
@@ -187,7 +216,23 @@ func (r *Relay) Flush(ctx context.Context) (int, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
+	for _, m := range msgs {
+		publishedTotal.WithLabelValues(r.source, m.Topic).Inc()
+	}
 	return len(ids), nil
+}
+
+// observeBacklog sets the oldest-pending-age gauge. It reads the oldest row by
+// id (an index scan of one row), so it is cheap however large the backlog is.
+func (r *Relay) observeBacklog(ctx context.Context) {
+	var age float64
+	err := r.db.QueryRow(ctx,
+		`SELECT COALESCE((SELECT EXTRACT(EPOCH FROM now() - created_at) FROM outbox WHERE source = $1 ORDER BY id LIMIT 1), 0)`,
+		r.source).Scan(&age)
+	if err != nil {
+		return // keep the last value; a database that is down shows up elsewhere
+	}
+	oldestAge.WithLabelValues(r.source).Set(age)
 }
 
 func collect(rows pgx.Rows) ([]int64, []kafka.Message, error) {

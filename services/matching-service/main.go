@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
@@ -18,6 +20,24 @@ import (
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconn"
 	"grab-mini/pkg/kafkaconsumer"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
+)
+
+var (
+	matchOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "matching_orders_total",
+		Help: "Orders matching finished with: matched, or no_driver.",
+	}, []string{"result"})
+
+	// How long a rider waits to hear a driver was found: from the moment the
+	// order was created (its occurredAt) to the order.matched publish. The
+	// SLO is 95% within 3 seconds.
+	matchLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "matching_latency_seconds",
+		Help:    "Time from order.created to order.matched being published.",
+		Buckets: []float64{.1, .25, .5, 1, 2, 3, 5, 10, 20, 30, 60},
+	})
 )
 
 // publisher is the part of *kafka.Writer matching needs; tests substitute a fake.
@@ -73,11 +93,14 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			if err != nil {
 				return err
 			}
-			return producer.WriteMessages(ctx, kafka.Message{
+			started := time.Now()
+			err = producer.WriteMessages(ctx, kafka.Message{
 				Topic: events.TopicOrderMatched,
 				Key:   []byte(order.OrderID),
 				Value: payload,
 			})
+			metrics.ObservePublish(events.TopicOrderMatched, started, err)
+			return err
 		}
 		if err := publish(); err != nil {
 			// The driver is already claimed. Hand them back (and forget the
@@ -89,6 +112,10 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			return err
 		}
 		log.Printf("[%s] matched order=%s -> driver=%s", env.InstanceID, order.OrderID, driverID)
+		matchOutcomes.WithLabelValues("matched").Inc()
+		if created, err := time.Parse(time.RFC3339, order.OccurredAt); err == nil {
+			matchLatency.Observe(time.Since(created).Seconds())
+		}
 		return nil
 	}
 
@@ -101,13 +128,17 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 	if err != nil {
 		return err
 	}
-	if err := producer.WriteMessages(ctx, kafka.Message{
+	started := time.Now()
+	err = producer.WriteMessages(ctx, kafka.Message{
 		Topic: events.TopicOrderNoDriverFound,
 		Key:   []byte(order.OrderID),
 		Value: payload,
-	}); err != nil {
+	})
+	metrics.ObservePublish(events.TopicOrderNoDriverFound, started, err)
+	if err != nil {
 		return err
 	}
+	matchOutcomes.WithLabelValues("no_driver").Inc()
 	log.Printf("[%s] no driver found for order=%s", env.InstanceID, order.OrderID)
 	return nil
 }
@@ -144,6 +175,7 @@ func runConsumer(ctx context.Context, env Env) {
 }
 
 func main() {
+	logging.Setup("matching-service")
 	env := loadEnv()
 
 	if len(os.Args) > 1 && os.Args[1] == "seed-drivers" {

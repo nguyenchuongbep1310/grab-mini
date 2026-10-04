@@ -28,11 +28,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
@@ -94,6 +97,22 @@ type Config struct {
 	// LogLabel prefixes log lines, e.g. "[matching-A]"; defaults to GroupID.
 	LogLabel string
 }
+
+var (
+	// result is "ok", "retried" (moved to a retry topic) or "dead_lettered".
+	// A message is counted once per time it leaves a consumer: one that goes
+	// through two retry topics and then succeeds is retried, retried, ok.
+	messagesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kafka_consumer_messages_total",
+		Help: "Messages a consumer finished with, by group, original topic and outcome.",
+	}, []string{"group", "topic", "result"})
+
+	handleDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kafka_consumer_handle_duration_seconds",
+		Help:    "Time a handler took on one attempt, by group and original topic.",
+		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	}, []string{"group", "topic"})
+)
 
 const (
 	headerOriginalTopic = "x-original-topic"
@@ -162,11 +181,19 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 		log.Printf("%s could not create its retry and dead-letter topics (they must exist, or the broker must auto-create them): %v", c.label, err)
 	}
 
+	// Time every attempt, wherever it runs.
+	timed := func(ctx context.Context, msg kafka.Message) error {
+		start := time.Now()
+		err := handle(ctx, msg)
+		handleDuration.WithLabelValues(cfg.GroupID, msg.Topic).Observe(time.Since(start).Seconds())
+		return err
+	}
+
 	var tiers sync.WaitGroup
 	for i := range cfg.RetryTiers {
-		tiers.Go(func() { c.runRetryTier(ctx, i+1, handle) })
+		tiers.Go(func() { c.runRetryTier(ctx, i+1, timed) })
 	}
-	c.runSource(ctx, handle)
+	c.runSource(ctx, timed)
 	tiers.Wait()
 }
 
@@ -196,13 +223,15 @@ func (c *consumer) runSource(ctx context.Context, handle Handler) {
 	log.Printf("%s consumer running", c.label)
 
 	c.loop(ctx, reader, func(ctx context.Context, msg kafka.Message) (kafka.Message, bool) {
-		log.Printf("%s received topic=%s partition=%d offset=%d key=%s", c.label, msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
+		slog.Info("received", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key))
 		err := handleWithRetry(ctx, handle, msg, c.maxRetries, c.retryDelay, c.label)
 		if err != nil && ctx.Err() != nil {
 			return msg, false
 		}
 		if err != nil {
 			c.fail(ctx, msg, err, 0)
+		} else {
+			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
 		}
 		return msg, true
 	})
@@ -228,7 +257,7 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 				return msg, false
 			}
 		}
-		log.Printf("%s retrying topic=%s key=%s (retry topic partition=%d offset=%d)", label, msg.Topic, string(msg.Key), msg.Partition, msg.Offset)
+		slog.Info("retrying", "consumer", label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key), "retryPartition", msg.Partition, "retryOffset", msg.Offset)
 
 		// One attempt: the wait above was the back-off.
 		err := handle(ctx, msg)
@@ -237,6 +266,8 @@ func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
 		}
 		if err != nil {
 			c.fail(ctx, msg, err, tier)
+		} else {
+			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
 		}
 		return msg, true
 	})
@@ -290,6 +321,7 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 	defer cancel()
 
 	if isPermanent(cause) || attempt >= len(c.cfg.RetryTiers) {
+		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
 		publishToDLQ(ctx, c.out, msg, cause, attempt, c.label)
 		return
 	}
@@ -307,10 +339,13 @@ func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, att
 	}
 	if err := c.out.WriteMessages(ctx, retry); err != nil {
 		log.Printf("%s failed to publish to %s, dead-lettering instead: %v", c.label, retry.Topic, err)
+		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
 		publishToDLQ(ctx, c.out, msg, cause, attempt, c.label)
 		return
 	}
-	log.Printf("%s will retry topic=%s key=%s in %s via %s (cause: %v)", c.label, msg.Topic, string(msg.Key), c.cfg.RetryTiers[attempt], retry.Topic, cause)
+	messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "retried").Inc()
+	slog.Warn("will retry", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key),
+		"retryTopic", retry.Topic, "after", c.cfg.RetryTiers[attempt].String(), "error", cause.Error())
 }
 
 // ensureTopics creates the retry topics and the dead-letter topic of every
@@ -456,5 +491,6 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 		log.Printf("%s failed to publish to %s: %v", label, dlqTopic, err)
 		return
 	}
-	log.Printf("%s giving up on the message, published to %s (partition=%d offset=%d, %d retries)", label, dlqTopic, msg.Partition, msg.Offset, retries)
+	slog.Error("message dead-lettered", "consumer", label, "dlqTopic", dlqTopic, "topic", msg.Topic,
+		"partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key), "retries", retries, "error", cause.Error())
 }

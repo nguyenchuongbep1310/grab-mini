@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
@@ -281,3 +282,28 @@ func TestRealBrokerAcceptsTheGatewaysProducerSettings(t *testing.T) {
 }
 
 func strconvF(x float64) string { return strconv.FormatFloat(x, 'f', -1, 64) }
+
+func TestEveryReportOutcomeIsCounted(t *testing.T) {
+	count := func(result string) float64 { return testutil.ToFloat64(locationReports.WithLabelValues(result)) }
+	before := map[string]float64{}
+	for _, r := range []string{"published", "stationary", "too_fast", "invalid", "error"} {
+		before[r] = count(r)
+	}
+
+	r := newRig(t)
+	tok := r.tok(auth.Driver, "metrics-driver")
+	r.post(tok, `{"lat":10,"lng":106}`) // published
+	r.clock = r.clock.Add(100 * time.Millisecond)
+	r.post(tok, `{"lat":10,"lng":106}`) // too_fast
+	r.clock = r.clock.Add(2 * time.Second)
+	r.post(tok, `{"lat":10.000001,"lng":106}`)                 // stationary
+	r.post(r.tok(auth.Driver, "other"), `{"lat":999,"lng":0}`) // invalid
+	r.pub.err = errors.New("down")
+	r.post(r.tok(auth.Driver, "third"), `{"lat":1,"lng":1}`) // error
+
+	for result, want := range map[string]float64{"published": 1, "too_fast": 1, "stationary": 1, "invalid": 1, "error": 1} {
+		if got := count(result) - before[result]; got != want {
+			t.Errorf("%s moved by %v, want %v", result, got, want)
+		}
+	}
+}

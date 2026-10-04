@@ -16,6 +16,8 @@ import (
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/health"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
 )
 
@@ -108,6 +110,7 @@ func newMux(ctx context.Context, h *hub, verifier *auth.Verifier, allowedOrigins
 }
 
 func main() {
+	logging.Setup("notification-service")
 	env := loadEnv()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -125,7 +128,7 @@ func main() {
 	background.Go(func() { runConsumer(ctx, env, h) })
 
 	log.Printf("notification-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, newMux(ctx, h, verifier, env.AllowedOrigins, health.Redis(rdb), health.Kafka(env.KafkaBrokers))); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(newMux(ctx, h, verifier, env.AllowedOrigins, health.Redis(rdb), health.Kafka(env.KafkaBrokers)))); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
@@ -349,5 +350,25 @@ func TestTheTripsRiderCanRateItAndTheEventNamesThem(t *testing.T) {
 	old := &trip{ID: "x", DriverID: "d", RiderID: ""}
 	if isRiderOf(auth.Identity{Subject: "", Role: auth.Rider}, old) {
 		t.Error("a trip with no recorded rider matched an empty subject")
+	}
+}
+
+func TestOnlyCommittedTransitionsAreCounted(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s, _ := newServer(db, rdb)
+	moved := func() float64 { return testutil.ToFloat64(tripTransitions.WithLabelValues("IN_PROGRESS")) }
+	before := moved()
+
+	// Refused (wrong starting status): not counted.
+	s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusCompleted}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e"))
+	if moved() != before {
+		t.Error("a refused transition was counted")
+	}
+	s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e"))
+	if moved()-before != 1 {
+		t.Errorf("a committed transition moved the counter by %v, want 1", moved()-before)
 	}
 }

@@ -18,10 +18,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/secret"
 	"grab-mini/pkg/serve"
 )
+
+var tokensIssued = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "auth_tokens_issued_total",
+	Help: "Development tokens issued, by role.",
+}, []string{"role"})
 
 // An id is what the services compare to ids in their data, so keep it plain.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -54,6 +64,7 @@ func handleToken(issuer *auth.Issuer) http.HandlerFunc {
 			auth.Deny(w, http.StatusInternalServerError, "internal error")
 			return
 		}
+		tokensIssued.WithLabelValues(string(req.Role)).Inc()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		json.NewEncoder(w).Encode(tokenResponse{token, exp})
@@ -71,10 +82,12 @@ func newMux(issuer *auth.Issuer) *http.ServeMux {
 	mux.HandleFunc("GET /health", live)
 	mux.HandleFunc("GET /livez", live)
 	mux.HandleFunc("GET /readyz", live)
+	mux.Handle("GET /metrics", metrics.Handler())
 	return mux
 }
 
 func main() {
+	logging.Setup("auth-service")
 	env := loadEnv()
 	if secret.Production() && !env.AllowDevTokens {
 		log.Fatal("auth-service issues a token to anyone who asks and is for development only: " +
@@ -89,7 +102,7 @@ func main() {
 	defer stop()
 
 	log.Printf("auth-service listening on :%s (development token issuer, tokens last %s)", env.Port, env.TokenTTL)
-	if err := serve.Run(ctx, ":"+env.Port, newMux(issuer)); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(newMux(issuer))); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
@@ -307,5 +308,28 @@ func TestASocketFromAnotherSitesPageIsRefused(t *testing.T) {
 		t.Errorf("a client without an Origin was refused: %v", err)
 	} else {
 		ws.Close()
+	}
+}
+
+func TestTheOpenSocketGaugeFollowsConnectsAndDisconnects(t *testing.T) {
+	ctx, addr := setup(t)
+	a := newInstance(t, ctx, addr)
+	open := func() float64 { return testutil.ToFloat64(socketsOpen.WithLabelValues(kindRider)) }
+	base := open()
+
+	first := a.connect(t, kindRider, "gauge-rider")
+	second := a.connect(t, kindRider, "gauge-rider") // the same rider reconnecting is still one socket
+	if open()-base != 1 {
+		t.Errorf("gauge moved by %v for one rider connecting twice, want 1", open()-base)
+	}
+	first.Close()
+	second.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for open() != base {
+		if time.Now().After(deadline) {
+			t.Fatalf("gauge stuck at %v, want %v after both sockets closed", open(), base)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

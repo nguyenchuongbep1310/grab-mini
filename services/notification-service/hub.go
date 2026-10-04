@@ -9,7 +9,25 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/redis/go-redis/v9"
+)
+
+var (
+	socketsOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "notification_sockets_open",
+		Help: "WebSockets currently open on this instance, by kind (rider or driver).",
+	}, []string{"kind"})
+
+	// delivered counts messages this instance wrote to a socket it holds;
+	// published counts messages it sent to Redis for some instance to deliver.
+	// Their difference across the fleet is what never found a listener (a rider
+	// with no open socket), which is normal and not an error.
+	pushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "notification_pushes_total",
+		Help: "Notification messages, by stage (published to Redis, delivered to a socket) and outcome.",
+	}, []string{"stage", "result"})
 )
 
 // conn wraps a websocket connection with a write mutex: gorilla/websocket
@@ -114,13 +132,19 @@ func (h *hub) deliver(channel string, payload []byte) {
 		return
 	}
 	if err := c.writeText(payload); err != nil {
+		pushes.WithLabelValues("delivered", "error").Inc()
 		log.Printf("failed to push to %s=%s: %v", kind, id, err)
+		return
 	}
+	pushes.WithLabelValues("delivered", "ok").Inc()
 }
 
 func (h *hub) register(ctx context.Context, kind, id string, ws *websocket.Conn) *conn {
 	c := &conn{ws: ws}
 	h.mu.Lock()
+	if _, replaced := h.connsFor(kind)[id]; !replaced {
+		socketsOpen.WithLabelValues(kind).Inc()
+	}
 	h.connsFor(kind)[id] = c
 	h.mu.Unlock()
 	if err := h.sub.Subscribe(ctx, channelFor(kind, id)); err != nil {
@@ -136,6 +160,7 @@ func (h *hub) unregister(ctx context.Context, kind, id string, c *conn) {
 	current := h.connsFor(kind)[id] == c
 	if current {
 		delete(h.connsFor(kind), id)
+		socketsOpen.WithLabelValues(kind).Dec()
 	}
 	h.mu.Unlock()
 	if !current {
@@ -159,7 +184,13 @@ func (h *hub) push(ctx context.Context, kind, id string, msg message) error {
 	if err != nil {
 		return err
 	}
-	return h.rdb.Publish(ctx, channelFor(kind, id), payload).Err()
+	err = h.rdb.Publish(ctx, channelFor(kind, id), payload).Err()
+	if err != nil {
+		pushes.WithLabelValues("published", "error").Inc()
+		return err
+	}
+	pushes.WithLabelValues("published", "ok").Inc()
+	return nil
 }
 
 func (h *hub) pushToRider(ctx context.Context, riderID string, msg message) error {

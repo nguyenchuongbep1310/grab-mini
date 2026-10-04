@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 
@@ -168,5 +169,30 @@ func TestNoDriverNearbyReportsNoDriverFound(t *testing.T) {
 	}
 	if len(p.sent) != 1 || p.sent[0].Topic != events.TopicOrderNoDriverFound || string(p.sent[0].Value) != "none:rider-1" {
 		t.Fatalf("sent %v, want one order.no_driver_found naming the rider", p.sent)
+	}
+}
+
+func TestMatchOutcomesAndLatencyAreRecorded(t *testing.T) {
+	rdb, env := setup(t)
+	matched := func() float64 { return testutil.ToFloat64(matchOutcomes.WithLabelValues("matched")) }
+	none := func() float64 { return testutil.ToFloat64(matchOutcomes.WithLabelValues("no_driver")) }
+	m0, n0 := matched(), none()
+
+	o := order("o-metrics")
+	o.OccurredAt = time.Now().Add(-2 * time.Second).UTC().Format(time.RFC3339)
+	if err := matchOrder(context.Background(), env, rdb, &fakeProducer{}, fakeEncoder{}, o); err != nil {
+		t.Fatal(err)
+	}
+	far := order("o-far")
+	far.Pickup = events.LatLng{Lat: 21.0, Lng: 105.8}
+	if err := matchOrder(context.Background(), env, rdb, &fakeProducer{}, fakeEncoder{}, far); err != nil {
+		t.Fatal(err)
+	}
+
+	if matched()-m0 != 1 || none()-n0 != 1 {
+		t.Errorf("matched moved by %v and no_driver by %v, want 1 and 1", matched()-m0, none()-n0)
+	}
+	if testutil.CollectAndCount(matchLatency) == 0 {
+		t.Error("no match latency was recorded")
 	}
 }

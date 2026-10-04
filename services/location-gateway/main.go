@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
@@ -30,6 +32,8 @@ import (
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
 )
 
@@ -42,6 +46,14 @@ type publisher interface {
 type encoder interface {
 	Encode(ctx context.Context, topic string, v any) ([]byte, error)
 }
+
+// locationReports says what became of each report: published, stationary
+// (accepted but nothing new), too_fast (429), invalid (400), or error (the
+// publish failed).
+var locationReports = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "location_reports_total",
+	Help: "Driver location reports received, by outcome.",
+}, []string{"result"})
 
 type gateway struct {
 	tracker *tracker
@@ -99,6 +111,7 @@ func (g *gateway) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rep.Lat == nil || rep.Lng == nil || !valid(*rep.Lat, *rep.Lng) {
+		locationReports.WithLabelValues("invalid").Inc()
 		auth.Deny(w, http.StatusBadRequest, "lat (-90 to 90) and lng (-180 to 180) are required")
 		return
 	}
@@ -108,10 +121,12 @@ func (g *gateway) handleReport(w http.ResponseWriter, r *http.Request) {
 	d, wait := g.tracker.decide(caller.Subject, lat, lng, now)
 	switch d {
 	case tooFast:
+		locationReports.WithLabelValues("too_fast").Inc()
 		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
 		auth.Deny(w, http.StatusTooManyRequests, "reporting too often")
 		return
 	case stationary:
+		locationReports.WithLabelValues("stationary").Inc()
 		writeJSON(w, http.StatusAccepted, map[string]bool{"published": false})
 		return
 	}
@@ -125,9 +140,12 @@ func (g *gateway) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := g.enc.Encode(r.Context(), events.TopicDriverLocationUpdate, event)
 	if err == nil {
+		started := time.Now()
 		err = g.pub.WriteMessages(r.Context(), kafka.Message{Key: []byte(caller.Subject), Value: payload})
+		metrics.ObservePublish(events.TopicDriverLocationUpdate, started, err)
 	}
 	if err != nil {
+		locationReports.WithLabelValues("error").Inc()
 		// Not published, so it must not count against the driver's rate limit
 		// nor become the position later reports are compared with.
 		g.tracker.refund(caller.Subject)
@@ -136,6 +154,7 @@ func (g *gateway) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.tracker.sent(caller.Subject, lat, lng, now)
+	locationReports.WithLabelValues("published").Inc()
 	writeJSON(w, http.StatusAccepted, map[string]bool{"published": true})
 }
 
@@ -149,6 +168,7 @@ func (g *gateway) routes(verifier *auth.Verifier) *http.ServeMux {
 }
 
 func main() {
+	logging.Setup("location-gateway")
 	env := loadEnv()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -200,7 +220,7 @@ func main() {
 	health.Register(ctx, mux, health.Kafka(env.KafkaBrokers))
 
 	log.Printf("location-gateway listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
 		log.Fatal(err)
 	}
 	background.Wait()

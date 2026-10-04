@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
@@ -18,8 +20,15 @@ import (
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconsumer"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/serve"
 )
+
+var ratingsRecorded = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ratings_recorded_total",
+	Help: "trip.rated events handled, by outcome: counted, or duplicate (already counted).",
+}, []string{"result"})
 
 func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
@@ -44,8 +53,10 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 			return err
 		}
 		if counted {
+			ratingsRecorded.WithLabelValues("counted").Inc()
 			log.Printf("driver=%s rated %d stars (trip %s)", evt.DriverID, evt.Stars, evt.TripID)
 		} else {
+			ratingsRecorded.WithLabelValues("duplicate").Inc()
 			log.Printf("duplicate trip.rated event %s, skipping", evt.EventID)
 		}
 		return nil
@@ -53,6 +64,7 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 }
 
 func main() {
+	logging.Setup("rating-service")
 	env := loadEnv()
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		runMigrate(env)
@@ -94,7 +106,7 @@ func main() {
 	health.Register(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("rating-service listening on :%s", env.Port)
-	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, metrics.HTTP(mux)); err != nil {
 		log.Fatal(err)
 	}
 	consumer.Wait() // stops before the pool closes
