@@ -267,7 +267,7 @@ Code: `trip-service/consumer.go` (`releaseDriverAfterTrip`), `pkg/driverstatus` 
 - **Relay là at-least-once**: publish xong mà chết trước khi xóa dòng thì event đi hai lần. Consumer đã dedupe theo `eventId` hoặc idempotent theo trạng thái.
 - Bảng `outbox` dùng chung một Postgres cho cả hai service ở bản local; khi tách database theo service (mục 5) mỗi service có bảng riêng.
 - Matching vẫn publish trực tiếp (không có DB để dùng outbox). Khoảng hở giữa claim và publish được đóng bằng bản ghi match và lease, không phải bằng outbox.
-- Chưa kiểm thử trên Kafka thật (xem phần kiểm thử bên dưới).
+- Phần Kafka (relay, consumer) đã được kiểm thử trên broker thật ở giai đoạn 2; toàn bộ hệ thống chưa chạy end-to-end (xem phần kiểm thử bên dưới).
 
 ### Cách đã kiểm thử
 
