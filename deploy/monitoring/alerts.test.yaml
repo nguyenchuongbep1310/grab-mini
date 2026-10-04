@@ -184,6 +184,23 @@ tests:
               description: "State changes are committed but not announced: riders and other services are not being told."
               runbook: "docs/runbook.md#outbox-backlog"
 
+  - name: a quarantined outbox event pages
+    interval: 1m
+    input_series:
+      - series: 'outbox_quarantined_total{source="order-service", topic="order.created"}'
+        values: '0 0 0 1 1 1 1'
+      - series: 'outbox_quarantined_total{source="trip-service", topic="trip.rated"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OutboxEventQuarantined
+        exp_alerts:
+          - exp_labels: {severity: page, source: order-service, topic: order.created}
+            exp_annotations:
+              summary: "order-service quarantined an event for order.created"
+              description: "Kafka rejected an event for good (too large, say). The state change is saved but nobody was told. See outbox_dead."
+              runbook: "docs/runbook.md#outbox-backlog"
+
   # -------------------------------------------------------------------- business
   - name: slow matching breaches the SLO
     interval: 1m

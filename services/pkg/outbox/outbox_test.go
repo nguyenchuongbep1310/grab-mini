@@ -3,7 +3,9 @@ package outbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,7 +31,7 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	if err := Migrate(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(ctx, `DELETE FROM outbox`); err != nil {
+	if _, err := db.Exec(ctx, `DELETE FROM outbox; DELETE FROM outbox_dead`); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -38,11 +40,19 @@ func testDB(t *testing.T) *pgxpool.Pool {
 type fakeWriter struct {
 	sent []kafka.Message
 	err  error
+	// failOn makes any call that includes a message with this value fail,
+	// publishing nothing from that call (as a batch rejected whole).
+	failOn map[string]error
 }
 
 func (f *fakeWriter) WriteMessages(_ context.Context, msgs ...kafka.Message) error {
 	if f.err != nil {
 		return f.err
+	}
+	for _, m := range msgs {
+		if err, bad := f.failOn[string(m.Value)]; bad {
+			return err
+		}
 	}
 	f.sent = append(f.sent, msgs...)
 	return nil
@@ -233,5 +243,117 @@ func TestAnEventQueuedWithoutATraceStillPublishes(t *testing.T) {
 	}
 	if len(w.sent[0].Headers) != 0 {
 		t.Errorf("headers %v, want none", w.sent[0].Headers)
+	}
+}
+
+func deadCount(t *testing.T, db *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(context.Background(), `SELECT count(*) FROM outbox_dead`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func values(msgs []kafka.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		out = append(out, string(m.Value))
+	}
+	return out
+}
+
+func TestAnEventKafkaWillNeverAcceptIsQuarantinedAndTheOthersStillGo(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	db.Exec(ctx, `DELETE FROM outbox_dead`)
+	for _, v := range []string{"good-1", "too-big", "good-2"} {
+		Add(ctx, db, "svc", "t", []byte("k"), []byte(v))
+	}
+	w := &fakeWriter{failOn: map[string]error{"too-big": kafka.MessageTooLargeError{Message: kafka.Message{Value: []byte("too-big")}}}}
+
+	n, err := NewRelay(db, w, "svc").Flush(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("Flush = %d, %v; want all 3 finished (2 published, 1 quarantined)", n, err)
+	}
+	if got := values(w.sent); len(got) != 2 || got[0] != "good-1" || got[1] != "good-2" {
+		t.Errorf("published %v, want the two good events in order", got)
+	}
+	if count(t, db) != 0 {
+		t.Errorf("%d rows left in the outbox", count(t, db))
+	}
+	if deadCount(t, db) != 1 {
+		t.Fatalf("%d quarantined, want 1", deadCount(t, db))
+	}
+	var payload, reason string
+	db.QueryRow(ctx, `SELECT convert_from(payload, 'UTF8'), error FROM outbox_dead`).Scan(&payload, &reason)
+	if payload != "too-big" || !strings.Contains(reason, "Message Size Too Large") {
+		t.Errorf("quarantined %q because %q", payload, reason)
+	}
+
+	// Nothing is sent a second time.
+	if n, _ := NewRelay(db, w, "svc").Flush(ctx); n != 0 || len(w.sent) != 2 {
+		t.Errorf("a second Flush finished %d and the total sent is %d", n, len(w.sent))
+	}
+}
+
+func TestATemporaryFailureKeepsTheRestQueuedButCommitsWhatWasSent(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	for _, v := range []string{"a", "b", "c"} {
+		Add(ctx, db, "svc", "t", nil, []byte(v))
+	}
+	w := &fakeWriter{failOn: map[string]error{"b": errors.New("broker not available")}}
+	r := NewRelay(db, w, "svc")
+
+	n, err := r.Flush(ctx)
+	if err == nil || n != 1 {
+		t.Fatalf("Flush = %d, %v; want 1 finished and the error", n, err)
+	}
+	if got := values(w.sent); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("published %v, want just a", got)
+	}
+	if count(t, db) != 2 {
+		t.Fatalf("%d rows queued, want b and c (a is published and must not go out again)", count(t, db))
+	}
+	if deadCount(t, db) != 0 {
+		t.Error("a temporary failure was quarantined")
+	}
+
+	w.failOn = nil // the broker is back
+	if n, err := r.Flush(ctx); err != nil || n != 2 {
+		t.Fatalf("Flush after recovery = %d, %v", n, err)
+	}
+	if got := values(w.sent); len(got) != 3 || got[1] != "b" || got[2] != "c" {
+		t.Errorf("published %v, want a, b, c in order, each once", got)
+	}
+}
+
+func TestWhichBrokerRejectionsAreFinal(t *testing.T) {
+	final := map[string]error{
+		"client-side too large":  kafka.MessageTooLargeError{},
+		"broker too large":       kafka.WriteErrors{kafka.MessageSizeTooLarge},
+		"invalid message":        kafka.WriteErrors{kafka.InvalidMessage},
+		"wrapped too large":      fmt.Errorf("publish: %w", kafka.MessageTooLargeError{}),
+		"one bad among the rest": kafka.WriteErrors{nil, kafka.MessageSizeTooLarge},
+	}
+	for name, err := range final {
+		if !isPermanent(err) {
+			t.Errorf("%s: treated as temporary, would block the outbox forever", name)
+		}
+	}
+	temporary := map[string]error{
+		"leader moving":       kafka.WriteErrors{kafka.LeaderNotAvailable},
+		"not authorized":      kafka.WriteErrors{kafka.TopicAuthorizationFailed},
+		"not enough replicas": kafka.WriteErrors{kafka.NotEnoughReplicas},
+		"timeout":             context.DeadlineExceeded,
+		"connection refused":  errors.New("dial tcp: connection refused"),
+		"unknown topic":       kafka.WriteErrors{kafka.UnknownTopicOrPartition},
+		"all fine":            nil,
+	}
+	for name, err := range temporary {
+		if isPermanent(err) {
+			t.Errorf("%s: treated as final, an event that would have gone out is thrown away", name)
+		}
 	}
 }

@@ -113,6 +113,15 @@ spec:
         summary: '{{ $labels.source }} has events waiting {{ $value | humanizeDuration }} to be published'
         description: 'State changes are committed but not announced: riders and other services are not being told.'
         runbook: docs/runbook.md#outbox-backlog
+    - alert: OutboxEventQuarantined
+      expr: sum by (source, topic) (increase(outbox_quarantined_total[10m])) > 0
+      labels:
+        severity: page
+      annotations:
+        summary: '{{ $labels.source }} quarantined an event for {{ $labels.topic }}'
+        description: Kafka rejected an event for good (too large, say). The state change is saved but nobody was told. See
+          outbox_dead.
+        runbook: docs/runbook.md#outbox-backlog
   - name: grab-mini.business
     rules:
     - alert: MatchLatencySLOBreach

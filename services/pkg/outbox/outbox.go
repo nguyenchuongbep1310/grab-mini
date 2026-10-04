@@ -17,8 +17,10 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +38,11 @@ var (
 	publishedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "outbox_published_total",
 		Help: "Events the outbox relay published to Kafka, by source and topic.",
+	}, []string{"source", "topic"})
+
+	quarantinedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "outbox_quarantined_total",
+		Help: "Events moved to outbox_dead because Kafka will never accept them, by source and topic.",
 	}, []string{"source", "topic"})
 
 	// The one number that says whether the relay is keeping up: how long the
@@ -59,6 +66,20 @@ const schema = `
 	-- through the wait for the relay and on into Kafka.
 	ALTER TABLE outbox ADD COLUMN IF NOT EXISTS headers JSONB;
 	CREATE INDEX IF NOT EXISTS outbox_source_id ON outbox (source, id);
+
+	-- Events Kafka will never accept (too large for the broker, say), moved
+	-- aside so they don't block the ones behind them.
+	CREATE TABLE IF NOT EXISTS outbox_dead (
+		id BIGSERIAL PRIMARY KEY,
+		source TEXT NOT NULL,
+		topic TEXT NOT NULL,
+		key BYTEA,
+		payload BYTEA NOT NULL,
+		headers JSONB,
+		created_at TIMESTAMPTZ NOT NULL,
+		failed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		error TEXT NOT NULL
+	);
 `
 
 // Execer is satisfied by *pgxpool.Pool and pgx.Tx, so Add can join the
@@ -70,7 +91,7 @@ type Execer interface {
 // Migrate creates the outbox table if it doesn't exist yet. Services don't
 // call it: they create the table through their own migrations
 // (order-service/migrations/00003_create_outbox.sql, and the same in
-// trip-service, plus 00004_outbox_headers.sql / 00005_outbox_headers.sql),
+// trip-service, plus the later outbox_headers and outbox_dead migrations),
 // which must stay in step with schema below. It is for tests
 // and one-off setups.
 func Migrate(ctx context.Context, db Execer) error {
@@ -176,9 +197,17 @@ func (r *Relay) flushAll(ctx context.Context) (int, error) {
 	}
 }
 
-// Flush publishes one batch and reports how many events went out. The rows
-// are deleted in the transaction that holds the lock, after Kafka has
-// acknowledged them.
+// Flush publishes one batch and reports how many events it finished with:
+// published, or (see below) quarantined. Rows are deleted in the transaction
+// that holds the lock, after Kafka has acknowledged them.
+//
+// If the batch fails, the relay publishes its rows one at a time, in order, to
+// find out whether one row is to blame. A row Kafka will never accept (too
+// large for the broker, say) is moved to outbox_dead, so one bad event can't
+// hold up every event behind it, nor make the good ones in its batch be sent
+// again and again. A failure that may pass (the broker is down, a permission
+// is missing) stops the batch there: what was finished is committed, the rest
+// stays queued, and the error is returned.
 func (r *Relay) Flush(ctx context.Context) (int, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -208,8 +237,20 @@ func (r *Relay) Flush(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
+	done, deliverErr := r.deliver(ctx, tx, ids, msgs)
+	// What was finished is published (or quarantined) and must not be sent
+	// again, so commit it even when a later row failed.
+	if done > 0 || deliverErr == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+	}
+	return done, deliverErr
+}
+
+func (r *Relay) deliver(ctx context.Context, tx pgx.Tx, ids []int64, msgs []kafka.Message) (int, error) {
 	started := time.Now()
-	err = r.w.WriteMessages(ctx, msgs...)
+	err := r.w.WriteMessages(ctx, msgs...)
 	seen := map[string]bool{}
 	for _, m := range msgs {
 		if !seen[m.Topic] {
@@ -217,19 +258,82 @@ func (r *Relay) Flush(ctx context.Context) (int, error) {
 			metrics.ObservePublish(m.Topic, started, err)
 		}
 	}
-	if err != nil {
-		return 0, fmt.Errorf("publish %d event(s): %w", len(msgs), err)
+	if err == nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, ids); err != nil {
+			return 0, err
+		}
+		for _, m := range msgs {
+			publishedTotal.WithLabelValues(r.source, m.Topic).Inc()
+		}
+		return len(ids), nil
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, ids); err != nil {
-		return 0, err
+
+	// The batch failed as a whole; some of it may even have gone out, which is
+	// fine: delivery is at-least-once and consumers dedupe.
+	done := 0
+	for i := range msgs {
+		started := time.Now()
+		err := r.w.WriteMessages(ctx, msgs[i])
+		metrics.ObservePublish(msgs[i].Topic, started, err)
+		switch {
+		case err == nil:
+			if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = $1`, ids[i]); err != nil {
+				return done, err
+			}
+			publishedTotal.WithLabelValues(r.source, msgs[i].Topic).Inc()
+			done++
+		case isPermanent(err):
+			if err := r.quarantine(ctx, tx, ids[i], msgs[i], err); err != nil {
+				return done, err
+			}
+			done++
+		default:
+			return done, fmt.Errorf("publish event %d (%s): %w", ids[i], msgs[i].Topic, err)
+		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
+	return done, nil
+}
+
+// quarantine moves a row Kafka will never accept to outbox_dead, with the
+// reason, for a person to look at.
+func (r *Relay) quarantine(ctx context.Context, tx pgx.Tx, id int64, m kafka.Message, cause error) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO outbox_dead (source, topic, key, payload, headers, created_at, error)
+		SELECT source, topic, key, payload, headers, created_at, $2 FROM outbox WHERE id = $1`, id, cause.Error()); err != nil {
+		return err
 	}
-	for _, m := range msgs {
-		publishedTotal.WithLabelValues(r.source, m.Topic).Inc()
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = $1`, id); err != nil {
+		return err
 	}
-	return len(ids), nil
+	quarantinedTotal.WithLabelValues(r.source, m.Topic).Inc()
+	slog.ErrorContext(ctx, "outbox event quarantined: Kafka will never accept it",
+		"source", r.source, "topic", m.Topic, "outboxId", id, "bytes", len(m.Value), "error", cause.Error())
+	return nil
+}
+
+// isPermanent reports whether Kafka rejected a message for a reason that
+// retrying can't change. Anything not listed is treated as possibly temporary,
+// because quarantining an event that would have gone through is worse than
+// waiting.
+func isPermanent(err error) bool {
+	var tooLarge kafka.MessageTooLargeError
+	if errors.As(err, &tooLarge) {
+		return true
+	}
+	if we, ok := err.(kafka.WriteErrors); ok {
+		for _, e := range we {
+			if e != nil && isPermanent(e) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, k := range []kafka.Error{kafka.MessageSizeTooLarge, kafka.InvalidMessageSize, kafka.InvalidMessage, kafka.InvalidTopic} {
+		if errors.Is(err, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // observeBacklog sets the oldest-pending-age gauge. It reads the oldest row by
