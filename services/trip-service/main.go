@@ -330,6 +330,7 @@ func main() {
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })
 	background.Go(func() { runOrderMatchedConsumer(ctx, env, db, rdb, codec) })
+	background.Go(func() { runDriverReleaseConsumer(ctx, env, db, rdb, codec) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)

@@ -238,3 +238,23 @@ func TestOnlyOneConcurrentClaimForAnOrderWins(t *testing.T) {
 		t.Errorf("%d drivers claimed for one order, want 1", claimed.Load())
 	}
 }
+
+func TestTransitionOnlyMovesADriverWhoIsInTheExpectedStatus(t *testing.T) {
+	rdb := newClient(t)
+	ctx := context.Background()
+	seed(t, rdb, "d1", "CAR", OnTrip)
+	seed(t, rdb, "d2", "CAR", Assigned)
+
+	if ok, err := Transition(ctx, rdb, "d1", OnTrip, Available); err != nil || !ok {
+		t.Fatalf("Transition d1 = %v, %v; want true", ok, err)
+	}
+	if ok, _ := Transition(ctx, rdb, "d1", OnTrip, Available); ok {
+		t.Error("a second Transition reported a change")
+	}
+	if ok, _ := Transition(ctx, rdb, "d2", OnTrip, Available); ok {
+		t.Error("moved a driver who was ASSIGNED (a new claim) to AVAILABLE")
+	}
+	if s, _ := Get(ctx, rdb, "d2"); s != Assigned {
+		t.Errorf("d2 = %s, want ASSIGNED untouched", s)
+	}
+}

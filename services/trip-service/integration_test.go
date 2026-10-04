@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -167,5 +168,101 @@ func TestARatingQueuesItsEventAndASecondOneDoesNot(t *testing.T) {
 	}
 	if m := w.sent[0]; m.Topic != events.TopicTripRated || string(m.Key) != "d1" {
 		t.Errorf("published topic=%s key=%s, want trip.rated keyed by the driver", m.Topic, m.Key)
+	}
+}
+
+func ended(tripID, orderID, driverID string, status events.TripStatus) events.TripStatusChanged {
+	return events.TripStatusChanged{Envelope: events.Envelope{EventID: uuid.NewString()}, TripID: tripID, OrderID: orderID, DriverID: driverID, Status: status}
+}
+
+func TestAFinishedTripReleasesItsDriver(t *testing.T) {
+	for _, status := range []events.TripStatus{events.TripStatusCompleted, events.TripStatusCancelled} {
+		db, rdb := testEnv(t)
+		ctx := context.Background()
+		handleOrderMatched(ctx, db, rdb, matched("o1", "d1")) // driver ON_TRIP
+		tr, _ := getTripByOrderID(ctx, db, "o1")
+		db.Exec(ctx, `UPDATE trips SET status = $2 WHERE id = $1`, tr.ID, status)
+
+		if err := releaseDriverAfterTrip(ctx, db, rdb, ended(tr.ID, "o1", "d1", status)); err != nil {
+			t.Fatal(err)
+		}
+		if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Available {
+			t.Errorf("%s: driver is %s, want AVAILABLE", status, s)
+		}
+	}
+}
+
+func TestEventsThatAreNotTheEndOfATripReleaseNobody(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+
+	for _, status := range []events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress} {
+		if err := releaseDriverAfterTrip(ctx, db, rdb, ended(tr.ID, "o1", "d1", status)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.OnTrip {
+		t.Errorf("driver is %s, want ON_TRIP", s)
+	}
+}
+
+// A late or replayed "completed" for an old trip must not free a driver who is
+// already driving someone else.
+func TestAnOldTripEndingDoesNotReleaseADriverOnANewTrip(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("old", "d1"))
+	old, _ := getTripByOrderID(ctx, db, "old")
+	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, old.ID)
+	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available) // released by the request path
+	handleOrderMatched(ctx, db, rdb, matched("new", "d1"))   // next ride: ON_TRIP, trip ASSIGNED
+
+	if err := releaseDriverAfterTrip(ctx, db, rdb, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.OnTrip {
+		t.Errorf("driver is %s after an old trip's event, want ON_TRIP (still on the new trip)", s)
+	}
+}
+
+// Matching has claimed the driver for a new order but no trip exists yet, so
+// the database shows nothing active. Only the compare-and-set protects that claim.
+func TestAnOldTripEndingDoesNotUndoANewClaim(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("old", "d1"))
+	old, _ := getTripByOrderID(ctx, db, "old")
+	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, old.ID)
+	driverstatus.SetVehicle(ctx, rdb, "d1", "CAR")
+	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available)
+	if r, _ := driverstatus.ClaimForOrder(ctx, rdb, "new", "d1", "CAR", time.Minute); r != driverstatus.Claimed {
+		t.Fatal("setup claim failed")
+	}
+
+	if err := releaseDriverAfterTrip(ctx, db, rdb, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Assigned {
+		t.Errorf("driver is %s, want ASSIGNED: the release undid Matching's new claim", s)
+	}
+}
+
+func TestReleasingTwiceIsHarmless(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
+	evt := ended(tr.ID, "o1", "d1", events.TripStatusCompleted)
+
+	for i := 0; i < 2; i++ {
+		if err := releaseDriverAfterTrip(ctx, db, rdb, evt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Available {
+		t.Errorf("driver is %s, want AVAILABLE", s)
 	}
 }

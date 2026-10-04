@@ -92,3 +92,52 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 	log.Printf("created trip=%s for order=%s driver=%s", tripID, evt.OrderID, evt.DriverID)
 	return nil
 }
+
+// runDriverReleaseConsumer frees the driver when a trip ends. handleComplete
+// and handleCancel already do it in the request, but that step sits outside
+// the transaction that commits the trip: a crash between the two used to
+// leave the driver ON_TRIP forever. The trip.status.changed event is queued
+// in the same transaction as the status, so it always arrives, and this is
+// the step that cannot be lost.
+func runDriverReleaseConsumer(ctx context.Context, env Env, db *pgxpool.Pool, rdb *redis.Client, codec *eventcodec.Codec) {
+	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
+		Brokers:  env.KafkaBrokers,
+		GroupID:  "trip-driver-release-group",
+		Topic:    events.TopicTripStatusChanged,
+		LogLabel: "[trip-driver-release]",
+	}, func(ctx context.Context, msg kafka.Message) error {
+		var evt events.TripStatusChanged
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		return releaseDriverAfterTrip(ctx, db, rdb, evt)
+	})
+}
+
+// releaseDriverAfterTrip sets the driver of a COMPLETED or CANCELLED trip back
+// to AVAILABLE, unless that would be wrong. Events arrive late and again, so it
+// checks the present rather than trusting the event:
+//   - the driver has another trip in flight in the database: leave them;
+//   - the driver isn't ON_TRIP in Redis (already released, or Matching has
+//     since claimed them for a new order): leave them. The change is a
+//     compare-and-set, so a claim that lands in between is never overwritten.
+func releaseDriverAfterTrip(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client, evt events.TripStatusChanged) error {
+	if evt.Status != events.TripStatusCompleted && evt.Status != events.TripStatusCancelled {
+		return nil
+	}
+
+	if _, err := getActiveTripByDriver(ctx, db, evt.DriverID); err == nil {
+		return nil
+	} else if !errors.Is(err, errTripNotFound) {
+		return err
+	}
+
+	released, err := driverstatus.Transition(ctx, rdb, evt.DriverID, driverstatus.OnTrip, driverstatus.Available)
+	if err != nil {
+		return err
+	}
+	if released {
+		log.Printf("driver=%s released after trip=%s %s", evt.DriverID, evt.TripID, evt.Status)
+	}
+	return nil
+}

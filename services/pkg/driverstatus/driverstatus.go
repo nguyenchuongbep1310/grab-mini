@@ -165,3 +165,25 @@ func ReleaseMatch(ctx context.Context, rdb *redis.Client, orderID, driverID stri
 	}
 	return rdb.Del(ctx, matchKey(orderID)).Err()
 }
+
+// transitionScript moves a driver from one status to another only if they
+// are in the first, and ends any assignment lease.
+var transitionScript = redis.NewScript(`
+	if redis.call("GET", KEYS[1]) == ARGV[1] then
+		redis.call("SET", KEYS[1], ARGV[2])
+		redis.call("DEL", KEYS[2])
+		return 1
+	end
+	return 0
+`)
+
+// Transition moves a driver from one status to another, only if they are in
+// from right now, and reports whether it did. Unlike Set it never overwrites
+// a status someone else changed in the meantime: releasing a driver who is
+// ON_TRIP must not undo the claim of a new order that arrived after.
+func Transition(ctx context.Context, rdb *redis.Client, driverID string, from, to Status) (bool, error) {
+	n, err := transitionScript.Run(ctx, rdb,
+		[]string{key(driverID), leaseKey(driverID)}, string(from), string(to),
+	).Int()
+	return n == 1, err
+}

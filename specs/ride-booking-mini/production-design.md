@@ -251,9 +251,19 @@ Thay đổi hành vi cần biết:
 - **Trip Service tạo trip và ghi `processed_events` trong một transaction.** Trước đây dedupe được ghi trước khi tạo trip, nên nếu việc tạo trip lỗi thì lần retry bị bỏ qua và trip không bao giờ được tạo.
 - Một request tạo đơn trả `201` ngay khi transaction commit, kể cả khi Kafka đang lỗi. Event được gửi sau khi Kafka trở lại.
 
-### Còn lại của giai đoạn 1 và giới hạn đã biết
+### Giải phóng tài xế khi xong chuyến (đã làm)
 
-- **Giải phóng tài xế khi hoàn thành/hủy chuyến vẫn nằm ngoài transaction.** Process chết giữa lúc commit trạng thái trip và lệnh Redis `SET AVAILABLE` thì tài xế kẹt `ON_TRIP` (không còn lease để tự cứu). Hướng xử lý: Trip Service tự consume `trip.status.changed` để giải phóng, có kiểm tra tài xế không còn trip đang chạy.
+Trước đây việc đặt tài xế về `AVAILABLE` nằm trong request, ngoài transaction: process chết giữa lúc commit trạng thái trip và lệnh Redis thì tài xế kẹt `ON_TRIP`, và lease không cứu được. Giờ Trip Service còn consume `trip.status.changed` (group `trip-driver-release-group`) và giải phóng tài xế khi trip `COMPLETED` hoặc `CANCELLED`. Event được xếp hàng cùng transaction với trạng thái nên không thể mất. Đường trong request vẫn giữ làm đường nhanh.
+
+Consumer kiểm tra hiện tại chứ không tin event, vì event có thể đến muộn hoặc bị phát lại:
+
+- tài xế còn trip đang chạy trong DB thì giữ nguyên;
+- việc giải phóng là compare-and-set `ON_TRIP` → `AVAILABLE` (`driverstatus.Transition`), nên nếu Matching vừa claim tài xế cho đơn mới (DB chưa có trip) thì claim đó không bị ghi đè.
+
+Code: `trip-service/consumer.go` (`releaseDriverAfterTrip`), `pkg/driverstatus` (`Transition`).
+
+### Giới hạn đã biết của giai đoạn 1
+
 - **Relay là at-least-once**: publish xong mà chết trước khi xóa dòng thì event đi hai lần. Consumer đã dedupe theo `eventId` hoặc idempotent theo trạng thái.
 - Bảng `outbox` dùng chung một Postgres cho cả hai service ở bản local; khi tách database theo service (mục 5) mỗi service có bảng riêng.
 - Matching vẫn publish trực tiếp (không có DB để dùng outbox). Khoảng hở giữa claim và publish được đóng bằng bản ghi match và lease, không phải bằng outbox.
