@@ -5,6 +5,7 @@
   "fields": [
     {"name": "eventId", "type": "string"},
     {"name": "occurredAt", "type": "string"},
-    {"name": "orderId", "type": "string"}
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string", "default": ""}
   ]
 }

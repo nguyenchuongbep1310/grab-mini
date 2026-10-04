@@ -32,7 +32,7 @@ func runSeedDrivers(env Env) {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
-	if err := rdb.Del(ctx, driverlocation.GeoKey).Err(); err != nil {
+	if err := driverlocation.Clear(ctx, rdb); err != nil {
 		log.Fatalf("failed to clear driver geo set: %v", err)
 	}
 	for _, d := range seedDrivers {

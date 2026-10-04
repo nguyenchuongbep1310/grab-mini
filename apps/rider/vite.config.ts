@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       "/order-api": { target: "http://localhost:3001", rewrite: (p) => p.replace(/^\/order-api/, "") },
       "/trip-api": { target: "http://localhost:3002", rewrite: (p) => p.replace(/^\/trip-api/, "") },
+      "/auth-api": { target: "http://localhost:3005", rewrite: (p) => p.replace(/^\/auth-api/, "") },
       "/ws": { target: "ws://localhost:3003", ws: true },
     },
   },

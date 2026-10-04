@@ -1,23 +1,26 @@
-// Command driver-app-sim stands in for the real Driver App (built in a
-// later phase): it publishes driver.location.updated every 3-5 seconds
-// for a set of drivers, each doing a small random walk from a starting
-// point (US-3.1).
+// Command driver-app-sim stands in for the real Driver App: every 3-5
+// seconds it reports a position for each of a set of drivers, each doing a
+// small random walk from a starting point (US-3.1). Like the real app it goes
+// through the Location Gateway with a token for that driver, and has no
+// access to Kafka.
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/segmentio/kafka-go"
-
-	"grab-mini/pkg/eventcodec"
-	"grab-mini/pkg/events"
+	"grab-mini/pkg/logging"
 )
 
 type simDriver struct {
@@ -65,27 +68,98 @@ func randomWalk(d *simDriver) {
 	d.Lng += (rand.Float64()*2 - 1) * stepDegrees
 }
 
-func simulateDriver(ctx context.Context, wg *sync.WaitGroup, producer *kafka.Writer, codec *eventcodec.Codec, d simDriver) {
+// client reports positions the way the real Driver App will: over HTTP to the
+// Location Gateway, with a token for that driver. It never touches Kafka.
+type client struct {
+	http       *http.Client
+	authURL    string
+	gatewayURL string
+
+	mu     sync.Mutex
+	tokens map[string]token
+}
+
+type token struct {
+	value   string
+	expires time.Time
+}
+
+func (c *client) tokenFor(ctx context.Context, driverID string, force bool) (string, error) {
+	c.mu.Lock()
+	t, ok := c.tokens[driverID]
+	c.mu.Unlock()
+	if ok && !force && time.Until(t.expires) > time.Minute {
+		return t.value, nil
+	}
+
+	body, _ := json.Marshal(map[string]string{"role": "driver", "id": driverID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.authURL+"/token", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("auth-service answered %d", res.StatusCode)
+	}
+	var out struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expiresAt"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.tokens[driverID] = token{out.Token, out.ExpiresAt}
+	c.mu.Unlock()
+	return out.Token, nil
+}
+
+// report sends one position, getting a new token once if the gateway says the old one is no good.
+func (c *client) report(ctx context.Context, d simDriver) error {
+	body, _ := json.Marshal(map[string]any{"lat": d.Lat, "lng": d.Lng, "timestamp": time.Now().UTC().Format(time.RFC3339)})
+	for attempt := 0; ; attempt++ {
+		tok, err := c.tokenFor(ctx, d.ID, attempt > 0)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.gatewayURL+"/locations", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		res.Body.Close()
+		switch {
+		case res.StatusCode == http.StatusUnauthorized && attempt == 0:
+			continue
+		case res.StatusCode >= 300:
+			return fmt.Errorf("gateway answered %d", res.StatusCode)
+		}
+		return nil
+	}
+}
+
+func simulateDriver(ctx context.Context, wg *sync.WaitGroup, c *client, d simDriver) {
 	defer wg.Done()
 
 	for {
 		randomWalk(&d)
 
-		event := events.DriverLocationUpdated{
-			Envelope:  events.Envelope{EventID: uuid.NewString(), OccurredAt: time.Now().UTC().Format(time.RFC3339)},
-			DriverID:  d.ID,
-			Lat:       d.Lat,
-			Lng:       d.Lng,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		}
-		payload, err := codec.Encode(ctx, events.TopicDriverLocationUpdate, event)
-		if err == nil {
-			err = producer.WriteMessages(ctx, kafka.Message{Key: []byte(d.ID), Value: payload})
-		}
-		if err != nil {
-			log.Printf("driver=%s failed to publish location: %v", d.ID, err)
+		if err := c.report(ctx, d); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("driver=%s failed to report location: %v", d.ID, err)
 		} else {
-			log.Printf("driver=%s lat=%.5f lng=%.5f published", d.ID, d.Lat, d.Lng)
+			log.Printf("driver=%s lat=%.5f lng=%.5f reported", d.ID, d.Lat, d.Lng)
 		}
 
 		// US-3.1: every 3-5 seconds.
@@ -99,26 +173,23 @@ func simulateDriver(ctx context.Context, wg *sync.WaitGroup, producer *kafka.Wri
 }
 
 func main() {
-	brokers := []string{getEnv("KAFKA_BROKERS", "localhost:9092")}
+	logging.Setup("driver-app-sim")
 	drivers := loadDrivers()
-
-	producer := &kafka.Writer{
-		Addr:                   kafka.TCP(brokers...),
-		Topic:                  events.TopicDriverLocationUpdate,
-		Balancer:               &kafka.Hash{},
-		AllowAutoTopicCreation: true,
+	c := &client{
+		http:       &http.Client{Timeout: 10 * time.Second},
+		authURL:    getEnv("AUTH_URL", "http://localhost:3005"),
+		gatewayURL: getEnv("GATEWAY_URL", "http://localhost:3006"),
+		tokens:     map[string]token{},
 	}
-	defer producer.Close()
 
-	log.Printf("driver-app-sim publishing for %d driver(s): %v", len(drivers), driverIDs(drivers))
-
-	codec := eventcodec.New(getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"))
+	log.Printf("driver-app-sim reporting for %d driver(s) via %s: %v", len(drivers), c.gatewayURL, driverIDs(drivers))
 
 	var wg sync.WaitGroup
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	for _, d := range drivers {
 		wg.Add(1)
-		go simulateDriver(ctx, &wg, producer, codec, d)
+		go simulateDriver(ctx, &wg, c, d)
 	}
 	wg.Wait()
 }

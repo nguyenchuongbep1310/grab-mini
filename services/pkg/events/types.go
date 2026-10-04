@@ -63,11 +63,16 @@ type OrderMatched struct {
 	DriverID string `json:"driverId" avro:"driverId"`
 	// Added in schema v2 (default CAR), so older messages still decode.
 	VehicleType VehicleType `json:"vehicleType" avro:"vehicleType"`
+	// Who to tell: lets Notification Service route the event without
+	// remembering which rider made the order. Empty on older messages.
+	RiderID string `json:"riderId" avro:"riderId"`
 }
 
 type OrderNoDriverFound struct {
 	Envelope
 	OrderID string `json:"orderId" avro:"orderId"`
+	// Empty on older messages (see OrderMatched.RiderID).
+	RiderID string `json:"riderId" avro:"riderId"`
 }
 
 // DriverLocationUpdated carries the driver's device timestamp, used to
@@ -86,6 +91,8 @@ type TripStatusChanged struct {
 	OrderID  string     `json:"orderId" avro:"orderId"`
 	DriverID string     `json:"driverId" avro:"driverId"`
 	Status   TripStatus `json:"status" avro:"status"`
+	// Empty on older messages (see OrderMatched.RiderID).
+	RiderID string `json:"riderId" avro:"riderId"`
 }
 
 // TripRated is published once, when a rider rates a completed trip.

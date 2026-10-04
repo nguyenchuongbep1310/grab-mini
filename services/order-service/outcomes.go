@@ -27,10 +27,11 @@ func (e *badOutcome) Permanent() bool { return true }
 // from "matched" or "nobody available".
 func runOutcomeConsumer(ctx context.Context, env Env, db *pgxpool.Pool, codec *eventcodec.Codec) {
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "order-service-group",
-		Topics:   []string{events.TopicOrderMatched, events.TopicOrderNoDriverFound},
-		LogLabel: "[order-service]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "order-service-group",
+		Topics:     []string{events.TopicOrderMatched, events.TopicOrderNoDriverFound},
+		LogLabel:   "[order-service]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		switch msg.Topic {
 		case events.TopicOrderMatched:

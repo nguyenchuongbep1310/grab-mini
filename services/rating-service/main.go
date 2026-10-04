@@ -5,23 +5,41 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/pkg/auth"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/health"
 	"grab-mini/pkg/kafkaconsumer"
+	"grab-mini/pkg/logging"
+	"grab-mini/pkg/metrics"
+	"grab-mini/pkg/serve"
+	"grab-mini/pkg/tracing"
 )
+
+var ratingsRecorded = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "ratings_recorded_total",
+	Help: "trip.rated events handled, by outcome: counted, or duplicate (already counted).",
+}, []string{"result"})
 
 func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
-		Brokers:  env.KafkaBrokers,
-		GroupID:  "rating-service-group",
-		Topic:    events.TopicTripRated,
-		LogLabel: "[rating-service]",
+		Brokers:    env.KafkaBrokers,
+		GroupID:    "rating-service-group",
+		Topic:      events.TopicTripRated,
+		LogLabel:   "[rating-service]",
+		RetryTiers: kafkaconsumer.DefaultRetryTiers,
 	}, func(ctx context.Context, msg kafka.Message) error {
 		var evt events.TripRated
 		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
@@ -36,8 +54,10 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 			return err
 		}
 		if counted {
+			ratingsRecorded.WithLabelValues("counted").Inc()
 			log.Printf("driver=%s rated %d stars (trip %s)", evt.DriverID, evt.Stars, evt.TripID)
 		} else {
+			ratingsRecorded.WithLabelValues("duplicate").Inc()
 			log.Printf("duplicate trip.rated event %s, skipping", evt.EventID)
 		}
 		return nil
@@ -45,8 +65,15 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 }
 
 func main() {
+	logging.Setup("rating-service")
 	env := loadEnv()
-	ctx := context.Background()
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		runMigrate(env)
+		return
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer tracing.Setup(ctx, "rating-service")()
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {
@@ -54,14 +81,20 @@ func main() {
 	}
 	defer db.Close()
 
-	go runConsumer(ctx, env, db)
+	var consumer sync.WaitGroup
+	consumer.Go(func() { runConsumer(ctx, env, db) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /drivers/{id}/rating", func(w http.ResponseWriter, r *http.Request) {
+	// A driver's average is shown to riders and to the driver, so any signed-in caller may read it.
+	verifier, err := auth.VerifierFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	mux.Handle("GET /drivers/{id}/rating", verifier.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rating, err := getRating(r.Context(), db, r.PathValue("id"))
 		if err != nil {
 			log.Printf("failed to load rating: %v", err)
@@ -70,10 +103,14 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rating)
-	})
+	}), auth.Rider, auth.Driver))
+
+	health.Mount(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("rating-service listening on :%s", env.Port)
-	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("rating-service", metrics.HTTP(mux))); err != nil {
 		log.Fatal(err)
 	}
+	consumer.Wait() // stops before the pool closes
+	log.Printf("rating-service stopped")
 }

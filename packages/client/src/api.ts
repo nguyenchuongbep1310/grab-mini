@@ -1,4 +1,5 @@
 import type { TripStatus, VehicleType } from "@grab-mini/events";
+import { forgetToken, getToken, isSignedIn } from "./auth";
 
 export type { VehicleType };
 
@@ -27,6 +28,8 @@ export interface Trip {
   id: string;
   orderId: string;
   driverId: string;
+  /** Empty for trips from before the rider was recorded on them. */
+  riderId?: string;
   status: TripStatus;
   /** Stars the rider gave, once they have. */
   rating?: number;
@@ -48,8 +51,19 @@ export class ApiError extends Error {
   }
 }
 
+async function send(url: string, init: RequestInit | undefined, token: string | null): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return fetch(url, { ...init, headers });
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  let res = await send(url, init, isSignedIn() ? await getToken() : null);
+  if (res.status === 401 && isSignedIn()) {
+    // The token may have expired (or the server's clock disagrees): get a new one and try once more.
+    forgetToken();
+    res = await send(url, init, await getToken());
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status);
   return body as T;

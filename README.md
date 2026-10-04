@@ -125,8 +125,30 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | Driver Location Service | | `driver.location.updated` | | Redis GEO |
 | Rating Service | 3004 | `trip.rated` | | Postgres (per-driver totals) |
 | ksqlDB | 8088 | every topic above | analytics tables (`analytics` section) | Kafka (changelog topics) |
-| Notification Service | 3003 | all of the above | | in-memory WebSocket connections |
-| `driver-app-sim` | | | `driver.location.updated` | |
+| Notification Service | 3003 | all of the above | | WebSocket connections (per instance), Redis (routing state and Pub/Sub between instances) |
+| Auth Service | 3005 | | | none (development token issuer) |
+| Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
+| `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
+
+Order Service and Trip Service never publish straight from a request: the event is saved in an `outbox` table in the same Postgres transaction as the order, trip status or rating, and a relay ([services/pkg/outbox](services/pkg/outbox)) publishes it to Kafka afterwards, so a crash can't leave a state change nobody was told about. Matching Service records which driver it gave each order (`match:<orderId>` in Redis), so a redelivered `order.created` can't claim a second driver, and a claimed driver is only *leased* (`ASSIGNED` for `ASSIGN_LEASE_SECONDS`, default 120) until Trip Service confirms the trip and sets them `ON_TRIP`. Trip Service also frees the driver from the `trip.status.changed` event (a safety net for a crash between saving the trip and the Redis update). Every service stops cleanly on SIGTERM / Ctrl-C.
+
+A message a consumer can't handle right now (a database that is down) is not retried in place: it moves to `<topic>.retry.1`, then `.2`, `.3` (waiting 5s, 1m, 10m), so the partition keeps flowing; after the last tier, or at once for a message that can never succeed, it lands on `<topic>.DLQ`. Notification Service can run as several instances: events are consumed by any of them, and each message is published to a Redis channel for its recipient so the instance holding that socket delivers it.
+
+### Security
+
+Every API call and every WebSocket carries a JWT, and the services trust the token, not the request: a rider's id comes from their token (a body naming someone else is a 403), a rider sees only their own orders and trips, only a trip's driver can pick up or complete it, and only its rider can rate it. In development [Auth Service](services/auth-service) signs a token for whoever asks (`curl -X POST localhost:3005/token -d '{"role":"rider","id":"rider-1"}'`), which is why it refuses to start with `APP_ENV=production`; the apps sign in through `@grab-mini/client`. A WebSocket sends its token as a subprotocol (not in the URL) and is only accepted from an origin in `ALLOWED_ORIGINS`.
+
+Drivers' phones never talk to Kafka. [Location Gateway](services/location-gateway) authenticates the driver, validates the position, limits each driver to one report a second, skips a parked driver's reports, and publishes in batches.
+
+Credentials come from `NAME_FILE` (a mounted secret) or `NAME`, and with `APP_ENV=production` a missing one is an error rather than a development default: `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. For Kafka, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD_FILE` and `KAFKA_CA_FILE` (see [pkg/kafkaconn](services/pkg/kafkaconn)); production refuses a plaintext connection. Each service has its own principal and `scripts/kafka-acls.sh` grants it only what it does (the table in that script is the source of truth). To try a Kafka with TLS, SASL/SCRAM and ACLs without Docker:
+
+```bash
+KAFKA_HOME=/path/to/kafka_2.13-3.8.0 deploy/kafka-secure/start-local.sh   # prints the environment to give a service
+```
+
+`docker compose` still starts an unauthenticated PLAINTEXT Kafka for development.
+
+Each service owns its schema as versioned SQL in `services/<service>/migrations` (goose, a version table per service). They are applied at startup; `<service> migrate` applies them and exits, and `RUN_MIGRATIONS=false` skips them at startup. Every service with an HTTP API serves `/livez` (alive) and `/readyz` (its Postgres, Redis and Kafka answer; 503 once shutdown begins); Matching and Driver Location have no API, so set `HEALTH_PORT` to get the same two probes.
 
 Every consumer runs through [services/pkg/kafkaconsumer](services/pkg/kafkaconsumer): retry, then dead-letter topic, and uniform logging of topic/partition/offset. Every producer and consumer encodes and decodes through [services/pkg/eventcodec](services/pkg/eventcodec) (Avro plus the Schema Registry wire format); the schemas live in [services/pkg/events/schemas](services/pkg/events/schemas). Duplicate events are harmless (dedupe by `eventId`, idempotent state transitions).
 
@@ -194,6 +216,22 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 Explore the design system on its own with `pnpm dev:ui` (http://localhost:5170). `pnpm --filter @grab-mini/ui build` produces the library build (ES module, `style.css`, type declarations); inside the workspace the apps import it from source.
 
 In dev, the apps reach the Go services through Vite's proxy, since the services send no CORS headers.
+
+## Operating it
+
+Every service logs JSON in production (with `trace_id` on lines inside a span) and serves Prometheus metrics; a request keeps one trace across HTTP, the outbox, Kafka and the retry topics. `deploy/` has a Dockerfile, a Kustomize base (Kubernetes, Strimzi Kafka across three zones, KEDA scaling on consumer lag, alerts) and `deploy/verify.sh` to check it without a cluster; [docs/runbook.md](docs/runbook.md) says what to do when an alert fires, [docs/disaster-recovery.md](docs/disaster-recovery.md) covers backups and failing over, and `deploy/loadtest` measures throughput without Docker ([results and what they mean](docs/performance.md)). `dlq-redrive` sends dead letters back to their topic once the cause is fixed:
+
+```bash
+KAFKA_BROKERS=localhost:9092 go run ./services/dlq-redrive -topic order.created -dry-run
+```
+
+## Tests
+
+```bash
+for f in services/*/go.mod services/pkg/*/go.mod; do (cd "$(dirname "$f")" && go test ./...); done
+```
+
+Most tests need nothing. A few run against a real Postgres or Redis and skip themselves unless you point them at a throwaway instance (they delete rows and `FLUSH` Redis): `TEST_DATABASE_URL=postgres://grabmini:grabmini@localhost:5432/grabmini_test` and `TEST_REDIS_ADDR=localhost:6379` (use a separate Redis, not the one the running app uses). Tests of the Kafka consumer, the outbox relay and the Location Gateway's producer also want a broker: `TEST_KAFKA_BROKERS=localhost:9092` (they create topics with random names). The security tests in `services/pkg/kafkaconsumer` run against a broker made by `deploy/kafka-secure/start-local.sh`: set `TEST_SECURE_KAFKA_BROKER` (`localhost:9094`), `TEST_SECURE_KAFKA_CA` (`<dir>/ca.pem`), `TEST_SECURE_KAFKA_SECRETS` (`<dir>/secrets`) and `TEST_SECURE_KAFKA_ADMIN` (the contents of `<dir>/admin.password`).
 
 ## Troubleshooting
 

@@ -21,10 +21,14 @@ export interface OrderMatched extends EventEnvelope {
   orderId: string;
   driverId: string;
   vehicleType: VehicleType;
+  /** The rider who made the order. Empty on messages from before this field existed. */
+  riderId: string;
 }
 
 export interface OrderNoDriverFound extends EventEnvelope {
   orderId: string;
+  /** Empty on messages from before this field existed. */
+  riderId: string;
 }
 
 export interface DriverLocationUpdated extends EventEnvelope {
@@ -40,6 +44,8 @@ export interface TripStatusChanged extends EventEnvelope {
   orderId: string;
   driverId: string;
   status: TripStatus;
+  /** Empty on messages from before this field existed. */
+  riderId: string;
 }
 
 export interface TripRated extends EventEnvelope {

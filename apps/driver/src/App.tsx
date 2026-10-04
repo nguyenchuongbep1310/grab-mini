@@ -16,6 +16,7 @@ import {
   getActiveTrip,
   getDriverRating,
   getOrder,
+  signIn,
   tripAction,
   useNotificationSocket,
   waitForTripByOrder,
@@ -48,6 +49,8 @@ const BADGE_LABEL: Partial<Record<Phase, string>> = {
 };
 
 const driverId = new URLSearchParams(location.search).get("driver") ?? "driver-1";
+// Every request and the WebSocket carry a token for this identity (see @grab-mini/client).
+signIn("driver", driverId);
 
 export function App() {
   const toast = useToast();

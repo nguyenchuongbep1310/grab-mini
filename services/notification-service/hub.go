@@ -1,25 +1,48 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"log"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/redis/go-redis/v9"
+)
+
+var (
+	socketsOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "notification_sockets_open",
+		Help: "WebSockets currently open on this instance, by kind (rider or driver).",
+	}, []string{"kind"})
+
+	// delivered counts messages this instance wrote to a socket it holds;
+	// published counts messages it sent to Redis for some instance to deliver.
+	// Their difference across the fleet is what never found a listener (a rider
+	// with no open socket), which is normal and not an error.
+	pushes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "notification_pushes_total",
+		Help: "Notification messages, by stage (published to Redis, delivered to a socket) and outcome.",
+	}, []string{"stage", "result"})
 )
 
 // conn wraps a websocket connection with a write mutex: gorilla/websocket
 // forbids concurrent writes from multiple goroutines to the same
-// connection, and the hub can be pushing from the Kafka consumer
+// connection, and the hub can be delivering from its Redis subscription
 // goroutine while the connection's own reader is running.
 type conn struct {
 	ws *websocket.Conn
 	mu sync.Mutex
 }
 
-func (c *conn) writeJSON(v any) error {
+func (c *conn) writeText(b []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.ws.WriteJSON(v)
+	return c.ws.WriteMessage(websocket.TextMessage, b)
 }
 
 type message struct {
@@ -27,121 +50,188 @@ type message struct {
 	Payload any    `json:"payload"`
 }
 
-// hub is the Notification Service's in-memory state (design.md: "stateless,
-// in-memory socket map"): open connections plus the routing info needed
-// to turn a Kafka event into "which socket(s) does this go to".
-type hub struct {
-	mu sync.RWMutex
+// How the service scales out. Kafka splits the topics' partitions between
+// instances, so the instance that consumes an event is usually not the one
+// holding the rider's or driver's socket. So an instance never writes to a
+// socket on its own say-so from a Kafka event: it publishes the message to a
+// Redis channel named for the recipient, and the instance that holds that
+// recipient's socket (it subscribed when the socket connected) writes it.
+// Delivery is best-effort, like the socket itself: a message published while
+// nobody is subscribed is dropped, and the apps recover by asking the REST
+// APIs after a reconnect.
 
+const (
+	kindRider  = "rider"
+	kindDriver = "driver"
+
+	// Routing state outlives any trip; it only has to outlive the gap
+	// between two related events.
+	routeTTL = 6 * time.Hour
+)
+
+func channelFor(kind, id string) string { return "notify:" + kind + ":" + id }
+
+// hub holds this instance's open sockets and its Redis state.
+type hub struct {
+	rdb *redis.Client
+	sub *redis.PubSub
+
+	mu          sync.RWMutex
 	riderConns  map[string]*conn
 	driverConns map[string]*conn
-
-	// orderRider learns the rider for an order from order.created, so
-	// order.matched / order.no_driver_found (which don't carry riderId)
-	// can still be routed to the right rider (US-5.1).
-	orderRider map[string]string
-
-	// driverRider tracks which rider a driver's *current* trip belongs
-	// to, so driver.location.updated (keyed only by driverId) can be
-	// routed to the rider watching that trip (task 4.3).
-	driverRider map[string]string
 }
 
-func newHub() *hub {
+func newHub(ctx context.Context, rdb *redis.Client) *hub {
 	return &hub{
+		rdb: rdb,
+		// A channel to hold the subscription open before any socket exists.
+		sub:         rdb.Subscribe(ctx, "notify:hub"),
 		riderConns:  make(map[string]*conn),
 		driverConns: make(map[string]*conn),
-		orderRider:  make(map[string]string),
-		driverRider: make(map[string]string),
 	}
 }
 
-func (h *hub) registerRider(riderID string, ws *websocket.Conn) *conn {
-	c := &conn{ws: ws}
-	h.mu.Lock()
-	h.riderConns[riderID] = c
-	h.mu.Unlock()
-	return c
-}
-
-func (h *hub) registerDriver(driverID string, ws *websocket.Conn) *conn {
-	c := &conn{ws: ws}
-	h.mu.Lock()
-	h.driverConns[driverID] = c
-	h.mu.Unlock()
-	return c
-}
-
-func (h *hub) unregisterRider(riderID string, c *conn) {
-	h.mu.Lock()
-	if h.riderConns[riderID] == c {
-		delete(h.riderConns, riderID)
+// run delivers what arrives on the subscribed channels to the local sockets,
+// until ctx is cancelled.
+func (h *hub) run(ctx context.Context) {
+	defer h.sub.Close()
+	ch := h.sub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m, ok := <-ch:
+			if !ok {
+				return
+			}
+			h.deliver(m.Channel, []byte(m.Payload))
+		}
 	}
-	h.mu.Unlock()
 }
 
-func (h *hub) unregisterDriver(driverID string, c *conn) {
-	h.mu.Lock()
-	if h.driverConns[driverID] == c {
-		delete(h.driverConns, driverID)
-	}
-	h.mu.Unlock()
-}
-
-func (h *hub) rememberOrderRider(orderID, riderID string) {
-	h.mu.Lock()
-	h.orderRider[orderID] = riderID
-	h.mu.Unlock()
-}
-
-func (h *hub) riderForOrder(orderID string) (string, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	riderID, ok := h.orderRider[orderID]
-	return riderID, ok
-}
-
-func (h *hub) rememberDriverRider(driverID, riderID string) {
-	h.mu.Lock()
-	h.driverRider[driverID] = riderID
-	h.mu.Unlock()
-}
-
-func (h *hub) riderForDriver(driverID string) (string, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	riderID, ok := h.driverRider[driverID]
-	return riderID, ok
-}
-
-func (h *hub) forgetDriverRider(driverID string) {
-	h.mu.Lock()
-	delete(h.driverRider, driverID)
-	h.mu.Unlock()
-}
-
-// pushToRider sends msg to riderID's connection, if any is currently open.
-func (h *hub) pushToRider(riderID string, msg message) {
-	h.mu.RLock()
-	c, ok := h.riderConns[riderID]
-	h.mu.RUnlock()
+func (h *hub) deliver(channel string, payload []byte) {
+	rest, ok := strings.CutPrefix(channel, "notify:")
 	if !ok {
 		return
 	}
-	if err := c.writeJSON(msg); err != nil {
-		log.Printf("failed to push %s to rider=%s: %v", msg.Type, riderID, err)
-	}
-}
-
-// pushToDriver sends msg to driverID's connection, if any is currently open.
-func (h *hub) pushToDriver(driverID string, msg message) {
-	h.mu.RLock()
-	c, ok := h.driverConns[driverID]
-	h.mu.RUnlock()
+	kind, id, ok := strings.Cut(rest, ":")
 	if !ok {
 		return
 	}
-	if err := c.writeJSON(msg); err != nil {
-		log.Printf("failed to push %s to driver=%s: %v", msg.Type, driverID, err)
+
+	h.mu.RLock()
+	var c *conn
+	switch kind {
+	case kindRider:
+		c = h.riderConns[id]
+	case kindDriver:
+		c = h.driverConns[id]
 	}
+	h.mu.RUnlock()
+	if c == nil {
+		return
+	}
+	if err := c.writeText(payload); err != nil {
+		pushes.WithLabelValues("delivered", "error").Inc()
+		log.Printf("failed to push to %s=%s: %v", kind, id, err)
+		return
+	}
+	pushes.WithLabelValues("delivered", "ok").Inc()
+}
+
+func (h *hub) register(ctx context.Context, kind, id string, ws *websocket.Conn) *conn {
+	c := &conn{ws: ws}
+	h.mu.Lock()
+	if _, replaced := h.connsFor(kind)[id]; !replaced {
+		socketsOpen.WithLabelValues(kind).Inc()
+	}
+	h.connsFor(kind)[id] = c
+	h.mu.Unlock()
+	if err := h.sub.Subscribe(ctx, channelFor(kind, id)); err != nil {
+		log.Printf("failed to subscribe to %s=%s: %v", kind, id, err)
+	}
+	return c
+}
+
+// unregister forgets c, unless the same id has already reconnected with a
+// newer connection (then that one keeps the subscription).
+func (h *hub) unregister(ctx context.Context, kind, id string, c *conn) {
+	h.mu.Lock()
+	current := h.connsFor(kind)[id] == c
+	if current {
+		delete(h.connsFor(kind), id)
+		socketsOpen.WithLabelValues(kind).Dec()
+	}
+	h.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := h.sub.Unsubscribe(ctx, channelFor(kind, id)); err != nil {
+		log.Printf("failed to unsubscribe from %s=%s: %v", kind, id, err)
+	}
+}
+
+func (h *hub) connsFor(kind string) map[string]*conn {
+	if kind == kindRider {
+		return h.riderConns
+	}
+	return h.driverConns
+}
+
+// push sends msg to whichever instance holds the recipient's socket.
+func (h *hub) push(ctx context.Context, kind, id string, msg message) error {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	err = h.rdb.Publish(ctx, channelFor(kind, id), payload).Err()
+	if err != nil {
+		pushes.WithLabelValues("published", "error").Inc()
+		return err
+	}
+	pushes.WithLabelValues("published", "ok").Inc()
+	return nil
+}
+
+func (h *hub) pushToRider(ctx context.Context, riderID string, msg message) error {
+	return h.push(ctx, kindRider, riderID, msg)
+}
+
+func (h *hub) pushToDriver(ctx context.Context, driverID string, msg message) error {
+	return h.push(ctx, kindDriver, driverID, msg)
+}
+
+// Routing state, in Redis so any instance can answer. Most events carry the
+// rider id themselves; this covers events written before they did, and
+// driver.location.updated, which only knows the driver.
+
+func orderRiderKey(orderID string) string   { return "notify:order-rider:" + orderID }
+func driverRiderKey(driverID string) string { return "notify:driver-rider:" + driverID }
+
+func (h *hub) rememberOrderRider(ctx context.Context, orderID, riderID string) error {
+	return h.rdb.Set(ctx, orderRiderKey(orderID), riderID, routeTTL).Err()
+}
+
+func (h *hub) riderForOrder(ctx context.Context, orderID string) (string, error) {
+	return getOrEmpty(ctx, h.rdb, orderRiderKey(orderID))
+}
+
+func (h *hub) rememberDriverRider(ctx context.Context, driverID, riderID string) error {
+	return h.rdb.Set(ctx, driverRiderKey(driverID), riderID, routeTTL).Err()
+}
+
+func (h *hub) riderForDriver(ctx context.Context, driverID string) (string, error) {
+	return getOrEmpty(ctx, h.rdb, driverRiderKey(driverID))
+}
+
+func (h *hub) forgetDriverRider(ctx context.Context, driverID string) error {
+	return h.rdb.Del(ctx, driverRiderKey(driverID)).Err()
+}
+
+func getOrEmpty(ctx context.Context, rdb *redis.Client, key string) (string, error) {
+	v, err := rdb.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
 }

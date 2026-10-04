@@ -1,5 +1,7 @@
 package events
 
+import "fmt"
+
 const (
 	TopicOrderCreated         = "order.created"
 	TopicOrderMatched         = "order.matched"
@@ -11,4 +13,10 @@ const (
 
 func DeadLetterTopic(topic string) string {
 	return topic + ".DLQ"
+}
+
+// RetryTopic is where a message waits for its tier'th retry (tier 1 is the
+// first retry topic), e.g. "order.created.retry.1".
+func RetryTopic(topic string, tier int) string {
+	return fmt.Sprintf("%s.retry.%d", topic, tier)
 }

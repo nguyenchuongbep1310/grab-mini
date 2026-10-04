@@ -8,6 +8,7 @@
     {"name": "tripId", "type": "string"},
     {"name": "orderId", "type": "string"},
     {"name": "driverId", "type": "string"},
-    {"name": "status", "type": "string"}
+    {"name": "status", "type": "string"},
+    {"name": "riderId", "type": "string", "default": ""}
   ]
 }

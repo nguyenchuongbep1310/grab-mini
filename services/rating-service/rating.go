@@ -2,38 +2,55 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"log"
 	"math"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/migrate"
 )
 
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+const serviceName = "rating-service"
+
+// openPool connects without touching the schema.
+func openPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	return pgxpool.New(ctx, databaseURL)
+}
+
+// connectDB connects and brings the schema up to date, unless
+// RUN_MIGRATIONS=false (then a deploy step runs `rating-service migrate`).
 func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := openPool(ctx, databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	_, err = pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS driver_ratings (
-			driver_id TEXT PRIMARY KEY,
-			rating_count INT NOT NULL,
-			rating_sum INT NOT NULL
-		);
-
-		-- Dedupe: a redelivered trip.rated must not be counted twice.
-		CREATE TABLE IF NOT EXISTS rating_events (
-			event_id UUID PRIMARY KEY,
-			processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-	`)
-	if err != nil {
+	if err := migrate.AtStartup(ctx, pool, serviceName, migrationFiles); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return pool, nil
+}
+
+// runMigrate is the `rating-service migrate` command: apply pending migrations and exit.
+func runMigrate(env Env) {
+	ctx := context.Background()
+	pool, err := openPool(ctx, env.DatabaseURL)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer pool.Close()
+	n, err := migrate.Up(ctx, pool, serviceName, migrationFiles)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%s: %d migration(s) applied", serviceName, n)
 }
 
 // invalidEvent is a trip.rated that can never be counted (a star count

@@ -1,19 +1,48 @@
 // Package kafkaconsumer is the retry + dead-letter-topic consumer loop
 // shared by every service in this project, so each one doesn't hand-roll
 // its own fetch/retry/commit logic (US-6.2, task 5.1/5.3).
+//
+// A message that fails is handled in one of three ways:
+//
+//   - the error is permanent (see eventcodec.DecodeError): straight to
+//     <topic>.DLQ, retrying can't help;
+//   - the error is transient and the config has RetryTiers: the message moves
+//     to <topic>.retry.1 and the partition carries on. A reader of that topic
+//     waits until the message is due (the tier's delay), tries again, and on
+//     failure moves it to the next tier, and after the last tier to the DLQ;
+//   - the error is transient and there are no RetryTiers: retried in place a
+//     few times, which holds up the partition while it waits.
+//
+// Moving a message to a retry topic is what keeps a slow dependency (a
+// database that is down for a minute) from stalling every message behind it.
+// The price is ordering: a retried message is handled after the ones that
+// were behind it, so a handler used with RetryTiers must cope with events
+// out of order (trip-service and order-service do: state changes are guarded
+// by the current status, and every event carries an eventId).
 package kafkaconsumer
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
+	"log/slog"
+	"os"
+	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel/codes"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconn"
+	"grab-mini/pkg/tracing"
 )
 
 // permanent is implemented by errors that retrying can't fix (see
@@ -26,9 +55,14 @@ func isPermanent(err error) bool {
 }
 
 // Handler processes one Kafka message. Returning an error triggers a
-// retry, and eventually (after MaxRetries) publishing to the topic's
-// dead-letter topic.
+// retry, and eventually publishing to the topic's dead-letter topic.
+// msg.Topic is always the topic the message was first published to, even
+// when it arrives from a retry topic, so a handler can decode by topic.
 type Handler func(ctx context.Context, msg kafka.Message) error
+
+// DefaultRetryTiers waits 5 seconds, then 1 minute, then 10 minutes before
+// giving up on a message.
+var DefaultRetryTiers = []time.Duration{5 * time.Second, time.Minute, 10 * time.Minute}
 
 type Config struct {
 	Brokers []string
@@ -40,102 +74,536 @@ type Config struct {
 	Topic  string
 	Topics []string
 
-	// MaxRetries is how many times a failed message is retried before
-	// giving up on it (default 3). RetryDelay is the pause between
-	// attempts (default 2s).
+	// CommitInterval, when above zero, commits offsets in the background at
+	// this interval instead of one blocking round trip to the broker per
+	// message. Delivery stays at-least-once: after a crash up to this much is
+	// handled again (a clean shutdown flushes the pending commits), which an
+	// idempotent handler doesn't mind. It is what lets one consumer keep up with
+	// a high-volume topic: load tests showed per-message commits capping a
+	// single consumer at about 2,300 messages a second. Leave it unset for
+	// topics where redoing the last few messages would matter.
+	CommitInterval time.Duration
+
+	// Workers is how many partitions a consumer handles at the same time
+	// (default 1, or KAFKA_CONSUMER_WORKERS). One worker handles one message at
+	// a time, so a consumer's throughput is one over what a message costs, plus
+	// a commit: load testing put Matching at about 50 orders a second per
+	// instance. Several workers split the partitions between them, keeping each
+	// partition (and so each key) in order, and are the cheap way to use more
+	// cores; more instances are the other way. No more is useful than the
+	// partitions the instance is assigned.
+	Workers int
+
+	// RetryTiers turns on retry topics: the delay before each successive
+	// retry (see the package comment). Leave it empty to retry in place.
+	RetryTiers []time.Duration
+
+	// MaxRetries is how many times a failed message is retried in place
+	// before the next step (default 3 without RetryTiers, 1 with them: a
+	// quick second try rides out a blip without a trip through a retry
+	// topic). RetryDelay is the pause between those attempts (default 2s).
 	MaxRetries int
 	RetryDelay time.Duration
+
+	// Security overrides the connection security read from the environment
+	// (see package kafkaconn); nil means use that. For tests.
+	Security *kafkaconn.Security
+
+	// KAFKA_TOPIC_PARTITIONS and KAFKA_REPLICATION_FACTOR set these for every
+	// consumer in a deployment (production sets the replication factor to 3).
+	// Retry and dead-letter topics are created on startup if missing (with the
+	// Create permission the ACLs grant on "<topic>."), with
+	// these settings (defaults 3 partitions, replication factor 1: right for
+	// the local single-broker cluster; on a real cluster create them ahead
+	// of time and these are left alone).
+	Partitions        int
+	ReplicationFactor int
 
 	// LogLabel prefixes log lines, e.g. "[matching-A]"; defaults to GroupID.
 	LogLabel string
 }
 
-// Run fetches messages for cfg forever, retrying each one that fails
-// and, once retries are exhausted, publishing it — with the failure
-// reason attached — to <topic>.DLQ instead of the service crashing or
-// getting stuck on it (US-6.2). Every message logs its
+var (
+	// result is "ok", "retried" (moved to a retry topic) or "dead_lettered".
+	// A message is counted once per time it leaves a consumer: one that goes
+	// through two retry topics and then succeeds is retried, retried, ok.
+	messagesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kafka_consumer_messages_total",
+		Help: "Messages a consumer finished with, by group, original topic and outcome.",
+	}, []string{"group", "topic", "result"})
+
+	handleDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kafka_consumer_handle_duration_seconds",
+		Help:    "Time a handler took on one attempt, by group and original topic.",
+		Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
+	}, []string{"group", "topic"})
+)
+
+const (
+	headerOriginalTopic = "x-original-topic"
+	headerAttempt       = "x-retry-attempt"    // retry topics used so far
+	headerNotBefore     = "x-retry-not-before" // unix milliseconds
+	headerLastError     = "x-last-error"
+)
+
+// messageWriter is the part of *kafka.Writer the failure path needs.
+type messageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
+}
+
+type consumer struct {
+	cfg        Config
+	label      string
+	maxRetries int
+	retryDelay time.Duration
+	topics     []string
+	workers    int
+	out        messageWriter // retry and dead-letter topics
+	security   *kafkaconn.Security
+}
+
+// Run fetches messages for cfg until ctx is cancelled, retrying each one
+// that fails and, once retries are exhausted, publishing it — with the
+// failure reason attached — to <topic>.DLQ instead of the service crashing
+// or getting stuck on it (US-6.2). Every message logs its
 // topic/partition/offset (task 5.3), and every message is committed
 // exactly once handling is done (success or given up), so one poison
 // message never blocks the rest of the partition.
+//
+// Cancelling ctx is a graceful shutdown: a message already handled is still
+// committed, one interrupted mid-retry is left uncommitted so it is
+// redelivered, and Run returns after closing its readers and writer. A fetch
+// error that isn't a shutdown is retried with a growing pause instead of
+// ending the process.
 func Run(ctx context.Context, cfg Config, handle Handler) {
-	label := cfg.LogLabel
-	if label == "" {
-		label = cfg.GroupID
+	c := &consumer{cfg: cfg, label: cfg.LogLabel, maxRetries: cfg.MaxRetries, retryDelay: cfg.RetryDelay}
+	if c.label == "" {
+		c.label = cfg.GroupID
 	}
-
-	maxRetries := cfg.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = 3
+	if c.maxRetries <= 0 {
+		c.maxRetries = 3
+		if len(cfg.RetryTiers) > 0 {
+			c.maxRetries = 1
+		}
 	}
-	retryDelay := cfg.RetryDelay
-	if retryDelay <= 0 {
-		retryDelay = 2 * time.Second
+	if c.retryDelay <= 0 {
+		c.retryDelay = 2 * time.Second
 	}
-
-	readerCfg := kafka.ReaderConfig{Brokers: cfg.Brokers, GroupID: cfg.GroupID}
+	c.workers = firstPositive(cfg.Workers, envInt("KAFKA_CONSUMER_WORKERS"), 1)
+	c.topics = cfg.Topics
 	if cfg.Topic != "" {
-		readerCfg.Topic = cfg.Topic
-	} else {
-		readerCfg.GroupTopics = cfg.Topics
+		c.topics = []string{cfg.Topic}
 	}
-	reader := kafka.NewReader(readerCfg)
-	defer reader.Close()
 
-	dlqWriter := &kafka.Writer{
+	c.security = cfg.Security
+	if c.security == nil {
+		c.security = kafkaconn.Default()
+	}
+
+	c.out = &kafka.Writer{
 		Addr:                   kafka.TCP(cfg.Brokers...),
 		Balancer:               &kafka.Hash{},
+		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
+		Transport:              c.security.Transport(),
+		// Not the one-second default: a failing message would wait that long
+		// at every step of its way through the retry topics.
+		BatchTimeout: kafkaconn.DefaultBatchTimeout,
 	}
-	defer dlqWriter.Close()
+	defer c.out.Close()
 
+	if err := c.ensureTopics(ctx); err != nil {
+		log.Printf("%s could not create its retry and dead-letter topics (they must exist, or the broker must auto-create them): %v", c.label, err)
+	}
+
+	// Time every attempt, wherever it runs.
+	timed := func(ctx context.Context, msg kafka.Message) error {
+		start := time.Now()
+		err := handle(ctx, msg)
+		handleDuration.WithLabelValues(cfg.GroupID, msg.Topic).Observe(time.Since(start).Seconds())
+		return err
+	}
+
+	var tiers sync.WaitGroup
+	for i := range cfg.RetryTiers {
+		tiers.Go(func() { c.runRetryTier(ctx, i+1, timed) })
+	}
+	c.runSource(ctx, timed)
+	tiers.Wait()
+}
+
+func (c *consumer) newReader(groupID string, topics []string) *kafka.Reader {
+	rc := kafka.ReaderConfig{
+		Brokers: c.cfg.Brokers,
+		GroupID: groupID,
+		// MaxWait is how long a fetch waits for data when a topic is idle,
+		// and Close waits for the fetch in flight: at the default of 10s a
+		// service took up to 10s to stop. Half a second costs two empty
+		// fetches a second per partition.
+		MaxWait: 500 * time.Millisecond,
+		Dialer:  c.security.Dialer(),
+
+		CommitInterval: c.cfg.CommitInterval,
+	}
+	if len(topics) == 1 {
+		rc.Topic = topics[0]
+	} else {
+		rc.GroupTopics = topics
+	}
+	return kafka.NewReader(rc)
+}
+
+// runSource consumes the topics the service subscribes to.
+func (c *consumer) runSource(ctx context.Context, handle Handler) {
+	reader := c.newReader(c.cfg.GroupID, c.topics)
+	defer reader.Close()
+	log.Printf("%s consumer running", c.label)
+
+	c.loop(ctx, reader, func(ctx context.Context, msg kafka.Message) (kafka.Message, bool) {
+		// The span covers everything done for this message here, and is a
+		// child of whatever published it (its traceparent header).
+		ctx, span := tracing.StartConsume(ctx, c.cfg.GroupID, msg)
+		defer span.End()
+
+		slog.InfoContext(ctx, "received", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key))
+		err := handleWithRetry(ctx, handle, msg, c.maxRetries, c.retryDelay, c.label)
+		if err != nil && ctx.Err() != nil {
+			return msg, false
+		}
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			if !c.failSafely(ctx, msg, err, 0) {
+				return msg, false
+			}
+		} else {
+			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
+		}
+		return msg, true
+	})
+}
+
+// runRetryTier consumes the tier'th retry topic of every subscribed topic.
+func (c *consumer) runRetryTier(ctx context.Context, tier int, handle Handler) {
+	var retryTopics []string
+	for _, t := range c.topics {
+		retryTopics = append(retryTopics, events.RetryTopic(t, tier))
+	}
+	reader := c.newReader(fmt.Sprintf("%s.retry.%d", c.cfg.GroupID, tier), retryTopics)
+	defer reader.Close()
+	label := fmt.Sprintf("%s retry-%d", c.label, tier)
 	log.Printf("%s consumer running", label)
 
+	c.loop(ctx, reader, func(ctx context.Context, msg kafka.Message) (kafka.Message, bool) {
+		// Hand the handler the message as it was first published.
+		msg.Topic = headerValue(msg, headerOriginalTopic, msg.Topic)
+		ctx, span := tracing.StartConsume(ctx, c.cfg.GroupID, msg)
+		defer span.End()
+
+		if due := time.UnixMilli(headerInt(msg, headerNotBefore, 0)); time.Until(due) > 0 {
+			if !sleep(ctx, time.Until(due)) {
+				return msg, false
+			}
+		}
+		slog.InfoContext(ctx, "retrying", "consumer", label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key), "retryPartition", msg.Partition, "retryOffset", msg.Offset)
+
+		// One attempt: the wait above was the back-off.
+		err := handle(ctx, msg)
+		if err != nil && ctx.Err() != nil {
+			return msg, false
+		}
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			if !c.failSafely(ctx, msg, err, tier) {
+				return msg, false
+			}
+		} else {
+			messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "ok").Inc()
+		}
+		return msg, true
+	})
+}
+
+// loop fetches from reader and calls process for each message. process
+// reports false when it was interrupted by shutdown, meaning the message
+// must stay uncommitted; otherwise the message is committed.
+//
+// With Workers above 1, messages are handed to worker goroutines by partition
+// (partition % Workers), so partitions are handled in parallel but every
+// message of one partition, and so every message of one key, is handled in
+// the order it was written, by one goroutine at a time.
+func (c *consumer) loop(ctx context.Context, reader *kafka.Reader, process func(context.Context, kafka.Message) (kafka.Message, bool)) {
+	var queues []chan kafka.Message
+	var workers sync.WaitGroup
+	if c.workers > 1 {
+		for range c.workers {
+			q := make(chan kafka.Message, 32) // a full queue stops the fetching: backpressure
+			queues = append(queues, q)
+			workers.Go(func() {
+				for msg := range q {
+					if !c.finish(ctx, reader, process, msg) {
+						for range q { // shutting down: what is queued stays uncommitted
+						}
+						return
+					}
+				}
+			})
+		}
+		defer func() {
+			for _, q := range queues {
+				close(q)
+			}
+			workers.Wait()
+		}()
+	}
+
+	fetchBackoff := time.Duration(0)
 	for {
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
-			log.Fatalf("%s failed to fetch message: %v", label, err)
-		}
-
-		log.Printf("%s received topic=%s partition=%d offset=%d key=%s", label, msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
-
-		var handleErr error
-		for attempt := 0; attempt <= maxRetries; attempt++ {
-			if attempt > 0 {
-				time.Sleep(retryDelay)
+			if ctx.Err() != nil || errors.Is(err, io.EOF) {
+				log.Printf("%s consumer stopped", c.label)
+				return
 			}
-			handleErr = handle(ctx, msg)
-			if handleErr == nil {
-				break
+			fetchBackoff = min(max(fetchBackoff*2, time.Second), 30*time.Second)
+			log.Printf("%s failed to fetch message, retrying in %s: %v", c.label, fetchBackoff, err)
+			if !sleep(ctx, fetchBackoff) {
+				return
 			}
-			log.Printf("%s attempt %d/%d failed topic=%s partition=%d offset=%d: %v",
-				label, attempt+1, maxRetries+1, msg.Topic, msg.Partition, msg.Offset, handleErr)
-			if isPermanent(handleErr) {
-				log.Printf("%s not retrying: the error is permanent", label)
-				break
+			continue
+		}
+		fetchBackoff = 0
+
+		if queues == nil {
+			if !c.finish(ctx, reader, process, msg) {
+				return
 			}
+			continue
 		}
-
-		if handleErr != nil {
-			publishToDLQ(ctx, dlqWriter, msg, handleErr, label)
-		}
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
-			log.Printf("%s failed to commit offset: %v", label, err)
+		select {
+		case queues[msg.Partition%len(queues)] <- msg:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-// dlqEnvelope wraps a message that couldn't be processed. Values are Avro
+// finish handles one message and commits it. It reports false if shutdown
+// interrupted the handling, in which case the message is left uncommitted.
+func (c *consumer) finish(ctx context.Context, reader *kafka.Reader, process func(context.Context, kafka.Message) (kafka.Message, bool), msg kafka.Message) bool {
+	handled, ok := process(ctx, msg)
+	if !ok {
+		// Shutting down mid-message: don't dead-letter or commit it,
+		// so the next instance handles it from the start.
+		log.Printf("%s stopped while handling topic=%s partition=%d offset=%d, leaving it uncommitted", c.label, handled.Topic, msg.Partition, msg.Offset)
+		return false
+	}
+
+	// Finishing a message must not depend on ctx, or a shutdown that
+	// lands right after a successful handle would redeliver it.
+	doneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := reader.CommitMessages(doneCtx, msg); err != nil {
+		log.Printf("%s failed to commit offset: %v", c.label, err)
+	}
+	return true
+}
+
+// fail moves a message that failed to its next stop: the next retry topic
+// (attempt is how many it has already been through), or the dead-letter
+// topic when the error is permanent or the tiers are used up. It must run
+// before the message is committed.
+//
+// It returns an error if the message could not be put on either: the caller
+// must then not commit it, or it would be lost.
+func (c *consumer) fail(ctx context.Context, msg kafka.Message, cause error, attempt int) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	if isPermanent(cause) || attempt >= len(c.cfg.RetryTiers) {
+		if err := publishToDLQ(ctx, c.out, msg, cause, attempt, c.label); err != nil {
+			return err
+		}
+		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
+		return nil
+	}
+	next := attempt + 1
+	retry := kafka.Message{
+		Topic: events.RetryTopic(msg.Topic, next),
+		Key:   msg.Key,
+		Value: msg.Value,
+		Headers: append(carriedHeaders(msg), []kafka.Header{
+			{Key: headerOriginalTopic, Value: []byte(msg.Topic)},
+			{Key: headerAttempt, Value: []byte(strconv.Itoa(next))},
+			{Key: headerNotBefore, Value: []byte(strconv.FormatInt(time.Now().Add(c.cfg.RetryTiers[attempt]).UnixMilli(), 10))},
+			{Key: headerLastError, Value: []byte(cause.Error())},
+		}...),
+	}
+	if err := c.out.WriteMessages(ctx, retry); err != nil {
+		log.Printf("%s failed to publish to %s, dead-lettering instead: %v", c.label, retry.Topic, err)
+		if err := publishToDLQ(ctx, c.out, msg, cause, attempt, c.label); err != nil {
+			return err
+		}
+		messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "dead_lettered").Inc()
+		return nil
+	}
+	messagesTotal.WithLabelValues(c.cfg.GroupID, msg.Topic, "retried").Inc()
+	slog.WarnContext(ctx, "will retry", "consumer", c.label, "group", c.cfg.GroupID, "topic", msg.Topic, "key", string(msg.Key),
+		"retryTopic", retry.Topic, "after", c.cfg.RetryTiers[attempt].String(), "error", cause.Error())
+	return nil
+}
+
+// failBackoff is the first pause between attempts to put a failed message
+// somewhere safe; it doubles up to a minute. A variable so tests can shorten it.
+var failBackoff = time.Second
+
+// failSafely is fail, repeated until the message is on a retry or dead-letter
+// topic. It reports false only if ctx ended first (shutdown), in which case the
+// message must be left uncommitted so it is delivered again.
+//
+// Committing a message that is on neither would lose it for good, and it can
+// happen: the retry and dead-letter topics can refuse writes (a missing ACL, a
+// broker without enough replicas) while committing offsets still works. So
+// the partition waits instead. The wait is visible, in the log and as growing lag.
+func (c *consumer) failSafely(ctx context.Context, msg kafka.Message, cause error, attempt int) bool {
+	pause := failBackoff
+	for {
+		err := c.fail(ctx, msg, cause, attempt)
+		if err == nil {
+			return true
+		}
+		slog.ErrorContext(ctx, "cannot put a failed message on a retry or dead-letter topic; holding the partition until it can",
+			"consumer", c.label, "topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "retryIn", pause.String(), "error", err.Error())
+		if !sleep(ctx, pause) {
+			return false
+		}
+		pause = min(pause*2, time.Minute)
+	}
+}
+
+// ensureTopics creates the retry topics and the dead-letter topic of every
+// subscribed topic that don't exist yet, so the failure path works on a broker
+// that doesn't auto-create topics (production's shouldn't).
+func (c *consumer) ensureTopics(ctx context.Context) error {
+	partitions := firstPositive(c.cfg.Partitions, envInt("KAFKA_TOPIC_PARTITIONS"), 3)
+	rf := firstPositive(c.cfg.ReplicationFactor, envInt("KAFKA_REPLICATION_FACTOR"), 1)
+	var specs []kafka.TopicConfig
+	for _, t := range c.topics {
+		specs = append(specs, kafka.TopicConfig{Topic: events.DeadLetterTopic(t), NumPartitions: partitions, ReplicationFactor: rf})
+		for tier := 1; tier <= len(c.cfg.RetryTiers); tier++ {
+			specs = append(specs, kafka.TopicConfig{Topic: events.RetryTopic(t, tier), NumPartitions: partitions, ReplicationFactor: rf})
+		}
+	}
+	client := &kafka.Client{Addr: kafka.TCP(c.cfg.Brokers...), Timeout: 10 * time.Second, Transport: c.security.Transport()}
+	resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: specs})
+	if err != nil {
+		return err
+	}
+	for topic, err := range resp.Errors {
+		if err != nil && !errors.Is(err, kafka.TopicAlreadyExists) {
+			return fmt.Errorf("create %s: %w", topic, err)
+		}
+	}
+	return nil
+}
+
+func envInt(name string) int {
+	n, _ := strconv.Atoi(os.Getenv(name))
+	return n
+}
+
+// firstPositive is the first argument above zero.
+func firstPositive(values ...int) int {
+	for _, v := range values {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+// carriedHeaders are the headers a message arrived with that belong to its
+// publisher (the trace context above all), without the ones this package adds
+// for a retry. A retried message keeps its trace, so every attempt shows up
+// under the request that caused it.
+func carriedHeaders(msg kafka.Message) []kafka.Header {
+	var out []kafka.Header
+	for _, h := range msg.Headers {
+		switch h.Key {
+		case headerOriginalTopic, headerAttempt, headerNotBefore, headerLastError:
+		default:
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+func headerValue(msg kafka.Message, key, fallback string) string {
+	for _, h := range msg.Headers {
+		if h.Key == key {
+			return string(h.Value)
+		}
+	}
+	return fallback
+}
+
+func headerInt(msg kafka.Message, key string, fallback int64) int64 {
+	n, err := strconv.ParseInt(headerValue(msg, key, ""), 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// handleWithRetry runs handle until it succeeds, fails permanently, runs out
+// of retries, or ctx is cancelled. It returns the last error (nil on success).
+func handleWithRetry(ctx context.Context, handle Handler, msg kafka.Message, maxRetries int, retryDelay time.Duration, label string) error {
+	var handleErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 && !sleep(ctx, retryDelay) {
+			return ctx.Err()
+		}
+		handleErr = handle(ctx, msg)
+		if handleErr == nil {
+			return nil
+		}
+		log.Printf("%s attempt %d/%d failed topic=%s partition=%d offset=%d: %v",
+			label, attempt+1, maxRetries+1, msg.Topic, msg.Partition, msg.Offset, handleErr)
+		if isPermanent(handleErr) {
+			log.Printf("%s not retrying: the error is permanent", label)
+			return handleErr
+		}
+	}
+	return handleErr
+}
+
+// sleep waits d, and reports false if ctx ended first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// DeadLetter wraps a message that couldn't be processed. Values are Avro
 // (binary), not JSON, so the original bytes travel base64-encoded (that's
 // what encoding/json does for []byte); valueText is a readable copy when
 // the bytes happen to be text, e.g. a hand-published JSON message.
-type dlqEnvelope struct {
+type DeadLetter struct {
 	OriginalTopic     string `json:"originalTopic"`
 	OriginalPartition int    `json:"originalPartition"`
 	OriginalOffset    int64  `json:"originalOffset"`
 	Error             string `json:"error"`
-	ValueBase64       []byte `json:"valueBase64"`
-	ValueText         string `json:"valueText,omitempty"`
+	// Retries is how many retry topics the message went through first.
+	Retries     int    `json:"retries"`
+	ValueBase64 []byte `json:"valueBase64"`
+	ValueText   string `json:"valueText,omitempty"`
 }
 
 func printable(b []byte) bool {
@@ -150,14 +618,20 @@ func printable(b []byte) bool {
 	return true
 }
 
-func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause error, label string) {
+// dlqRetryPause is the one pause before the single immediate retry of a DLQ write.
+var dlqRetryPause = 500 * time.Millisecond
+
+// publishToDLQ puts msg on its dead-letter topic and returns nil, or an error
+// if it could not.
+func publishToDLQ(ctx context.Context, w messageWriter, msg kafka.Message, cause error, retries int, label string) error {
 	dlqTopic := events.DeadLetterTopic(msg.Topic)
 
-	envelope := dlqEnvelope{
+	envelope := DeadLetter{
 		OriginalTopic:     msg.Topic,
 		OriginalPartition: msg.Partition,
 		OriginalOffset:    msg.Offset,
 		Error:             cause.Error(),
+		Retries:           retries,
 		ValueBase64:       msg.Value,
 	}
 	if printable(msg.Value) {
@@ -165,8 +639,7 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 	}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
-		log.Printf("%s failed to marshal DLQ envelope: %v", label, err)
-		return
+		return fmt.Errorf("marshal the dead letter: %w", err)
 	}
 
 	// The first write to a not-yet-existing DLQ topic can itself fail
@@ -176,12 +649,13 @@ func publishToDLQ(ctx context.Context, w *kafka.Writer, msg kafka.Message, cause
 	dlqMsg := kafka.Message{Topic: dlqTopic, Key: msg.Key, Value: payload}
 	err = w.WriteMessages(ctx, dlqMsg)
 	if err != nil {
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(dlqRetryPause)
 		err = w.WriteMessages(ctx, dlqMsg)
 	}
 	if err != nil {
-		log.Printf("%s failed to publish to %s: %v", label, dlqTopic, err)
-		return
+		return fmt.Errorf("publish to %s: %w", dlqTopic, err)
 	}
-	log.Printf("%s giving up on the message, published to %s (partition=%d offset=%d)", label, dlqTopic, msg.Partition, msg.Offset)
+	slog.ErrorContext(ctx, "message dead-lettered", "consumer", label, "dlqTopic", dlqTopic, "topic", msg.Topic,
+		"partition", msg.Partition, "offset", msg.Offset, "key", string(msg.Key), "retries", retries, "error", cause.Error())
+	return nil
 }
