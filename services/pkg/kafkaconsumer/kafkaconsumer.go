@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"time"
 	"unicode/utf8"
@@ -50,13 +51,19 @@ type Config struct {
 	LogLabel string
 }
 
-// Run fetches messages for cfg forever, retrying each one that fails
-// and, once retries are exhausted, publishing it — with the failure
-// reason attached — to <topic>.DLQ instead of the service crashing or
-// getting stuck on it (US-6.2). Every message logs its
+// Run fetches messages for cfg until ctx is cancelled, retrying each one
+// that fails and, once retries are exhausted, publishing it — with the
+// failure reason attached — to <topic>.DLQ instead of the service crashing
+// or getting stuck on it (US-6.2). Every message logs its
 // topic/partition/offset (task 5.3), and every message is committed
 // exactly once handling is done (success or given up), so one poison
 // message never blocks the rest of the partition.
+//
+// Cancelling ctx is a graceful shutdown: a message already handled is still
+// committed, one interrupted mid-retry is left uncommitted so it is
+// redelivered, and Run returns after closing its reader and writer. A fetch
+// error that isn't a shutdown is retried with a growing pause instead of
+// ending the process.
 func Run(ctx context.Context, cfg Config, handle Handler) {
 	label := cfg.LogLabel
 	if label == "" {
@@ -84,44 +91,84 @@ func Run(ctx context.Context, cfg Config, handle Handler) {
 	dlqWriter := &kafka.Writer{
 		Addr:                   kafka.TCP(cfg.Brokers...),
 		Balancer:               &kafka.Hash{},
+		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
 	}
 	defer dlqWriter.Close()
 
 	log.Printf("%s consumer running", label)
 
+	fetchBackoff := time.Duration(0)
 	for {
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
-			log.Fatalf("%s failed to fetch message: %v", label, err)
+			if ctx.Err() != nil || errors.Is(err, io.EOF) {
+				log.Printf("%s consumer stopped", label)
+				return
+			}
+			fetchBackoff = min(max(fetchBackoff*2, time.Second), 30*time.Second)
+			log.Printf("%s failed to fetch message, retrying in %s: %v", label, fetchBackoff, err)
+			if !sleep(ctx, fetchBackoff) {
+				return
+			}
+			continue
 		}
+		fetchBackoff = 0
 
 		log.Printf("%s received topic=%s partition=%d offset=%d key=%s", label, msg.Topic, msg.Partition, msg.Offset, string(msg.Key))
 
-		var handleErr error
-		for attempt := 0; attempt <= maxRetries; attempt++ {
-			if attempt > 0 {
-				time.Sleep(retryDelay)
-			}
-			handleErr = handle(ctx, msg)
-			if handleErr == nil {
-				break
-			}
-			log.Printf("%s attempt %d/%d failed topic=%s partition=%d offset=%d: %v",
-				label, attempt+1, maxRetries+1, msg.Topic, msg.Partition, msg.Offset, handleErr)
-			if isPermanent(handleErr) {
-				log.Printf("%s not retrying: the error is permanent", label)
-				break
-			}
+		handleErr := handleWithRetry(ctx, handle, msg, maxRetries, retryDelay, label)
+		if ctx.Err() != nil && handleErr != nil {
+			// Shutting down mid-message: don't dead-letter or commit it,
+			// so the next instance handles it from the start.
+			log.Printf("%s stopped while handling topic=%s partition=%d offset=%d, leaving it uncommitted", label, msg.Topic, msg.Partition, msg.Offset)
+			return
 		}
 
+		// Finishing a message must not depend on ctx, or a shutdown that
+		// lands right after a successful handle would redeliver it.
+		doneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		if handleErr != nil {
-			publishToDLQ(ctx, dlqWriter, msg, handleErr, label)
+			publishToDLQ(doneCtx, dlqWriter, msg, handleErr, label)
 		}
-
-		if err := reader.CommitMessages(ctx, msg); err != nil {
+		if err := reader.CommitMessages(doneCtx, msg); err != nil {
 			log.Printf("%s failed to commit offset: %v", label, err)
 		}
+		cancel()
+	}
+}
+
+// handleWithRetry runs handle until it succeeds, fails permanently, runs out
+// of retries, or ctx is cancelled. It returns the last error (nil on success).
+func handleWithRetry(ctx context.Context, handle Handler, msg kafka.Message, maxRetries int, retryDelay time.Duration, label string) error {
+	var handleErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 && !sleep(ctx, retryDelay) {
+			return ctx.Err()
+		}
+		handleErr = handle(ctx, msg)
+		if handleErr == nil {
+			return nil
+		}
+		log.Printf("%s attempt %d/%d failed topic=%s partition=%d offset=%d: %v",
+			label, attempt+1, maxRetries+1, msg.Topic, msg.Partition, msg.Offset, handleErr)
+		if isPermanent(handleErr) {
+			log.Printf("%s not retrying: the error is permanent", label)
+			return handleErr
+		}
+	}
+	return handleErr
+}
+
+// sleep waits d, and reports false if ctx ended first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 

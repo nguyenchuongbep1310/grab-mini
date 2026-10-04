@@ -6,6 +6,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -17,13 +21,18 @@ import (
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/outbox"
+	"grab-mini/pkg/serve"
 )
 
+// outboxSource names this service in the shared outbox table.
+const outboxSource = "trip-service"
+
 type server struct {
-	db       *pgxpool.Pool
-	rdb      *redis.Client
-	producer *kafka.Writer
-	codec    *eventcodec.Codec
+	db    *pgxpool.Pool
+	rdb   *redis.Client
+	relay *outbox.Relay
+	codec *eventcodec.Codec
 }
 
 func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events.TripStatus) ([]byte, error) {
@@ -36,12 +45,28 @@ func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events
 	})
 }
 
-func (s *server) publish(ctx context.Context, tripID string, payload []byte) error {
-	return s.producer.WriteMessages(ctx, kafka.Message{
-		Topic: events.TopicTripStatusChanged,
-		Key:   []byte(tripID),
-		Value: payload,
-	})
+// transitionWithEvent moves a trip to targetStatus and queues its event in
+// one transaction, so the state and the announcement can't disagree. It
+// reports false (and queues nothing) if the trip wasn't in one of fromStatuses.
+func (s *server) transitionWithEvent(ctx context.Context, id string, fromStatuses []events.TripStatus, targetStatus events.TripStatus, field timestampField, key, payload []byte) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	transitioned, err := transitionTrip(ctx, tx, id, fromStatuses, targetStatus, field)
+	if err != nil || !transitioned {
+		return false, err
+	}
+	if err := outbox.Add(ctx, tx, outboxSource, events.TopicTripStatusChanged, key, payload); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	s.relay.Wake()
+	return true, nil
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +165,7 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, fromSt
 
 	// Encode before changing any state: if the schema registry is down we
 	// refuse the request rather than move the trip without telling anyone.
+	// The event is queued with the state change (see transitionWithEvent).
 	payload, err := s.encodeStatusChanged(ctx, t, targetStatus)
 	if err != nil {
 		log.Printf("failed to encode trip.status.changed: %v", err)
@@ -147,7 +173,7 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, fromSt
 		return
 	}
 
-	transitioned, err := transitionTrip(ctx, s.db, id, fromStatuses, targetStatus, field)
+	transitioned, err := s.transitionWithEvent(ctx, id, fromStatuses, targetStatus, field, []byte(t.ID), payload)
 	if err != nil {
 		log.Printf("failed to transition trip: %v", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -164,10 +190,6 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, fromSt
 		if err := onTransition(ctx, t); err != nil {
 			log.Printf("post-transition step failed for trip %s: %v", t.ID, err)
 		}
-	}
-
-	if err := s.publish(ctx, t.ID, payload); err != nil {
-		log.Printf("failed to publish trip.status.changed: %v", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -239,7 +261,7 @@ func (s *server) handleRateTrip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	saved, err := saveRating(ctx, s.db, t.ID, req.Stars, req.Comment)
+	saved, err := s.rateWithEvent(ctx, t, req, payload)
 	if err != nil {
 		log.Printf("failed to save rating: %v", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -250,18 +272,38 @@ func (s *server) handleRateTrip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.producer.WriteMessages(ctx, kafka.Message{Topic: events.TopicTripRated, Key: []byte(t.DriverID), Value: payload}); err != nil {
-		log.Printf("failed to publish trip.rated: %v", err)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]any{"tripId": t.ID, "stars": req.Stars})
 }
 
+// rateWithEvent saves the rating and queues trip.rated in one transaction, so
+// a rating that is stored is always announced (Rating Service counts it).
+func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, payload []byte) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	saved, err := saveRating(ctx, tx, t.ID, req.Stars, req.Comment)
+	if err != nil || !saved {
+		return false, err
+	}
+	if err := outbox.Add(ctx, tx, outboxSource, events.TopicTripRated, []byte(t.DriverID), payload); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	s.relay.Wake()
+	return true, nil
+}
+
 func main() {
 	env := loadEnv()
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {
@@ -272,17 +314,22 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
+	// The writer has no Topic: the outbox rows name theirs.
 	producer := &kafka.Writer{
 		Addr:                   kafka.TCP(env.KafkaBrokers...),
 		Balancer:               &kafka.Hash{},
+		RequiredAcks:           kafka.RequireAll,
 		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
 
 	codec := eventcodec.New(env.SchemaRegistryURL)
-	s := &server{db: db, rdb: rdb, producer: producer, codec: codec}
+	relay := outbox.NewRelay(db, producer, outboxSource)
+	s := &server{db: db, rdb: rdb, relay: relay, codec: codec}
 
-	go runOrderMatchedConsumer(ctx, env, db, codec)
+	var background sync.WaitGroup
+	background.Go(func() { relay.Run(ctx) })
+	background.Go(func() { runOrderMatchedConsumer(ctx, env, db, rdb, codec) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -295,7 +342,9 @@ func main() {
 	mux.HandleFunc("POST /trips/{id}/rating", s.handleRateTrip)
 
 	log.Printf("trip-service listening on :%s", env.Port)
-	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
 		log.Fatal(err)
 	}
+	background.Wait() // the consumer stops and the relay drains before the pool closes
+	log.Printf("trip-service stopped")
 }

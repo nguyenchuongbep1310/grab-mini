@@ -5,8 +5,14 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/gorilla/websocket"
+
+	"grab-mini/pkg/serve"
 )
 
 var upgrader = websocket.Upgrader{
@@ -45,10 +51,12 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	env := loadEnv()
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	h := newHub()
-	go runConsumer(ctx, env, h)
+	var consumer sync.WaitGroup
+	consumer.Go(func() { runConsumer(ctx, env, h) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
@@ -70,7 +78,9 @@ func main() {
 	})
 
 	log.Printf("notification-service listening on :%s", env.Port)
-	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
 		log.Fatal(err)
 	}
+	consumer.Wait()
+	log.Printf("notification-service stopped")
 }

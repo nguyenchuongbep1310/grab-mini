@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,9 +21,7 @@ import (
 // in its own consumer group and keep only the latest position per
 // driver, discarding updates older than what's already recorded
 // (US-3.1).
-func runConsumer(env Env) {
-	ctx := context.Background()
-
+func runConsumer(ctx context.Context, env Env) {
 	rdb := redis.NewClient(&redis.Options{Addr: env.RedisAddr})
 	defer rdb.Close()
 
@@ -57,5 +58,7 @@ func runConsumer(env Env) {
 }
 
 func main() {
-	runConsumer(loadEnv())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runConsumer(ctx, loadEnv())
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -15,7 +16,11 @@ import (
 // returns "" if none could be claimed. Trying candidates in distance order
 // and skipping ones another instance claims first keeps this race-free
 // under concurrent matching-service instances.
-func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng, radiusKm float64, vehicle events.VehicleType) (string, error) {
+//
+// The claim is recorded against orderID, so if the order was already matched
+// (a redelivered order.created) the earlier driver is returned and nobody
+// else is claimed. The driver is leased for lease; see driverstatus.ClaimForOrder.
+func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, orderID string, lat, lng, radiusKm float64, vehicle events.VehicleType, lease time.Duration) (string, error) {
 	results, err := rdb.GeoSearchLocation(ctx, driverlocation.GeoKey, &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{
 			Longitude:  lng,
@@ -32,12 +37,15 @@ func findAndClaimNearestDriver(ctx context.Context, rdb *redis.Client, lat, lng,
 	}
 
 	for _, candidate := range results {
-		claimed, err := driverstatus.Claim(ctx, rdb, candidate.Name, string(vehicle), driverstatus.Available, driverstatus.Assigned)
+		result, err := driverstatus.ClaimForOrder(ctx, rdb, orderID, candidate.Name, string(vehicle), lease)
 		if err != nil {
 			return "", err
 		}
-		if claimed {
+		switch result {
+		case driverstatus.Claimed:
 			return candidate.Name, nil
+		case driverstatus.AlreadyMatched:
+			return driverstatus.MatchedDriver(ctx, rdb, orderID)
 		}
 	}
 

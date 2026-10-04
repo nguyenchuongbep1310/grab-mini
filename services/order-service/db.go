@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"grab-mini/pkg/outbox"
 )
 
 func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
@@ -28,6 +30,10 @@ func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		ALTER TABLE orders ADD COLUMN IF NOT EXISTS vehicle_type TEXT NOT NULL DEFAULT 'CAR';
 	`)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := outbox.Migrate(ctx, pool); err != nil {
 		return nil, err
 	}
 

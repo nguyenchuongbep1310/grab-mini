@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
@@ -12,6 +16,7 @@ import (
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconsumer"
+	"grab-mini/pkg/serve"
 )
 
 func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
@@ -46,7 +51,8 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 
 func main() {
 	env := loadEnv()
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {
@@ -54,7 +60,8 @@ func main() {
 	}
 	defer db.Close()
 
-	go runConsumer(ctx, env, db)
+	var consumer sync.WaitGroup
+	consumer.Go(func() { runConsumer(ctx, env, db) })
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +80,9 @@ func main() {
 	})
 
 	log.Printf("rating-service listening on :%s", env.Port)
-	if err := http.ListenAndServe(":"+env.Port, mux); err != nil {
+	if err := serve.Run(ctx, ":"+env.Port, mux); err != nil {
 		log.Fatal(err)
 	}
+	consumer.Wait() // stops before the pool closes
+	log.Printf("rating-service stopped")
 }

@@ -9,8 +9,10 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,9 +105,12 @@ func main() {
 	drivers := loadDrivers()
 
 	producer := &kafka.Writer{
-		Addr:                   kafka.TCP(brokers...),
-		Topic:                  events.TopicDriverLocationUpdate,
-		Balancer:               &kafka.Hash{},
+		Addr:     kafka.TCP(brokers...),
+		Topic:    events.TopicDriverLocationUpdate,
+		Balancer: &kafka.Hash{},
+		// Telemetry: a lost position is replaced by the next one in seconds,
+		// so waiting for every replica (acks=all) would only add latency.
+		RequiredAcks:           kafka.RequireOne,
 		AllowAutoTopicCreation: true,
 	}
 	defer producer.Close()
@@ -115,7 +120,8 @@ func main() {
 	codec := eventcodec.New(getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"))
 
 	var wg sync.WaitGroup
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	for _, d := range drivers {
 		wg.Add(1)
 		go simulateDriver(ctx, &wg, producer, codec, d)

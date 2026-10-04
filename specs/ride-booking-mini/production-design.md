@@ -233,3 +233,36 @@ Thứ tự theo mức độ rủi ro, không theo độ hấp dẫn kỹ thuật
 - **Không** cho client kết nối Kafka trực tiếp (giữ nguyên nguyên tắc ở design.md mục 1).
 - **Không** bật exactly-once toàn cục (xem 3.6).
 - **Không** tăng partition "cho chắc" quá mức: mỗi partition tốn file handle, bộ nhớ broker và thời gian rebalance.
+
+## 11. Trạng thái triển khai
+
+### Giai đoạn 1 (đã làm)
+
+| Mục | Kết quả | Nơi trong code |
+|---|---|---|
+| 3.1 Outbox | Order Service và Trip Service lưu event vào bảng `outbox` cùng transaction với thay đổi trạng thái (đơn, chuyển trạng thái trip, rating). Một relay publish sau khi commit, `Wake()` để gần như không thêm độ trễ. Mỗi service chỉ relay dòng của mình (`source`), một relay mỗi lần (advisory lock) nên thứ tự theo key được giữ. | `services/pkg/outbox`, `order-service/main.go` (`insertOrder`), `trip-service/main.go` (`transitionWithEvent`, `rateWithEvent`) |
+| 3.2 Matching | `match:{orderId}` ghi quyết định match cùng lúc với claim (một Lua script). `order.created` bị giao lại thì dùng lại tài xế cũ. Trạng thái `ASSIGNED` là **lease** (mặc định 120 giây, `ASSIGN_LEASE_SECONDS`) chứ không phải TTL của key: hết hạn thì tài xế claim lại được. | `pkg/driverstatus` (`ClaimForOrder`), `matching-service/main.go` |
+| 3.4 Shutdown | `kafkaconsumer.Run` thoát khi context bị hủy, commit message đã xử lý xong, không commit message đang dở, và không còn `log.Fatalf` khi fetch lỗi (backoff rồi thử lại). Mọi service bắt SIGTERM. | `pkg/kafkaconsumer`, `pkg/serve`, `main.go` của từng service |
+| `acks=all` | Mọi writer của luồng giao dịch (outbox relay của Order/Trip, Matching, DLQ) dùng `RequireAll`. Vị trí tài xế dùng `RequireOne`. | |
+
+Thay đổi hành vi cần biết:
+
+- **`ON_TRIP` bắt đầu từ lúc có trip.** Trước đây tài xế ở `ASSIGNED` suốt chuyến đi. Vì `ASSIGNED` giờ là lease, Trip Service đặt `ON_TRIP` (và kết thúc lease) khi tạo trip từ `order.matched`.
+- **Trip Service tạo trip và ghi `processed_events` trong một transaction.** Trước đây dedupe được ghi trước khi tạo trip, nên nếu việc tạo trip lỗi thì lần retry bị bỏ qua và trip không bao giờ được tạo.
+- Một request tạo đơn trả `201` ngay khi transaction commit, kể cả khi Kafka đang lỗi. Event được gửi sau khi Kafka trở lại.
+
+### Còn lại của giai đoạn 1 và giới hạn đã biết
+
+- **Giải phóng tài xế khi hoàn thành/hủy chuyến vẫn nằm ngoài transaction.** Process chết giữa lúc commit trạng thái trip và lệnh Redis `SET AVAILABLE` thì tài xế kẹt `ON_TRIP` (không còn lease để tự cứu). Hướng xử lý: Trip Service tự consume `trip.status.changed` để giải phóng, có kiểm tra tài xế không còn trip đang chạy.
+- **Relay là at-least-once**: publish xong mà chết trước khi xóa dòng thì event đi hai lần. Consumer đã dedupe theo `eventId` hoặc idempotent theo trạng thái.
+- Bảng `outbox` dùng chung một Postgres cho cả hai service ở bản local; khi tách database theo service (mục 5) mỗi service có bảng riêng.
+- Matching vẫn publish trực tiếp (không có DB để dùng outbox). Khoảng hở giữa claim và publish được đóng bằng bản ghi match và lease, không phải bằng outbox.
+- Chưa kiểm thử trên Kafka thật (xem phần kiểm thử bên dưới).
+
+### Cách đã kiểm thử
+
+Test tự động chạy trên Postgres 16 và Redis 7 thật: relay (rollback, thứ tự, lỗi publish, nhiều relay, tách theo source), lease và claim theo đơn (kể cả 10 claim đồng thời), matching (giao lại, chưa announce, publish lỗi), Trip Service (tạo trip, replay không đảo trạng thái tài xế, transition và rating cùng event), retry/hủy trong consumer. **Chưa có test end-to-end với Kafka và Schema Registry thật** vì môi trường phát triển không có Docker daemon; cần chạy `pnpm dev:all` và thử lại các bài trong README ("Things to try") trước khi merge.
+
+### Giai đoạn 2 trở đi
+
+Chưa làm: retry topic (3.3), Notification scale ngang (3.5), migration DB, health check phụ thuộc, và toàn bộ giai đoạn 3 đến 5.

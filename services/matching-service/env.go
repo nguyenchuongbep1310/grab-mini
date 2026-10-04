@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 type Env struct {
@@ -14,6 +15,9 @@ type Env struct {
 	MatchRetries      int
 	MatchRetryDelay   int // milliseconds
 	InstanceID        string
+	// How long a claimed driver stays ASSIGNED waiting for Trip Service to
+	// confirm the trip, before they can be claimed again.
+	AssignLease time.Duration
 }
 
 func loadEnv() Env {
@@ -25,6 +29,7 @@ func loadEnv() Env {
 		MatchRetries:      getEnvInt("MATCH_RETRIES", 3),
 		MatchRetryDelay:   getEnvInt("MATCH_RETRY_DELAY_MS", 2000),
 		InstanceID:        getEnv("INSTANCE_ID", fmt.Sprintf("matching-%d", os.Getpid())),
+		AssignLease:       time.Duration(getEnvInt("ASSIGN_LEASE_SECONDS", 120)) * time.Second,
 	}
 }
 

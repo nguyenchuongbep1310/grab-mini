@@ -128,6 +128,8 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | Notification Service | 3003 | all of the above | | in-memory WebSocket connections |
 | `driver-app-sim` | | | `driver.location.updated` | |
 
+Order Service and Trip Service never publish straight from a request: the event is saved in an `outbox` table in the same Postgres transaction as the order, trip status or rating, and a relay ([services/pkg/outbox](services/pkg/outbox)) publishes it to Kafka afterwards, so a crash can't leave a state change nobody was told about. Matching Service records which driver it gave each order (`match:<orderId>` in Redis), so a redelivered `order.created` can't claim a second driver, and a claimed driver is only *leased* (`ASSIGNED` for `ASSIGN_LEASE_SECONDS`, default 120) until Trip Service confirms the trip and sets them `ON_TRIP`. Every service stops cleanly on SIGTERM / Ctrl-C.
+
 Every consumer runs through [services/pkg/kafkaconsumer](services/pkg/kafkaconsumer): retry, then dead-letter topic, and uniform logging of topic/partition/offset. Every producer and consumer encodes and decodes through [services/pkg/eventcodec](services/pkg/eventcodec) (Avro plus the Schema Registry wire format); the schemas live in [services/pkg/events/schemas](services/pkg/events/schemas). Duplicate events are harmless (dedupe by `eventId`, idempotent state transitions).
 
 `driver-app-sim` publishes the drivers' locations because a browser can't produce to Kafka directly; the Driver App only displays its position.
@@ -194,6 +196,14 @@ docker exec grab-mini-postgres psql -U grabmini -d grabmini -c "select * from tr
 Explore the design system on its own with `pnpm dev:ui` (http://localhost:5170). `pnpm --filter @grab-mini/ui build` produces the library build (ES module, `style.css`, type declarations); inside the workspace the apps import it from source.
 
 In dev, the apps reach the Go services through Vite's proxy, since the services send no CORS headers.
+
+## Tests
+
+```bash
+for f in services/*/go.mod services/pkg/*/go.mod; do (cd "$(dirname "$f")" && go test ./...); done
+```
+
+Most tests need nothing. A few run against a real Postgres or Redis and skip themselves unless you point them at a throwaway instance (they delete rows and `FLUSH` Redis): `TEST_DATABASE_URL=postgres://grabmini:grabmini@localhost:5432/grabmini_test` and `TEST_REDIS_ADDR=localhost:6379` (use a separate Redis, not the one the running app uses).
 
 ## Troubleshooting
 

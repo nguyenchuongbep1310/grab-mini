@@ -1,9 +1,13 @@
 package kafkaconsumer
 
 import (
+	"context"
+	"time"
+
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/segmentio/kafka-go"
 	"testing"
 )
 
@@ -56,5 +60,61 @@ func TestDLQEnvelopeCarriesBinaryValuesIntact(t *testing.T) {
 	}
 	if string(back.ValueBase64) != string(raw) {
 		t.Errorf("value changed in transit: %v", back.ValueBase64)
+	}
+}
+
+func TestHandleWithRetryStopsRetryingOnceTheErrorIsPermanent(t *testing.T) {
+	calls := 0
+	err := handleWithRetry(context.Background(), func(context.Context, kafka.Message) error {
+		calls++
+		return permErr{}
+	}, kafka.Message{}, 3, time.Millisecond, "t")
+	if calls != 1 || err == nil {
+		t.Errorf("calls = %d, err = %v; want one call and an error", calls, err)
+	}
+}
+
+func TestHandleWithRetryRetriesTransientErrorsThenSucceeds(t *testing.T) {
+	calls := 0
+	err := handleWithRetry(context.Background(), func(context.Context, kafka.Message) error {
+		calls++
+		if calls < 3 {
+			return errors.New("flaky")
+		}
+		return nil
+	}, kafka.Message{}, 3, time.Millisecond, "t")
+	if calls != 3 || err != nil {
+		t.Errorf("calls = %d, err = %v; want 3 calls and success", calls, err)
+	}
+}
+
+func TestHandleWithRetryGivesUpAfterMaxRetries(t *testing.T) {
+	calls := 0
+	err := handleWithRetry(context.Background(), func(context.Context, kafka.Message) error {
+		calls++
+		return errors.New("down")
+	}, kafka.Message{}, 2, time.Millisecond, "t")
+	if calls != 3 || err == nil {
+		t.Errorf("calls = %d, err = %v; want 1 try + 2 retries, then the error", calls, err)
+	}
+}
+
+func TestHandleWithRetryReturnsPromptlyWhenCancelledDuringTheRetryPause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- handleWithRetry(ctx, func(context.Context, kafka.Message) error {
+			cancel() // shutdown arrives while the first attempt is failing
+			return errors.New("down")
+		}, kafka.Message{}, 3, time.Hour, "t")
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("still sleeping through the retry delay after cancel")
 	}
 }

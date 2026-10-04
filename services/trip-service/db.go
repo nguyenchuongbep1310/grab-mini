@@ -5,9 +5,11 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/outbox"
 )
 
 var errTripNotFound = errors.New("trip not found")
@@ -46,12 +48,22 @@ func connectDB(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 
+	if err := outbox.Migrate(ctx, pool); err != nil {
+		return nil, err
+	}
+
 	return pool, nil
+}
+
+// execer is what the write helpers need, so they run on the pool or inside a
+// transaction (see transitionWithEvent).
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // markEventProcessed reports whether this is the first time eventID has
 // been seen, atomically claiming it.
-func markEventProcessed(ctx context.Context, db *pgxpool.Pool, eventID string) (firstTime bool, err error) {
+func markEventProcessed(ctx context.Context, db execer, eventID string) (firstTime bool, err error) {
 	tag, err := db.Exec(ctx, `INSERT INTO processed_events (event_id) VALUES ($1) ON CONFLICT DO NOTHING`, eventID)
 	if err != nil {
 		return false, err
@@ -119,7 +131,7 @@ var transitionSQL = map[timestampField]string{
 // of fromStatuses, and reports whether this call performed the move.
 // This is what makes trip actions idempotent (US-6.1): calling pickup
 // twice, for example, only actually transitions once.
-func transitionTrip(ctx context.Context, db *pgxpool.Pool, id string, fromStatuses []events.TripStatus, newStatus events.TripStatus, field timestampField) (bool, error) {
+func transitionTrip(ctx context.Context, db execer, id string, fromStatuses []events.TripStatus, newStatus events.TripStatus, field timestampField) (bool, error) {
 	tag, err := db.Exec(ctx, transitionSQL[field], newStatus, id, statusesToStrings(fromStatuses))
 	if err != nil {
 		return false, err
@@ -138,7 +150,7 @@ func statusesToStrings(statuses []events.TripStatus) []string {
 // saveRating records a rating on a completed, not-yet-rated trip and reports
 // whether this call did it. The conditions live in the UPDATE, so two
 // concurrent submissions can't both succeed.
-func saveRating(ctx context.Context, db *pgxpool.Pool, tripID string, stars int, comment string) (bool, error) {
+func saveRating(ctx context.Context, db execer, tripID string, stars int, comment string) (bool, error) {
 	tag, err := db.Exec(ctx, `
 		UPDATE trips SET rating = $1, rating_comment = $2, rated_at = now()
 		WHERE id = $3 AND status = 'COMPLETED' AND rating IS NULL`,
