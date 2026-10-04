@@ -510,6 +510,9 @@ def config_map():
                 # These point at things this repository doesn't deploy; set them per environment.
                 "SCHEMA_REGISTRY_URL": "http://schema-registry:8081",
                 "REDIS_ADDR": "redis:6379",
+                # Cell size (degrees) to split the driver GEO set into; 0 = one key. Matching and
+                # Driver Location Service must agree: see docs/performance.md before changing it.
+                "GEO_SHARD_DEGREES": "0",
                 "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector.monitoring:4318",
                 "ALLOWED_ORIGINS": "https://app.example.com",
             }}

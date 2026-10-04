@@ -48,24 +48,15 @@ func searchRings(radiusKm float64) []float64 {
 
 // claimWithin claims the nearest claimable driver within radiusKm, or returns "".
 func claimWithin(ctx context.Context, rdb *redis.Client, orderID string, lat, lng, radiusKm float64, vehicle events.VehicleType, lease time.Duration) (string, error) {
-	results, err := rdb.GeoSearchLocation(ctx, driverlocation.GeoKey, &redis.GeoSearchLocationQuery{
-		GeoSearchQuery: redis.GeoSearchQuery{
-			Longitude:  lng,
-			Latitude:   lat,
-			Radius:     radiusKm,
-			RadiusUnit: "km",
-			Sort:       "ASC",
-			Count:      50, // several types share one GEO set, so look further than 20
-		},
-		WithDist: true,
-	}).Result()
+	// Several vehicle types share the GEO set, so look further than 20.
+	results, err := driverlocation.Search(ctx, rdb, lat, lng, radiusKm, 50)
 	if err != nil {
 		return "", err
 	}
 
 	names := make([]string, len(results))
 	for i, r := range results {
-		names[i] = r.Name
+		names[i] = r.ID
 	}
 	driver, result, err := driverstatus.ClaimFirstForOrder(ctx, rdb, orderID, names, string(vehicle), lease)
 	if err != nil {

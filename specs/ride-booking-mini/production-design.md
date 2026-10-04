@@ -373,13 +373,13 @@ Nguyên tắc của giai đoạn này là **đo trước, tối ưu sau**, nên 
   và tối đa 50 round trip Redis mỗi đơn khi tài xế gần đã bận (`ClaimFirstForOrder`, một script). Kết quả và diễn giải trung thực:
   [docs/performance.md](../../docs/performance.md): 250 đơn/s + 750 vị trí/s sạch trên một máy 4 core; 400 đơn/s thì máy bão hòa.
 - **Redis GEO**: đã đo. Chi phí tìm kiếm tỉ lệ với số ứng viên trong bán kính, không phải tổng tài xế; đã làm tìm theo vòng mở rộng
-  (1 → 3 → bán kính cấu hình). **Chưa shard**: chia key không giảm chi phí mỗi truy vấn, chỉ đáng khi một Redis hết sức; điều kiện và lưu ý
-  trong docs/performance.md.
+  (1 → 3 → bán kính cấu hình). **Shard theo ô có sẵn nhưng tắt** (`GEO_SHARD_DEGREES`, mặc định 0): đã đo, nó không làm mỗi truy vấn
+  rẻ hơn mà chỉ chia tải ra nhiều key, nên chỉ bật khi các key nằm trên nhiều node; chưa dùng được với Redis Cluster (xem docs/performance.md).
 - **Dọn dữ liệu**: CronJob xóa `processed_events` và `rating_events` cũ hơn 30 ngày theo lô (đã thử trên Postgres thật); `outbox` đã tự
   xóa khi publish, `outbox_dead` để người xử lý.
 - **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, quy trình chuyển vùng),
   `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
 
 Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); chưa diễn tập khôi phục/chuyển
-vùng; chưa shard Redis theo ô; Redis chưa có Sentinel/Cluster; bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
+vùng; Redis chưa có Sentinel/Cluster (và shard theo ô chưa hỗ trợ Cluster); bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
 mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).

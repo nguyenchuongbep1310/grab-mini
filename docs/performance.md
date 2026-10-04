@@ -48,7 +48,14 @@ Kết luận:
    dày đặc; nó chỉ chia tải cho nhiều node.
 3. Đòn bẩy rẻ nhất là **tìm theo vòng mở rộng** (1 km → 3 km → bán kính cấu hình), đã làm trong `matching-service/redis.go`: phần lớn đơn có
    tài xế trống rất gần nên chỉ trả chi phí của vòng nhỏ. Kết quả vẫn là tài xế gần nhất còn trống trong bán kính.
-4. **Shard theo ô địa lý** (key `drivers:geo:<ô>`, truy vấn ô chứa điểm đón và các ô kề) chỉ đáng làm khi một Redis không còn chịu nổi: khoảng
-   vài trăm đơn/s cùng lúc trong một khu rất đông, hoặc cần Redis Cluster. **Chưa làm, vì chưa có số đo thật cho thấy cần.** Lưu ý nếu làm:
-   tài xế ở rìa ô phải xuất hiện ở cả ô kề hoặc truy vấn phải quét ô kề; di chuyển qua ranh giới ô phải xóa khỏi ô cũ; script
-   `ClaimFirstForOrder` tự dựng key `driver:<id>:*` nên trên Redis Cluster các key đó phải dùng hash tag.
+4. **Shard theo ô địa lý đã có, mặc định tắt** (`GEO_SHARD_DEGREES`, ví dụ `0.05` ≈ 5,5 km; xem `pkg/driverlocation`). Mỗi ô là một key
+   `drivers:geo:<i>:<j>`; tài xế qua ranh giới thì bị xóa khỏi ô cũ trong cùng script cập nhật; tìm kiếm quét các ô mà hình tròn chạm tới
+   (pipeline) rồi gộp theo khoảng cách. Test xác nhận kết quả **giống hệt** có/không shard, kể cả tài xế sát ranh giới và tài xế vừa qua ô.
+   **Nó không làm mỗi truy vấn rẻ hơn**: đo 1 triệu tài xế chia ô 0,05°, một truy vấn 3 km vào một ô (27.700 tài xế) vẫn ~9 ms (so với ~11 ms
+   ở key đơn), và một truy vấn chạm tới 1–4 ô. Giá trị của nó là **chia tải ra nhiều key**, nên chỉ có ích khi các key đó nằm trên nhiều node
+   (Redis Cluster) hoặc nhiều Redis; trên một Redis duy nhất thì không đáng bật. Ràng buộc:
+   - Matching và Driver Location Service phải cùng giá trị (ConfigMap dùng chung `GEO_SHARD_DEGREES`); đổi giá trị cần dựng lại GEO set
+     (tài xế tự điền lại sau vài giây báo vị trí), vì vị trí đã lưu nằm ở bố cục cũ.
+   - Bán kính phải không quá ~64 ô; vượt thì `Search` trả lỗi thay vì lặng lẽ bỏ sót tài xế (tăng cỡ ô hoặc giảm bán kính).
+   - Trên Redis Cluster, các key ô và script dựng key động cần hash tag; **chưa làm**, nên chưa dùng được với Cluster.
+   - `ClaimFirstForOrder` cũng dựng key `driver:<id>:*` trong script, cùng giới hạn Cluster.
