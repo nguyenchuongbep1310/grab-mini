@@ -87,3 +87,28 @@ export function TipPicker({ comment, onComment, tip, onTip, disabled }: TipPicke
     </div>
   );
 }
+
+export interface RatingSummaryProps {
+  comment: string;
+  /** Whole VND, 0 for no tip. */
+  tip: number;
+}
+
+/** Read-only recap of the tip and note a rider sent with their rating. */
+export function RatingSummary({ comment, tip }: RatingSummaryProps) {
+  const note = comment.trim();
+  return (
+    <dl className="rating-summary">
+      <div>
+        <dt>Tip</dt>
+        <dd>{tip > 0 ? vnd(tip) : "No tip"}</dd>
+      </div>
+      {note && (
+        <div>
+          <dt>Your note</dt>
+          <dd className="rating-summary__note">{note}</dd>
+        </div>
+      )}
+    </dl>
+  );
+}

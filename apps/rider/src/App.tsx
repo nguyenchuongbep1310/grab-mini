@@ -29,7 +29,7 @@ import {
 } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
 import { checkOutcome, findActiveRide } from "./recovery";
-import { TipPicker } from "./TipPicker";
+import { RatingSummary, TipPicker } from "./TipPicker";
 import { useQuote } from "./useQuote";
 import { useRide, type Phase } from "./useRide";
 
@@ -343,6 +343,7 @@ export function App() {
                     disabled={submitting}
                   />
                   {!rated && <TipPicker comment={comment} onComment={setComment} tip={tip} onTip={setTip} disabled={submitting} />}
+                  {rated && <RatingSummary comment={comment} tip={tip} />}
                   {!rated && (
                     <Button block loading={submitting} disabled={stars === 0 || !tripId} onClick={submitRating}>
                       Submit rating

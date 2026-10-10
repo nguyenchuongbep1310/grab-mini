@@ -48,3 +48,8 @@ body {
 .tip-chip[aria-pressed="true"] { background: var(--gm-color-primary, #00b14f); border-color: var(--gm-color-primary, #00b14f); color: #fff; }
 .tip-chip:disabled { opacity: 0.5; cursor: not-allowed; }
 .price-row { display: flex; align-items: center; justify-content: space-between; gap: var(--gm-space-3); }
+.rating-summary { display: flex; flex-direction: column; gap: var(--gm-space-2); width: 100%; margin: 0; text-align: left; }
+.rating-summary > div { display: flex; justify-content: space-between; gap: var(--gm-space-3); }
+.rating-summary dt { font-size: 0.875rem; font-weight: 600; }
+.rating-summary dd { margin: 0; font-size: 0.875rem; opacity: 0.9; }
+.rating-summary__note { text-align: right; overflow-wrap: anywhere; white-space: pre-wrap; }
