@@ -26,7 +26,7 @@ done
 # Create the topics before the services start, as the real deployment does
 # (docker-compose's kafka-init, Strimzi's KafkaTopic): a consumer that starts
 # before its topic exists is not assigned it when it appears later.
-for t in order.created order.matched order.no_driver_found trip.status.changed trip.rated driver.location.updated; do
+for t in order.created order.matched order.no_driver_found order.cancelled trip.status.changed trip.rated driver.location.updated; do
   "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BROKERS" --create --if-not-exists --topic "$t" \
     --partitions "${PARTITIONS:-3}" --replication-factor 1 >/dev/null 2>&1
 done

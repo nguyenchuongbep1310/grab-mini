@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import type { NotificationMessage, TripStatus } from "@grab-mini/events";
+import type { CancelledBy, NotificationMessage, TripStatus } from "@grab-mini/events";
 import type { LatLng, Order } from "@grab-mini/client";
 
 export type Phase = "idle" | "assigned" | "in_progress" | "completed" | "cancelled";
@@ -13,6 +13,9 @@ export interface DriverState {
   pos: LatLng | null;
   /** First position seen for this trip, so the map fits it once, not on every update. */
   anchor: LatLng | null;
+  /** Once "cancelled": who cancelled (the rider or this driver) and the reason given. */
+  cancelledBy: CancelledBy;
+  cancelReason: string;
 }
 
 export const initialDriver: DriverState = {
@@ -22,6 +25,8 @@ export const initialDriver: DriverState = {
   order: null,
   pos: null,
   anchor: null,
+  cancelledBy: "",
+  cancelReason: "",
 };
 
 type Action =
@@ -67,8 +72,19 @@ function reduce(state: DriverState, action: Action): DriverState {
           const patch = { tripId, orderId };
           if (status === "IN_PROGRESS") return { ...state, ...patch, phase: "in_progress" };
           if (status === "COMPLETED") return { ...state, ...patch, phase: "completed" };
-          if (status === "CANCELLED") return { ...state, ...patch, phase: "cancelled" };
+          if (status === "CANCELLED") {
+            const { cancelledBy, reason } = message.payload;
+            return { ...state, ...patch, phase: "cancelled", cancelledBy, cancelReason: reason };
+          }
           return { ...state, ...patch };
+        }
+        case "order.cancelled": {
+          // The rider cancelled an order this driver was matched to; the trip's
+          // own cancelled event follows and fills in the same state.
+          const { orderId, cancelledBy, reason } = message.payload;
+          const working = state.phase === "assigned" || state.phase === "in_progress";
+          if (!working || state.orderId !== orderId) return state;
+          return { ...state, phase: "cancelled", cancelledBy: cancelledBy || "RIDER", cancelReason: reason };
         }
         case "order.no_driver_found":
         case "trip.rated":

@@ -66,6 +66,17 @@ spec:
       offsetResetPolicy: earliest
       sasl: scram_sha512
       tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: order-service-group
+      topic: trip.status.changed
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
   - type: cpu
     metricType: Utilization
     metadata:
@@ -114,6 +125,17 @@ spec:
       bootstrapServers: grab-mini-kafka-bootstrap:9093
       consumerGroup: trip-driver-release-group
       topic: trip.status.changed
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: trip-order-cancelled-group
+      topic: order.cancelled
       lagThreshold: '100'
       offsetResetPolicy: earliest
       sasl: scram_sha512
@@ -228,6 +250,17 @@ spec:
     metadata:
       bootstrapServers: grab-mini-kafka-bootstrap:9093
       consumerGroup: notification-service-group
+      topic: order.cancelled
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: notification-service-group
       topic: trip.status.changed
       lagThreshold: '100'
       offsetResetPolicy: earliest
@@ -322,6 +355,17 @@ spec:
       bootstrapServers: grab-mini-kafka-bootstrap:9093
       consumerGroup: matching-service-group
       topic: order.created
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: matching-service-cancel-group
+      topic: order.cancelled
       lagThreshold: '100'
       offsetResetPolicy: earliest
       sasl: scram_sha512

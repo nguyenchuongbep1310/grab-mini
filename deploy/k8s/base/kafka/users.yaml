@@ -102,6 +102,28 @@ spec:
       - Write
       - Describe
       - Create
+    - resource:
+        type: group
+        name: matching-service-cancel-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: order.cancelled
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.cancelled.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
@@ -163,6 +185,22 @@ spec:
     - resource:
         type: topic
         name: order.no_driver_found.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: order.cancelled
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.cancelled.
         patternType: prefix
       operations:
       - Read
@@ -238,6 +276,13 @@ spec:
       - Write
       - Describe
     - resource:
+        type: topic
+        name: order.cancelled
+        patternType: literal
+      operations:
+      - Write
+      - Describe
+    - resource:
         type: group
         name: order-service-group
         patternType: prefix
@@ -269,6 +314,22 @@ spec:
     - resource:
         type: topic
         name: order.no_driver_found.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: trip.status.changed
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: trip.status.changed.
         patternType: prefix
       operations:
       - Read
@@ -375,6 +436,28 @@ spec:
     - resource:
         type: topic
         name: trip.status.changed.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: group
+        name: trip-order-cancelled-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: order.cancelled
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.cancelled.
         patternType: prefix
       operations:
       - Read

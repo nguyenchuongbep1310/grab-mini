@@ -3,6 +3,7 @@ import {
   Avatar,
   BottomSheet,
   Button,
+  CancelDialog,
   Card,
   MapMarker,
   MapView,
@@ -23,6 +24,7 @@ import {
   type DriverRating,
   type TripAction,
 } from "@grab-mini/client";
+import type { CancelledBy } from "@grab-mini/events";
 import { useDriverTrip, type Phase } from "./useDriverTrip";
 
 // Where the map sits until the first location arrives (central Ho Chi Minh City).
@@ -48,6 +50,16 @@ const BADGE_LABEL: Partial<Record<Phase, string>> = {
   in_progress: "On trip",
 };
 
+const CANCEL_REASONS = ["Rider isn't at the pickup point", "Rider asked me to cancel", "Vehicle problem", "Emergency"];
+
+/** What the driver reads once a trip is cancelled, depending on who cancelled it. */
+function cancelledCopy(by: CancelledBy, reason: string) {
+  const why = reason ? ` Reason: ${reason}.` : "";
+  return by === "DRIVER"
+    ? { title: "You cancelled the trip", sub: `You're free to take the next request.${why}` }
+    : { title: "Rider cancelled the trip", sub: `The rider cancelled this trip. You're free to take the next request.${why}` };
+}
+
 const driverId = new URLSearchParams(location.search).get("driver") ?? "driver-1";
 // Every request and the WebSocket carry a token for this identity (see @grab-mini/client).
 signIn("driver", driverId);
@@ -57,6 +69,7 @@ export function App() {
   const [state, dispatch] = useDriverTrip();
   const [pending, setPending] = useState<TripAction | null>(null);
   const [rating, setRating] = useState<DriverRating | null>(null);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   const refreshRating = useCallback(() => {
     getDriverRating(driverId).then(setRating).catch(() => {});
@@ -91,7 +104,7 @@ export function App() {
   });
 
   // order.matched carries neither the tripId nor the route, so fetch both.
-  const { phase, orderId, tripId, order } = state;
+  const { phase, orderId, tripId, order, cancelledBy, cancelReason } = state;
   useEffect(() => {
     if (phase === "idle" || !orderId) return;
     let stale = false;
@@ -115,19 +128,20 @@ export function App() {
     if (previousPhase.current === phase) return;
     previousPhase.current = phase;
     if (phase === "assigned") toast.show("New trip assigned to you", "success");
-    if (phase === "cancelled") toast.show("The trip was cancelled", "info");
+    if (phase === "cancelled") toast.show(cancelledCopy(cancelledBy, "").title, "info");
     if (phase === "completed") toast.show("Trip completed. Nice work!", "success");
-  }, [phase, toast]);
+  }, [phase, cancelledBy, toast]);
 
-  const act = async (action: TripAction) => {
+  const act = async (action: TripAction, reason?: string) => {
     if (!tripId) return;
     setPending(action);
     try {
-      await tripAction(tripId, action);
+      await tripAction(tripId, action, reason);
     } catch (err) {
       toast.show(err instanceof Error ? err.message : "That didn't work", "error");
     } finally {
       setPending(null);
+      setConfirmingCancel(false);
     }
   };
 
@@ -188,8 +202,8 @@ export function App() {
           {phase !== "idle" && (
             <>
               <div>
-                <h1 className="sheet-title">{TITLES[phase]}</h1>
-                <p className="sheet-sub">{SUBTITLES[phase]}</p>
+                <h1 className="sheet-title">{phase === "cancelled" ? cancelledCopy(cancelledBy, cancelReason).title : TITLES[phase]}</h1>
+                <p className="sheet-sub">{phase === "cancelled" ? cancelledCopy(cancelledBy, cancelReason).sub : SUBTITLES[phase]}</p>
               </div>
 
               <Card padding="sm">
@@ -215,7 +229,7 @@ export function App() {
 
               {phase === "assigned" && (
                 <div className="btn-row">
-                  <Button variant="secondary" loading={pending === "cancel"} disabled={!tripId || !!pending} onClick={() => act("cancel")}>
+                  <Button variant="secondary" loading={pending === "cancel"} disabled={!tripId || !!pending} onClick={() => setConfirmingCancel(true)}>
                     Cancel
                   </Button>
                   <Button loading={pending === "pickup"} disabled={!tripId || !!pending} onClick={() => act("pickup")}>
@@ -225,7 +239,7 @@ export function App() {
               )}
               {phase === "in_progress" && (
                 <div className="btn-row">
-                  <Button variant="secondary" loading={pending === "cancel"} disabled={!tripId || !!pending} onClick={() => act("cancel")}>
+                  <Button variant="secondary" loading={pending === "cancel"} disabled={!tripId || !!pending} onClick={() => setConfirmingCancel(true)}>
                     Cancel
                   </Button>
                   <Button loading={pending === "complete"} disabled={!tripId || !!pending} onClick={() => act("complete")}>
@@ -242,6 +256,18 @@ export function App() {
           )}
         </div>
       </BottomSheet>
+
+      <CancelDialog
+        open={confirmingCancel && working}
+        title="Cancel this trip?"
+        description="The rider will be told, and you'll be free for the next request."
+        reasons={CANCEL_REASONS}
+        confirmLabel="Cancel trip"
+        dismissLabel="Keep trip"
+        loading={pending === "cancel"}
+        onConfirm={(reason) => act("cancel", reason)}
+        onDismiss={() => setConfirmingCancel(false)}
+      />
     </div>
   );
 }

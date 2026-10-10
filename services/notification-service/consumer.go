@@ -35,6 +35,7 @@ func runConsumer(ctx context.Context, env Env, h *hub) {
 			events.TopicOrderCreated,
 			events.TopicOrderMatched,
 			events.TopicOrderNoDriverFound,
+			events.TopicOrderCancelled,
 			events.TopicTripStatusChanged,
 			events.TopicDriverLocationUpdate,
 			events.TopicTripRated,
@@ -76,6 +77,9 @@ func handleMessage(ctx context.Context, codec decoder, h *hub, msg kafka.Message
 		if err != nil {
 			return err
 		}
+		if err := h.rememberOrderDriver(ctx, evt.OrderID, evt.DriverID); err != nil {
+			return err
+		}
 		if riderID != "" {
 			if err := h.rememberDriverRider(ctx, evt.DriverID, riderID); err != nil {
 				return err
@@ -96,6 +100,28 @@ func handleMessage(ctx context.Context, codec decoder, h *hub, msg kafka.Message
 			return err
 		}
 		return h.pushToRider(ctx, riderID, message{Type: events.TopicOrderNoDriverFound, Payload: evt})
+
+	case events.TopicOrderCancelled:
+		var evt events.OrderCancelled
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		riderID, err := riderOf(ctx, h, evt.RiderID, evt.OrderID)
+		if err != nil {
+			return err
+		}
+		if riderID != "" {
+			if err := h.pushToRider(ctx, riderID, message{Type: events.TopicOrderCancelled, Payload: evt}); err != nil {
+				return err
+			}
+		}
+		// A driver already matched to the order learns of it too (their trip
+		// is cancelled next, but this reaches them without waiting for it).
+		driverID, err := h.driverForOrder(ctx, evt.OrderID)
+		if err != nil || driverID == "" {
+			return err
+		}
+		return h.pushToDriver(ctx, driverID, message{Type: events.TopicOrderCancelled, Payload: evt})
 
 	case events.TopicTripStatusChanged:
 		var evt events.TripStatusChanged

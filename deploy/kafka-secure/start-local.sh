@@ -106,7 +106,7 @@ for _ in $(seq 1 60); do
   echo -n "."; sleep 1
 done
 
-for topic in order.created order.matched order.no_driver_found trip.status.changed trip.rated driver.location.updated; do
+for topic in order.created order.matched order.no_driver_found order.cancelled trip.status.changed trip.rated driver.location.updated; do
   "$KAFKA_HOME/bin/kafka-topics.sh" --bootstrap-server "localhost:$PORT" --command-config admin.properties \
     --create --if-not-exists --topic "$topic" --partitions 3 --replication-factor 1 >/dev/null 2>&1
 done

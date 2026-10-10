@@ -47,6 +47,21 @@ spec:
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
 metadata:
+  name: order-cancelled
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  topicName: order.cancelled
+  partitions: 6
+  replicas: 3
+  config:
+    retention.ms: 604800000
+    min.insync.replicas: 2
+    compression.type: producer
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
   name: trip-status-changed
   labels:
     strimzi.io/cluster: grab-mini

@@ -54,6 +54,14 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 		return err
 	}
 
+	// The rider cancelled the order before we heard of the match: no trip, and
+	// the driver Matching claimed goes back to the pool.
+	if cancelled, err := orderIsCancelled(ctx, db, evt.OrderID); err != nil {
+		return err
+	} else if cancelled {
+		return releaseCancelledMatch(ctx, rdb, evt, driverstatus.Assigned)
+	}
+
 	if err := driverstatus.Set(ctx, rdb, evt.DriverID, driverstatus.OnTrip); err != nil {
 		return err
 	}
@@ -63,6 +71,18 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	// Same lock as handleOrderCancelled: check again now that a cancellation
+	// can no longer slip in between this check and the trip being saved.
+	if err := lockOrder(ctx, tx, evt.OrderID); err != nil {
+		return err
+	}
+	if cancelled, err := orderIsCancelled(ctx, tx, evt.OrderID); err != nil {
+		return err
+	} else if cancelled {
+		tx.Rollback(ctx)
+		return releaseCancelledMatch(ctx, rdb, evt, driverstatus.OnTrip)
+	}
 
 	firstTime, err := markEventProcessed(ctx, tx, evt.EventID)
 	if err != nil {
@@ -91,6 +111,18 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 		return nil
 	}
 	log.Printf("created trip=%s for order=%s driver=%s", tripID, evt.OrderID, evt.DriverID)
+	return nil
+}
+
+// releaseCancelledMatch hands back a driver whose order was cancelled before
+// the trip existed. The change is a compare-and-set from the status we left
+// them in, so a driver who has since moved on is never touched.
+func releaseCancelledMatch(ctx context.Context, rdb *redis.Client, evt events.OrderMatched, from driverstatus.Status) error {
+	released, err := driverstatus.Transition(ctx, rdb, evt.DriverID, from, driverstatus.Available)
+	if err != nil {
+		return err
+	}
+	log.Printf("order=%s was cancelled before its trip existed: no trip created, driver=%s released=%v", evt.OrderID, evt.DriverID, released)
 	return nil
 }
 

@@ -38,6 +38,12 @@ Non-goals: production-grade scaling, real payments, enterprise-level security.
 - **US-4.3**: As a rider or driver, I want to cancel a trip before it completes.
   - WHEN either party cancels a trip in a valid state (not yet `COMPLETED`), THE Trip Service SHALL move the trip to `CANCELLED` and publish `trip.status.changed`.
   - IF the trip is already `COMPLETED`, THE Trip Service SHALL reject the cancellation.
+  - THE Trip Service SHALL record who cancelled (`RIDER` or `DRIVER`, taken from the caller's role) and an optional reason, and include both in `trip.status.changed`.
+- **US-4.4**: As a rider, I want to cancel an order while still searching for a driver.
+  - WHEN the owning rider cancels a `PENDING` order, THE Order Service SHALL move it to `CANCELLED` and publish `order.cancelled` in the same transaction; a repeated cancel SHALL succeed without a second event.
+  - IF the order is already `MATCHED`, THE Order Service SHALL answer `409` telling the client to cancel the trip instead; any other caller gets `404`.
+  - WHEN a trip is cancelled, THE Order Service SHALL move its `MATCHED` order to `CANCELLED`.
+  - WHEN `order.cancelled` is published, THE Matching Service SHALL not claim a driver for that order (and SHALL release one it just claimed), THE Trip Service SHALL cancel any trip already created for it (and SHALL not create one from a late `order.matched`), and THE Notification Service SHALL tell the rider (and the matched driver, if any).
 
 ### 5. Realtime notifications
 - **US-5.1**: As a rider, I want to see order status and driver location update in realtime without refreshing.

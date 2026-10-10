@@ -37,6 +37,7 @@ export async function findActiveRide(riderId: string): Promise<ActiveRide | null
 export async function checkOutcome(orderId: string): Promise<Outcome | null> {
   const order: Order = await getOrder(orderId);
   if (order.status === "NO_DRIVER") return { kind: "no_driver" };
+  if (order.status === "CANCELLED") return { kind: "cancelled", cancelledBy: order.cancelledBy ?? "" };
   if (order.status !== "MATCHED") return null;
 
   const trip = await tripFor(orderId);

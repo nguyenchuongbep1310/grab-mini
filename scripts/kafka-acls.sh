@@ -32,7 +32,7 @@ SECRETS_DIR=${SECRETS_DIR:-./secrets}
 
 # service -> topics it produces to
 declare -A PRODUCES=(
-  [order-service]="order.created"
+  [order-service]="order.created order.cancelled"
   [matching-service]="order.matched order.no_driver_found"
   [trip-service]="trip.status.changed trip.rated"
   [location-gateway]="driver.location.updated"
@@ -40,12 +40,12 @@ declare -A PRODUCES=(
 
 # service -> "group=topic,topic;group=topic" it consumes
 declare -A CONSUMES=(
-  [order-service]="order-service-group=order.matched,order.no_driver_found"
-  [matching-service]="matching-service-group=order.created"
-  [trip-service]="trip-service-group=order.matched;trip-driver-release-group=trip.status.changed"
+  [order-service]="order-service-group=order.matched,order.no_driver_found,trip.status.changed"
+  [matching-service]="matching-service-group=order.created;matching-service-cancel-group=order.cancelled"
+  [trip-service]="trip-service-group=order.matched;trip-driver-release-group=trip.status.changed;trip-order-cancelled-group=order.cancelled"
   [driver-location-service]="driver-location-service-group=driver.location.updated"
   [rating-service]="rating-service-group=trip.rated"
-  [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,trip.status.changed,driver.location.updated,trip.rated"
+  [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,driver.location.updated,trip.rated"
 )
 
 acls()  { "$KAFKA_BIN/kafka-acls.sh" --bootstrap-server "$BOOTSTRAP" --command-config "$ADMIN_CONFIG" "$@" >/dev/null; }

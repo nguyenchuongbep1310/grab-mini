@@ -172,14 +172,18 @@ type orderView struct {
 	VehicleType string        `json:"vehicleType"`
 	// PENDING until matching reports back, then MATCHED or NO_DRIVER (see outcomes.go).
 	Status string `json:"status"`
+	// Set once CANCELLED: when, by whom (RIDER or DRIVER) and why.
+	CancelledAt  *time.Time `json:"cancelledAt,omitempty"`
+	CancelledBy  string     `json:"cancelledBy,omitempty"`
+	CancelReason string     `json:"cancelReason,omitempty"`
 }
 
-const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status`
+const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, cancelled_at, cancelled_by, cancel_reason`
 
 func queryOrder(ctx context.Context, db *pgxpool.Pool, where string, arg string) (*orderView, error) {
 	var o orderView
 	err := db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE `+where+` ORDER BY created_at DESC LIMIT 1`, arg).
-		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status)
+		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.CancelledAt, &o.CancelledBy, &o.CancelReason)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +247,7 @@ func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.Handle("POST /orders", verifier.Require(http.HandlerFunc(s.handleCreateOrder), auth.Rider))
 	mux.Handle("GET /orders/{id}", verifier.Require(http.HandlerFunc(s.handleGetOrder), auth.Rider, auth.Driver))
+	mux.Handle("POST /orders/{id}/cancel", verifier.Require(http.HandlerFunc(s.handleCancelOrder), auth.Rider))
 	mux.Handle("GET /riders/{id}/latest-order", verifier.Require(http.HandlerFunc(s.handleGetLatestOrder), auth.Rider))
 	return mux
 }

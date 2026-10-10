@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "OrderCancelled",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string", "default": ""},
+    {"name": "cancelledBy", "type": "string", "default": ""},
+    {"name": "reason", "type": "string", "default": ""}
+  ]
+}

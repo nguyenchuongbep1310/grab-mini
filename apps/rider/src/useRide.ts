@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import type { NotificationMessage, VehicleType } from "@grab-mini/events";
+import type { CancelledBy, NotificationMessage, VehicleType } from "@grab-mini/events";
 import type { LatLng } from "@grab-mini/client";
 
 export type Phase =
@@ -26,6 +26,8 @@ export interface RideState {
   driverPos: LatLng | null;
   /** First driver position seen, so the map fits it once instead of on every update. */
   driverAnchor: LatLng | null;
+  /** Who cancelled, once the ride is "cancelled": the rider or the driver. */
+  cancelledBy: CancelledBy;
 }
 
 export const initialRide: RideState = {
@@ -38,6 +40,7 @@ export const initialRide: RideState = {
   vehicleType: "CAR",
   driverPos: null,
   driverAnchor: null,
+  cancelledBy: "",
 };
 
 /** A ride that was already under way when the page opened. */
@@ -53,7 +56,8 @@ export interface ActiveRide {
 /** How a search that was still pending turned out (found by asking, not by a push). */
 export type Outcome =
   | { kind: "matched"; driverId: string; vehicleType: VehicleType; tripId?: string }
-  | { kind: "no_driver" };
+  | { kind: "no_driver" }
+  | { kind: "cancelled"; cancelledBy: CancelledBy };
 
 type Action =
   | { type: "setDropoff"; dropoff: LatLng }
@@ -64,6 +68,7 @@ type Action =
   | { type: "bookSucceeded"; orderId: string }
   | { type: "bookFailed" }
   | { type: "tripLoaded"; tripId: string }
+  | { type: "orderCancelled"; orderId: string }
   | { type: "notification"; message: NotificationMessage }
   | { type: "reset" };
 
@@ -107,6 +112,7 @@ function reduce(state: RideState, action: Action): RideState {
       if (state.phase !== "searching" || state.orderId !== action.orderId) return state;
       const { outcome } = action;
       if (outcome.kind === "no_driver") return moveTo(state, "no_driver");
+      if (outcome.kind === "cancelled") return moveTo(state, "cancelled", { cancelledBy: outcome.cancelledBy });
       return moveTo(state, "assigned", {
         driverId: outcome.driverId,
         vehicleType: outcome.vehicleType,
@@ -129,6 +135,12 @@ function reduce(state: RideState, action: Action): RideState {
 
     case "tripLoaded":
       return { ...state, tripId: action.tripId };
+
+    case "orderCancelled":
+      // The rider's own cancel was accepted: show it now rather than waiting for the push.
+      return ACTIVE.includes(state.phase) && state.orderId === action.orderId
+        ? moveTo(state, "cancelled", { cancelledBy: "RIDER" })
+        : state;
 
     case "reset":
       // Keep the vehicle choice: most riders book the same kind again.
@@ -158,12 +170,14 @@ function reduce(state: RideState, action: Action): RideState {
           });
         case "order.no_driver_found":
           return moveTo(state, "no_driver", { orderId });
+        case "order.cancelled":
+          return moveTo(state, "cancelled", { orderId, cancelledBy: message.payload.cancelledBy || "RIDER" });
         case "trip.status.changed": {
           const { tripId, driverId, status } = message.payload;
           const patch = { orderId, tripId, driverId };
           if (status === "IN_PROGRESS") return moveTo(state, "in_progress", patch);
           if (status === "COMPLETED") return moveTo(state, "completed", patch);
-          if (status === "CANCELLED") return moveTo(state, "cancelled", patch);
+          if (status === "CANCELLED") return moveTo(state, "cancelled", { ...patch, cancelledBy: message.payload.cancelledBy });
           return moveTo(state, "assigned", patch);
         }
         case "trip.rated":

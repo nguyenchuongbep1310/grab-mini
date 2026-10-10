@@ -3,6 +3,7 @@ import {
   Avatar,
   BottomSheet,
   Button,
+  CancelDialog,
   Card,
   MapMarker,
   MapView,
@@ -13,7 +14,17 @@ import {
   useToast,
   type LatLngTuple,
 } from "@grab-mini/ui";
-import { createOrder, rateTrip, signIn, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
+import {
+  ApiError,
+  cancelOrder,
+  createOrder,
+  rateTrip,
+  signIn,
+  tripAction,
+  useNotificationSocket,
+  waitForTripByOrder,
+} from "@grab-mini/client";
+import type { CancelledBy } from "@grab-mini/events";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { TipPicker } from "./TipPicker";
 import { useRide, type Phase } from "./useRide";
@@ -46,6 +57,15 @@ const BADGE_STATUS: Record<Phase, string> = {
   no_driver: "NO_DRIVER",
 };
 
+const CANCEL_REASONS = ["Changed my plans", "Waited too long", "Booked by mistake", "Found another ride"];
+
+/** What the rider reads once a ride is cancelled, depending on who cancelled it. */
+function cancelledCopy(by: CancelledBy) {
+  return by === "DRIVER"
+    ? { title: "Driver cancelled", sub: "Your driver cancelled this trip. You can book another ride." }
+    : { title: "You cancelled", sub: "You cancelled this ride. You can book another one whenever you're ready." };
+}
+
 const riderId = new URLSearchParams(location.search).get("rider") ?? "rider-1";
 // Every request and the WebSocket carry a token for this identity (see @grab-mini/client).
 signIn("rider", riderId);
@@ -54,6 +74,7 @@ export function App() {
   const toast = useToast();
   const [ride, dispatch] = useRide();
   const [cancelling, setCancelling] = useState(false);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [stars, setStars] = useState(0);
   const [rated, setRated] = useState(false);
   const [comment, setComment] = useState("");
@@ -94,7 +115,7 @@ export function App() {
   }, [ride.phase, ride.orderId, dispatch]);
 
   // order.matched carries no tripId; look the trip up once the driver is assigned.
-  const { phase, orderId, tripId, driverId } = ride;
+  const { phase, orderId, tripId, driverId, cancelledBy } = ride;
   useEffect(() => {
     if (phase !== "assigned" || !orderId || tripId) return;
     let cancelled = false;
@@ -112,9 +133,9 @@ export function App() {
     previousPhase.current = phase;
     if (phase === "assigned") toast.show(`Driver found: ${driverId}`, "success");
     if (phase === "no_driver") toast.show("No drivers available nearby", "error");
-    if (phase === "cancelled") toast.show("This trip was cancelled", "info");
+    if (phase === "cancelled") toast.show(cancelledCopy(cancelledBy).title, "info");
     if (phase === "completed") toast.show("You've arrived. Thanks for riding!", "success");
-  }, [phase, driverId, toast]);
+  }, [phase, driverId, cancelledBy, toast]);
 
   const book = async () => {
     if (!ride.dropoff) return;
@@ -150,13 +171,26 @@ export function App() {
     dispatch({ type: "reset" });
   };
 
-  const cancel = async () => {
-    if (!tripId) return;
+  // While searching there is only an order to cancel; once a driver is
+  // assigned, the trip is what gets cancelled (Order Service answers 409 for that).
+  const cancel = async (reason: string) => {
     setCancelling(true);
     try {
-      await tripAction(tripId, "cancel");
+      if (phase === "searching" && orderId) {
+        await cancelOrder(orderId, reason);
+        dispatch({ type: "orderCancelled", orderId });
+      } else if (tripId) {
+        await tripAction(tripId, "cancel", reason);
+      }
+      setConfirmingCancel(false);
     } catch (err) {
-      toast.show(err instanceof Error ? err.message : "Couldn't cancel the trip", "error");
+      setConfirmingCancel(false);
+      // 409: a driver was matched while the dialog was open; the push moves the screen on.
+      const raced = err instanceof ApiError && err.status === 409 && phase === "searching";
+      toast.show(
+        raced ? "A driver was just assigned. You can cancel the trip instead." : err instanceof Error ? err.message : "Couldn't cancel the ride",
+        raced ? "info" : "error",
+      );
     } finally {
       setCancelling(false);
     }
@@ -225,8 +259,8 @@ export function App() {
         {phase !== "idle" && (
           <div className="sheet-stack">
             <div>
-              <h1 className="sheet-title">{TITLES[phase]}</h1>
-              <p className="sheet-sub">{SUBTITLES[phase]}</p>
+              <h1 className="sheet-title">{phase === "cancelled" ? cancelledCopy(cancelledBy).title : TITLES[phase]}</h1>
+              <p className="sheet-sub">{phase === "cancelled" ? cancelledCopy(cancelledBy).sub : SUBTITLES[phase]}</p>
             </div>
 
             {inRide && driverId && (
@@ -250,8 +284,13 @@ export function App() {
               failed={phase === "cancelled" || phase === "no_driver"}
             />
 
+            {phase === "searching" && (
+              <Button variant="secondary" block disabled={!orderId} onClick={() => setConfirmingCancel(true)}>
+                Cancel ride
+              </Button>
+            )}
             {phase === "assigned" && (
-              <Button variant="secondary" block loading={cancelling} disabled={!tripId} onClick={cancel}>
+              <Button variant="secondary" block disabled={!tripId} onClick={() => setConfirmingCancel(true)}>
                 Cancel trip
               </Button>
             )}
@@ -283,6 +322,21 @@ export function App() {
           </div>
         )}
       </BottomSheet>
+
+      <CancelDialog
+        open={confirmingCancel && (phase === "searching" || phase === "assigned")}
+        title={phase === "searching" ? "Cancel this ride?" : "Cancel this trip?"}
+        description={
+          phase === "searching"
+            ? "We'll stop looking for a driver."
+            : "Your driver is already on the way. Cancel anyway?"
+        }
+        reasons={CANCEL_REASONS}
+        confirmLabel={phase === "searching" ? "Cancel ride" : "Cancel trip"}
+        loading={cancelling}
+        onConfirm={cancel}
+        onDismiss={() => setConfirmingCancel(false)}
+      />
     </div>
   );
 }

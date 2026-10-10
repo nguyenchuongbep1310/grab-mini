@@ -10,9 +10,10 @@ type Envelope struct {
 type OrderStatus string
 
 const (
-	OrderStatusPending  OrderStatus = "PENDING"
-	OrderStatusMatched  OrderStatus = "MATCHED"
-	OrderStatusNoDriver OrderStatus = "NO_DRIVER"
+	OrderStatusPending   OrderStatus = "PENDING"
+	OrderStatusMatched   OrderStatus = "MATCHED"
+	OrderStatusNoDriver  OrderStatus = "NO_DRIVER"
+	OrderStatusCancelled OrderStatus = "CANCELLED"
 )
 
 type TripStatus string
@@ -75,6 +76,25 @@ type OrderNoDriverFound struct {
 	RiderID string `json:"riderId" avro:"riderId"`
 }
 
+// Who cancelled a ride (the cancelledBy field of order.cancelled and of
+// trip.status.changed). Empty on events from before cancellation was recorded.
+const (
+	CancelledByRider  = "RIDER"
+	CancelledByDriver = "DRIVER"
+)
+
+// OrderCancelled is published once, when a rider cancels an order that has
+// no driver yet. Trip Service cancels any trip already created for it and
+// Matching stops looking for a driver.
+type OrderCancelled struct {
+	Envelope
+	OrderID string `json:"orderId" avro:"orderId"`
+	RiderID string `json:"riderId" avro:"riderId"`
+	// RIDER or DRIVER; empty on older messages.
+	CancelledBy string `json:"cancelledBy" avro:"cancelledBy"`
+	Reason      string `json:"reason" avro:"reason"`
+}
+
 // DriverLocationUpdated carries the driver's device timestamp, used to
 // discard out-of-order updates (US-3.1).
 type DriverLocationUpdated struct {
@@ -93,6 +113,10 @@ type TripStatusChanged struct {
 	Status   TripStatus `json:"status" avro:"status"`
 	// Empty on older messages (see OrderMatched.RiderID).
 	RiderID string `json:"riderId" avro:"riderId"`
+	// Set on CANCELLED: who cancelled (RIDER or DRIVER) and an optional
+	// reason. Empty on older messages and on other statuses.
+	CancelledBy string `json:"cancelledBy" avro:"cancelledBy"`
+	Reason      string `json:"reason" avro:"reason"`
 }
 
 // TripRated is published once, when a rider rates a completed trip.

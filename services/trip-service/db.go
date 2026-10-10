@@ -79,16 +79,23 @@ type trip struct {
 	Status   events.TripStatus `json:"status"`
 	// Set once the rider has rated the trip.
 	Rating *int `json:"rating,omitempty"`
+	// Set once CANCELLED: RIDER or DRIVER, and the reason they gave (if any).
+	CancelledBy  string `json:"cancelledBy,omitempty"`
+	CancelReason string `json:"cancelReason,omitempty"`
 }
 
+// cancelInfo says who cancelled a trip and why. It rides along with the
+// transition to CANCELLED (variadic, so the other transitions don't pass one).
+type cancelInfo struct{ By, Reason string }
+
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating FROM trips WHERE id = $1`, id)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips WHERE id = $1`, id)
 }
 
 // getTripByOrderID lets a client that only knows the orderId (e.g. from an
 // order.matched push) find the trip Trip Service created for it.
 func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating FROM trips WHERE order_id = $1`, orderID)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips WHERE order_id = $1`, orderID)
 }
 
 // getActiveTripByDriver is the driver's trip still in flight (ASSIGNED or
@@ -97,14 +104,14 @@ func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*t
 // the newest wins.
 func getActiveTripByDriver(ctx context.Context, db *pgxpool.Pool, driverID string) (*trip, error) {
 	return queryTrip(ctx, db, `
-		SELECT id, order_id, driver_id, rider_id, status, rating FROM trips
+		SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips
 		WHERE driver_id = $1 AND status IN ('ASSIGNED', 'IN_PROGRESS')
 		ORDER BY created_at DESC LIMIT 1`, driverID)
 }
 
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating, &t.CancelledBy, &t.CancelReason)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
 	}
@@ -125,15 +132,23 @@ const (
 var transitionSQL = map[timestampField]string{
 	startedAt:   `UPDATE trips SET status = $1, started_at = now() WHERE id = $2 AND status = ANY($3)`,
 	completedAt: `UPDATE trips SET status = $1, completed_at = now() WHERE id = $2 AND status = ANY($3)`,
-	cancelledAt: `UPDATE trips SET status = $1, cancelled_at = now() WHERE id = $2 AND status = ANY($3)`,
+	cancelledAt: `UPDATE trips SET status = $1, cancelled_at = now(), cancelled_by = $4, cancel_reason = $5 WHERE id = $2 AND status = ANY($3)`,
 }
 
 // transitionTrip moves a trip to newStatus only if it's currently in one
 // of fromStatuses, and reports whether this call performed the move.
 // This is what makes trip actions idempotent (US-6.1): calling pickup
 // twice, for example, only actually transitions once.
-func transitionTrip(ctx context.Context, db execer, id string, fromStatuses []events.TripStatus, newStatus events.TripStatus, field timestampField) (bool, error) {
-	tag, err := db.Exec(ctx, transitionSQL[field], newStatus, id, statusesToStrings(fromStatuses))
+func transitionTrip(ctx context.Context, db execer, id string, fromStatuses []events.TripStatus, newStatus events.TripStatus, field timestampField, cancel ...cancelInfo) (bool, error) {
+	args := []any{newStatus, id, statusesToStrings(fromStatuses)}
+	if field == cancelledAt {
+		var c cancelInfo
+		if len(cancel) > 0 {
+			c = cancel[0]
+		}
+		args = append(args, c.By, c.Reason)
+	}
+	tag, err := db.Exec(ctx, transitionSQL[field], args...)
 	if err != nil {
 		return false, err
 	}

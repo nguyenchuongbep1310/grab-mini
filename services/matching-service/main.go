@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -74,9 +75,23 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			case <-time.After(time.Duration(env.MatchRetryDelay) * time.Millisecond):
 			}
 		}
+		// The rider may have cancelled while we waited: don't take a driver for them.
+		if skip, err := skipCancelled(ctx, env, rdb, order.OrderID); err != nil || skip {
+			return err
+		}
 		driverID, err = findAndClaimNearestDriver(ctx, rdb, order.OrderID, order.Pickup.Lat, order.Pickup.Lng, env.MatchRadiusKm, order.VehicleType, env.AssignLease)
 		if err != nil {
 			return err
+		}
+		// A cancellation can land between the check and the claim. Hand the
+		// driver straight back (and forget the match) instead of announcing them.
+		if driverID != "" {
+			if skip, err := skipCancelled(ctx, env, rdb, order.OrderID); err != nil || skip {
+				if relErr := driverstatus.ReleaseMatch(ctx, rdb, order.OrderID, driverID); relErr != nil {
+					log.Printf("[%s] failed to release driver=%s of cancelled order=%s: %v", env.InstanceID, driverID, order.OrderID, relErr)
+				}
+				return err
+			}
 		}
 	}
 
@@ -162,6 +177,12 @@ func runConsumer(ctx context.Context, env Env) {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
 	go health.Serve(ctx, env.HealthPort, health.Redis(rdb), health.Kafka(env.KafkaBrokers))
+
+	// Returns when ctx is cancelled, like the order.created consumer below,
+	// and is waited for so the Redis client isn't closed under it.
+	var cancels sync.WaitGroup
+	cancels.Go(func() { runCancelConsumer(ctx, env, rdb, codec) })
+	defer cancels.Wait()
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{
 		Brokers:    env.KafkaBrokers,
