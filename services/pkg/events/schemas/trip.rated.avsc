@@ -10,6 +10,8 @@
     {"name": "riderId", "type": "string"},
     {"name": "driverId", "type": "string"},
     {"name": "stars", "type": "int"},
-    {"name": "comment", "type": "string", "default": ""}
+    {"name": "comment", "type": "string", "default": ""},
+    {"name": "tipAmount", "type": "long", "default": 0},
+    {"name": "currency", "type": "string", "default": "VND"}
   ]
 }

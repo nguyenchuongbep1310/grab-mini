@@ -37,7 +37,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | Driver Location Service | Receives & stores driver location | `driver.location.updated` | — | Redis (geo, TTL) |
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
 | Notification Service | Pushes realtime updates to clients | `order.matched`, `order.no_driver_found`, `trip.status.changed`, `driver.location.updated` | — | (stateless, in-memory socket map) |
-| Rating Service | Averages each driver's ratings | `trip.rated` | | Postgres (`driver_ratings`, deduped by eventId) |
+| Rating Service | Averages each driver's ratings | `trip.rated` | | Postgres (`driver_ratings` with tip totals, `driver_reviews`, deduped by eventId in the same transaction) |
 | ksqlDB (replaces the planned Analytics Service) | Stream processing: per-minute counts, a stream-stream join for match latency, ratings, throughput | all topics | analytics tables | Kafka (changelog topics) |
 
 ## 3. Kafka topics
@@ -49,7 +49,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | `order.no_driver_found` | `orderId` | 3 | |
 | `driver.location.updated` | `driverId` | 3 | Highest throughput; keyed by driver to preserve per-driver ordering |
 | `trip.status.changed` | `tripId` | 3 | |
-| `trip.rated` | `driverId` | 3 | Published by Trip Service when a rider rates a COMPLETED trip (once per trip) |
+| `trip.rated` | `driverId` | 3 | Published by Trip Service when a rider rates a COMPLETED trip (once per trip); carries `comment`, `tipAmount` (whole VND, 0 to 1,000,000, recorded only) and `currency` (`VND`), both added as defaulted Avro fields |
 | `*.DLQ` | same as source topic | 1 | Dead-letter topic per topic above |
 
 Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so each service scales independently without reading each other's events.
@@ -64,7 +64,7 @@ id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE]
 
 **Trip** (Postgres)
 ```
-id, orderId, driverId, status[ASSIGNED|IN_PROGRESS|COMPLETED|CANCELLED], startedAt, completedAt, rating, ratingComment, ratedAt
+id, orderId, driverId, status[ASSIGNED|IN_PROGRESS|COMPLETED|CANCELLED], startedAt, completedAt, rating, ratingComment, tipAmount, ratedAt
 ```
 
 **Driver status** (Redis)

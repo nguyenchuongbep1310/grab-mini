@@ -104,4 +104,8 @@ type TripRated struct {
 	DriverID string `json:"driverId" avro:"driverId"`
 	Stars    int    `json:"stars" avro:"stars"`
 	Comment  string `json:"comment" avro:"comment"`
+	// TipAmount is a recorded amount in whole currency units (VND has no
+	// minor unit); no money moves, there is no payment system.
+	TipAmount int64  `json:"tipAmount" avro:"tipAmount"`
+	Currency  string `json:"currency" avro:"currency"`
 }

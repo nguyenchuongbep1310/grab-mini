@@ -151,11 +151,11 @@ func statusesToStrings(statuses []events.TripStatus) []string {
 // saveRating records a rating on a completed, not-yet-rated trip and reports
 // whether this call did it. The conditions live in the UPDATE, so two
 // concurrent submissions can't both succeed.
-func saveRating(ctx context.Context, db execer, tripID string, stars int, comment string) (bool, error) {
+func saveRating(ctx context.Context, db execer, tripID string, stars int, comment string, tip int64) (bool, error) {
 	tag, err := db.Exec(ctx, `
-		UPDATE trips SET rating = $1, rating_comment = $2, rated_at = now()
-		WHERE id = $3 AND status = 'COMPLETED' AND rating IS NULL`,
-		stars, comment, tripID,
+		UPDATE trips SET rating = $1, rating_comment = $2, tip_amount = $3, rated_at = now()
+		WHERE id = $4 AND status = 'COMPLETED' AND rating IS NULL`,
+		stars, comment, tip, tripID,
 	)
 	if err != nil {
 		return false, err

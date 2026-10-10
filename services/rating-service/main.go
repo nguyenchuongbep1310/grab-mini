@@ -55,7 +55,7 @@ func runConsumer(ctx context.Context, env Env, db *pgxpool.Pool) {
 		}
 		if counted {
 			ratingsRecorded.WithLabelValues("counted").Inc()
-			log.Printf("driver=%s rated %d stars (trip %s)", evt.DriverID, evt.Stars, evt.TripID)
+			log.Printf("driver=%s rated %d stars, tip %d (trip %s)", evt.DriverID, evt.Stars, evt.TipAmount, evt.TripID)
 		} else {
 			ratingsRecorded.WithLabelValues("duplicate").Inc()
 			log.Printf("duplicate trip.rated event %s, skipping", evt.EventID)
@@ -104,6 +104,8 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(rating)
 	}), auth.Rider, auth.Driver))
+
+	mux.Handle("GET /drivers/{id}/reviews", verifier.Require(reviewsHandler(db), auth.Driver))
 
 	health.Mount(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 

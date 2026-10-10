@@ -158,7 +158,7 @@ func TestARatingQueuesItsEventAndASecondOneDoesNot(t *testing.T) {
 	tr, _ := getTripByOrderID(ctx, db, "o1")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
 	s, w := newServer(db, rdb)
-	req := rateRequest{RiderID: "r1", Stars: 5}
+	req := rateRequest{RiderID: "r1", Stars: 5, TipAmount: 20000}
 
 	if ok, err := s.rateWithEvent(ctx, tr, req, []byte("rated")); err != nil || !ok {
 		t.Fatalf("first rating = %v, %v; want true", ok, err)
@@ -167,6 +167,10 @@ func TestARatingQueuesItsEventAndASecondOneDoesNot(t *testing.T) {
 		t.Fatalf("second rating = %v, %v; want false, nil", ok, err)
 	}
 
+	var tip int64
+	if err := db.QueryRow(ctx, `SELECT tip_amount FROM trips WHERE id = $1`, tr.ID).Scan(&tip); err != nil || tip != 20000 {
+		t.Errorf("stored tip = %d, %v; want 20000", tip, err)
+	}
 	if n, _ := s.relay.Flush(ctx); n != 1 {
 		t.Fatalf("%d trip.rated events queued, want exactly 1", n)
 	}

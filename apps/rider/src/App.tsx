@@ -15,6 +15,7 @@ import {
 } from "@grab-mini/ui";
 import { createOrder, rateTrip, signIn, tripAction, useNotificationSocket, waitForTripByOrder } from "@grab-mini/client";
 import { checkOutcome, findActiveRide } from "./recovery";
+import { TipPicker } from "./TipPicker";
 import { useRide, type Phase } from "./useRide";
 
 // Fixed pickup near the seeded drivers (central Ho Chi Minh City).
@@ -55,6 +56,8 @@ export function App() {
   const [cancelling, setCancelling] = useState(false);
   const [stars, setStars] = useState(0);
   const [rated, setRated] = useState(false);
+  const [comment, setComment] = useState("");
+  const [tip, setTip] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const socket = useNotificationSocket("rider", riderId, (message) => dispatch({ type: "notification", message }));
 
@@ -129,7 +132,7 @@ export function App() {
     if (!tripId || stars === 0) return;
     setSubmitting(true);
     try {
-      await rateTrip(tripId, riderId, stars);
+      await rateTrip(tripId, riderId, stars, comment, tip);
       setRated(true);
       toast.show("Thanks for your feedback!", "success");
     } catch (err) {
@@ -142,6 +145,8 @@ export function App() {
   const newRide = () => {
     setStars(0);
     setRated(false);
+    setComment("");
+    setTip(0);
     dispatch({ type: "reset" });
   };
 
@@ -261,6 +266,7 @@ export function App() {
                     onChange={rated ? undefined : setStars}
                     disabled={submitting}
                   />
+                  {!rated && <TipPicker comment={comment} onComment={setComment} tip={tip} onTip={setTip} disabled={submitting} />}
                   {!rated && (
                     <Button block loading={submitting} disabled={stars === 0 || !tripId} onClick={submitRating}>
                       Submit rating
