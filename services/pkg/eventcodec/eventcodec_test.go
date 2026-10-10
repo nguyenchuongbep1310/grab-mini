@@ -243,6 +243,91 @@ func TestCurrentOrderCreatedReadsMessagesWrittenBeforeVehicleType(t *testing.T) 
 	}
 }
 
+// order.created as it was at schema v2 (vehicleType, no surge fields).
+const orderCreatedV2 = `{"type":"record","name":"OrderCreated","namespace":"grabmini.events","fields":[
+ {"name":"eventId","type":"string"},{"name":"occurredAt","type":"string"},{"name":"orderId","type":"string"},{"name":"riderId","type":"string"},
+ {"name":"pickup","type":{"type":"record","name":"LatLng","fields":[{"name":"lat","type":"double"},{"name":"lng","type":"double"}]}},
+ {"name":"dropoff","type":"LatLng"},{"name":"vehicleType","type":"string","default":"CAR"}]}`
+
+// v2 messages (written before surge pricing) are still in Kafka after the
+// upgrade: they must decode with surgeMultiplier 1.0 and no price.
+func TestCurrentOrderCreatedReadsV2MessagesWithSurgeDefaults(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+
+	type v2Order struct {
+		events.Envelope
+		OrderID     string             `avro:"orderId"`
+		RiderID     string             `avro:"riderId"`
+		Pickup      events.LatLng      `avro:"pickup"`
+		Dropoff     events.LatLng      `avro:"dropoff"`
+		VehicleType events.VehicleType `avro:"vehicleType"`
+	}
+	old := v2Order{sampleOrder.Envelope, "o-2", "rider-1", sampleOrder.Pickup, sampleOrder.Dropoff, events.VehicleBike}
+	data, err := New(url, WithSchemaSource(func(string) (string, error) { return orderCreatedV2, nil })).
+		Encode(ctx, events.TopicOrderCreated, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got events.OrderCreated
+	if err := New(url).Decode(ctx, events.TopicOrderCreated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OrderID != "o-2" || got.VehicleType != events.VehicleBike {
+		t.Errorf("v2 fields lost: %+v", got)
+	}
+	if got.SurgeMultiplier != 1.0 || got.Price != nil {
+		t.Errorf("surgeMultiplier = %v price = %v, want the defaults 1.0 and nil", got.SurgeMultiplier, got.Price)
+	}
+}
+
+// And the other way round: an old consumer (v2 reader) still reads v3
+// messages, ignoring the new fields.
+func TestV2ReaderIgnoresSurgeFields(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+
+	price := 87000.0
+	in := sampleOrder
+	in.SurgeMultiplier, in.Price = 1.4, &price
+	data, err := New(url).Encode(ctx, events.TopicOrderCreated, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		OrderID     string `avro:"orderId"`
+		VehicleType string `avro:"vehicleType"`
+	}
+	oldConsumer := New(url, WithSchemaSource(func(string) (string, error) { return orderCreatedV2, nil }))
+	if err := oldConsumer.Decode(ctx, events.TopicOrderCreated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OrderID != "o-1" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestSurgeFieldsSurviveARoundTrip(t *testing.T) {
+	_, url := newRegistry(t)
+	c := New(url)
+	price := 87000.0
+	in := sampleOrder
+	in.SurgeMultiplier, in.Price = 1.4, &price
+
+	data, err := c.Encode(context.Background(), events.TopicOrderCreated, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out events.OrderCreated
+	if err := c.Decode(context.Background(), events.TopicOrderCreated, data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.SurgeMultiplier != 1.4 || out.Price == nil || *out.Price != 87000 {
+		t.Errorf("got multiplier %v price %v", out.SurgeMultiplier, out.Price)
+	}
+}
+
 func TestVehicleTypeSurvivesARoundTrip(t *testing.T) {
 	_, url := newRegistry(t)
 	c := New(url)

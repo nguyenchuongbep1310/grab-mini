@@ -33,6 +33,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | Service | Responsibility | Consumes | Produces | Storage |
 |---|---|---|---|---|
 | Order Service | Accepts booking requests, manages orders, keeps each order's status current | `order.matched`, `order.no_driver_found` | `order.created` | Postgres |
+| Pricing Service | Surge pricing: counts demand per pickup cell, samples supply, keeps a multiplier per cell, issues signed price quotes (`GET /quotes`) | `order.created` | | Redis (demand counters, multipliers); no Postgres |
 | Matching Service | Finds the nearest driver | `order.created` | `order.matched`, `order.no_driver_found` | Redis (driver status/geo) |
 | Driver Location Service | Receives & stores driver location | `driver.location.updated` | — | Redis (geo, TTL) |
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
@@ -75,6 +76,16 @@ driver:{id}:status -> AVAILABLE | ASSIGNED | ON_TRIP
 driver:{id}:vehicle -> CAR | BIKE
 driver:{id}:geo -> lat, lng (Redis GEO)
 ```
+
+## 4a. Surge pricing
+
+- **Cells.** A pickup falls in the cell `floor(lat/deg):floor(lng/deg)`, the same grid as the driver GEO shards (`GEO_SHARD_DEGREES`; `SURGE_CELL_DEGREES` overrides; default 0.05 degrees, about 5.5 km). The pure functions live in `services/pkg/surge`.
+- **Demand.** Pricing Service consumes `order.created` (group `pricing-service-group`) and does `INCR surge:demand:{vehicle}:{cell}:{minute}` (TTL 5 minutes). Active cells are remembered in the set `surge:cells`.
+- **Supply and multiplier.** Every 5 seconds one instance (a short Redis lock) takes each active cell: supply = AVAILABLE drivers of that vehicle type within the equal-area radius of the cell centre (`driverlocation.Search` plus `driverstatus.AvailableVehicles`), demand = average orders per minute over the last 3 minute buckets, `target = clamp(1 + k * (demand / max(supply, 1) - 1), 1.0, MAX)` rounded to 0.1 (k = 0.5, MAX = 3.0), then smoothed with an EMA and a per-tick change cap (0.3) so prices do not jump. The result is `SET surge:mult:{vehicle}:{cell}` with a 30 second TTL; a missing key means 1.0.
+- **Quote.** `GET /quotes?pickupLat&pickupLng&dropoffLat&dropoffLng&vehicleType` (Rider token) returns `{quoteId, baseFare, multiplier, price, currency: "VND", expiresAt}`. Base fare is a flag fall plus a per-km rate on the straight-line distance, with a minimum. `quoteId = base64url(body) "." base64url(HMAC-SHA256)`; the body holds the fare, multiplier, price, expiry and a fingerprint of rider, vehicle, pickup and dropoff, so nothing is stored. Pricing Service and Order Service share `QUOTE_SECRET` (`pkg/secret`: file or env, no dev default in production).
+- **Booking.** `POST /orders` takes an optional `quoteId`: valid means the quoted price is locked; absent or expired means the multiplier is read from Redis and the price locked at booking; an expired quote whose multiplier moved by more than `SURGE_QUOTE_TOLERANCE` (0.2) gets `409 {newQuote}` for the rider to confirm. The order stores `surge_multiplier` and `price` (migration 00006) and `order.created` v3 carries `surgeMultiplier` (default 1.0) and `price` (nullable), so older messages and consumers still work.
+- **Failing open.** Redis errors, timeouts or an absent key all price at 1.0 (counted in `pricing_fail_open_total` / `orders_surge_fail_open_total`, alert `SurgePricingFailOpen`). A stopped sampler lets multipliers expire after 30 seconds (alert `SurgeSamplerStalled`).
+- **Frontend.** `getQuote()` in `packages/client`, the `useQuote` hook in the Rider App (debounced refetch, refresh before expiry, re-confirm after a 409), and `PriceTag` / `SurgeBadge` in the design system. Ops shows the `surge_demand` ksqlDB table.
 
 ## 4b. Event serialization
 

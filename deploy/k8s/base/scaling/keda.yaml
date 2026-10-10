@@ -407,3 +407,44 @@ spec:
       offsetResetPolicy: earliest
       sasl: scram_sha512
       tls: enable
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: pricing-service
+  labels:
+    app.kubernetes.io/name: pricing-service
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: scaling
+spec:
+  scaleTargetRef:
+    name: pricing-service
+  minReplicaCount: 2
+  maxReplicaCount: 6
+  pollingInterval: 15
+  cooldownPeriod: 120
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+  triggers:
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: pricing-service-group
+      topic: order.created
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
+  - type: cpu
+    metricType: Utilization
+    metadata:
+      value: '70'

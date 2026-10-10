@@ -7,9 +7,11 @@ import {
   Card,
   MapMarker,
   MapView,
+  PriceTag,
   SegmentedControl,
   StarRating,
   StatusBadge,
+  SurgeBadge,
   TripStatusTimeline,
   useToast,
   type LatLngTuple,
@@ -18,6 +20,7 @@ import {
   ApiError,
   cancelOrder,
   createOrder,
+  newQuoteOf,
   rateTrip,
   signIn,
   tripAction,
@@ -27,10 +30,12 @@ import {
 import type { CancelledBy } from "@grab-mini/events";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { TipPicker } from "./TipPicker";
+import { useQuote } from "./useQuote";
 import { useRide, type Phase } from "./useRide";
 
 // Fixed pickup near the seeded drivers (central Ho Chi Minh City).
 const PICKUP: LatLngTuple = [10.776, 106.7];
+const PICKUP_LATLNG = { lat: PICKUP[0], lng: PICKUP[1] };
 
 const STEPS = [
   { key: "searching", label: "Finding a driver" },
@@ -73,6 +78,8 @@ signIn("rider", riderId);
 export function App() {
   const toast = useToast();
   const [ride, dispatch] = useRide();
+  // Kept through "booking" so a 409 can hand back the new price to confirm.
+  const priceQuote = useQuote(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle" || ride.phase === "booking");
   const [cancelling, setCancelling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [stars, setStars] = useState(0);
@@ -141,10 +148,24 @@ export function App() {
     if (!ride.dropoff) return;
     dispatch({ type: "bookStarted" });
     try {
-      const { orderId } = await createOrder(riderId, { lat: PICKUP[0], lng: PICKUP[1] }, ride.dropoff, ride.vehicleType);
-      dispatch({ type: "bookSucceeded", orderId });
+      const { orderId, price, surgeMultiplier } = await createOrder(
+        riderId,
+        PICKUP_LATLNG,
+        ride.dropoff,
+        ride.vehicleType,
+        priceQuote.quote?.quoteId,
+      );
+      priceQuote.acknowledge();
+      dispatch({ type: "bookSucceeded", orderId, price, surgeMultiplier });
     } catch (err) {
       dispatch({ type: "bookFailed" });
+      // The price moved since the rider last saw it: show the new one and let them confirm.
+      const fresh = newQuoteOf(err);
+      if (fresh) {
+        priceQuote.applyNewQuote(fresh);
+        toast.show("The price changed. Please confirm the new price.", "info");
+        return;
+      }
       toast.show(err instanceof Error ? err.message : "Couldn't book the ride", "error");
     }
   };
@@ -250,8 +271,17 @@ export function App() {
               onChange={(vehicleType) => dispatch({ type: "setVehicle", vehicleType })}
               options={VEHICLE_OPTIONS}
             />
-            <Button size="lg" block disabled={!ride.dropoff} onClick={book}>
-              Book ride
+            {ride.dropoff && priceQuote.quote && (
+              <div className="price-row">
+                <PriceTag size="lg" amount={priceQuote.quote.price} currency={priceQuote.quote.currency} />
+                <SurgeBadge multiplier={priceQuote.quote.multiplier} />
+              </div>
+            )}
+            {ride.dropoff && !priceQuote.quote && priceQuote.status === "error" && (
+              <p className="sheet-sub">Price unavailable right now. It will be set when you book.</p>
+            )}
+            <Button size="lg" block disabled={!ride.dropoff || (priceQuote.status === "loading" && !priceQuote.quote)} onClick={book}>
+              {priceQuote.changed ? "Confirm new price" : "Book ride"}
             </Button>
           </div>
         )}
@@ -277,6 +307,13 @@ export function App() {
             )}
 
             {!inRide && <StatusBadge status={BADGE_STATUS[phase]} />}
+
+            {ride.price !== null && (
+              <div className="price-row">
+                <PriceTag amount={ride.price} />
+                <SurgeBadge multiplier={ride.surgeMultiplier} />
+              </div>
+            )}
 
             <TripStatusTimeline
               steps={STEPS}

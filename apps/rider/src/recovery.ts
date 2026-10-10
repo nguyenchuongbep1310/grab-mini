@@ -14,7 +14,13 @@ export async function findActiveRide(riderId: string): Promise<ActiveRide | null
   const order = await getLatestOrder(riderId);
   if (!order) return null;
 
-  const base = { orderId: order.id, vehicleType: order.vehicleType, dropoff: order.dropoff };
+  const base = {
+    orderId: order.id,
+    vehicleType: order.vehicleType,
+    dropoff: order.dropoff,
+    price: order.price,
+    surgeMultiplier: order.surgeMultiplier,
+  };
 
   if (order.status === "PENDING") return { ...base, phase: "searching" };
   if (order.status !== "MATCHED") return null;

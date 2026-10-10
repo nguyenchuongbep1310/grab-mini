@@ -153,6 +153,22 @@ spec:
         summary: More than 30% of orders find no driver
         description: Either supply is short, or driver locations/status are wrong (stale Redis, a stuck lease).
         runbook: docs/runbook.md#slow-matching
+    - alert: SurgePricingFailOpen
+      expr: sum(rate(orders_surge_fail_open_total[5m])) + sum(rate(pricing_fail_open_total[5m])) > 0
+      for: 10m
+      labels:
+        severity: ticket
+      annotations:
+        summary: 'Surge multipliers can''t be read: prices fall back to 1.0'
+        runbook: docs/runbook.md#surge-pricing
+    - alert: SurgeSamplerStalled
+      expr: sum(rate(pricing_ticks_total[5m])) < 0.05 and on() sum(rate(orders_created_total[10m])) > 0.05
+      for: 10m
+      labels:
+        severity: ticket
+      annotations:
+        summary: 'Pricing Service is not sampling supply: surge is off'
+        runbook: docs/runbook.md#surge-pricing
     - alert: OrderCreationErrorBudgetBurn
       expr: "(\n  sum(rate(http_requests_total{route=\"POST /orders\", code=~\"5..\"}[5m])) / sum(rate(http_requests_total{route=\"\
         POST /orders\"}[5m])) > (14.4 * 0.001)\n)\nand\n(\n  sum(rate(http_requests_total{route=\"POST /orders\", code=~\"\

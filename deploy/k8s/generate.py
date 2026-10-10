@@ -41,13 +41,15 @@ TOPICS = {
 # kind: "api" has a public port; "worker" has only the admin port.
 # secrets: what it mounts besides its Kafka credentials.
 SERVICES = {
-    "order-service": dict(port=3001, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
+    "order-service": dict(port=3001, kind="api", db=True, redis=True, quote=True, scale=("lag", 2, 6)),
     "trip-service": dict(port=3002, kind="api", db=True, redis=True, scale=("lag", 2, 12)),
     "rating-service": dict(port=3004, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
     "driver-location-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 3, 24)),
+    # Surge pricing: no database; quotes are signed with the secret it shares with order-service.
+    "pricing-service": dict(port=3007, kind="api", db=False, redis=True, quote=True, scale=("lag", 2, 6)),
 }
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
@@ -132,6 +134,10 @@ def deployment(name, spec):
         volumes.append({"name": "jwt", "secret": {"secretName": f"{CLUSTER}-jwt", "items": [{"key": "secret", "path": "secret"}]}})
         mounts.append({"name": "jwt", "mountPath": "/etc/secrets/jwt", "readOnly": True})
         env.append({"name": "JWT_SECRET_FILE", "value": "/etc/secrets/jwt/secret"})
+    if spec.get("quote"):  # signs (pricing) or checks (order) surge quotes: the same secret
+        volumes.append({"name": "quote", "secret": {"secretName": f"{CLUSTER}-quote", "items": [{"key": "secret", "path": "secret"}]}})
+        mounts.append({"name": "quote", "mountPath": "/etc/secrets/quote", "readOnly": True})
+        env.append({"name": "QUOTE_SECRET_FILE", "value": "/etc/secrets/quote/secret"})
     if spec.get("origins"):
         env.append({"name": "ALLOWED_ORIGINS", "valueFrom": {"configMapKeyRef": {"name": "grab-mini-config", "key": "ALLOWED_ORIGINS"}}})
 

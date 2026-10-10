@@ -19,6 +19,13 @@ Non-goals: production-grade scaling, real payments, enterprise-level security.
   - WHEN a rider submits a create-order request with valid pickup + dropoff, THE Order Service SHALL create the order with status `PENDING` and publish an `order.created` event.
   - IF pickup or dropoff is missing/invalid, THE Order Service SHALL reject the request with a 400 error and SHALL NOT publish the event.
 
+- **US-1.2**: As a rider, I want to see the price before I book, including any surge, so I am never charged more than I agreed to.
+  - WHEN a rider asks Pricing Service for a quote (pickup, dropoff, vehicle type), THE Pricing Service SHALL return a base fare, the surge multiplier of the pickup cell (1.0 to a configured maximum, rounded to 0.1), the price, and a signed `quoteId` valid for about 60 seconds.
+  - WHEN a rider books with a valid `quoteId`, THE Order Service SHALL lock the quoted price on the order and publish it in `order.created` (`surgeMultiplier`, `price`).
+  - WHEN a rider books without a quote, or with an expired one, THE Order Service SHALL read the current multiplier and lock the price at booking; IF an expired quote's multiplier has moved by more than a threshold, THE Order Service SHALL answer 409 with a new quote and SHALL NOT create the order.
+  - IF a quote is forged, damaged, or for another rider or trip, THE Order Service SHALL reject the booking with a 400.
+  - IF the multiplier cannot be read (Redis down, no key), THE system SHALL price at 1.0: pricing SHALL NOT block a booking.
+
 ### 2. Matching
 - **US-2.1**: As the system, when a new order arrives, I want to find the nearest available driver to match.
   - WHEN the Matching Service consumes `order.created`, THE Matching Service SHALL find an `AVAILABLE` driver nearest to the pickup point within a configurable radius.

@@ -127,6 +127,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | ksqlDB | 8088 | every topic above | analytics tables (`analytics` section) | Kafka (changelog topics) |
 | Notification Service | 3003 | all of the above | | WebSocket connections (per instance), Redis (routing state and Pub/Sub between instances) |
 | Auth Service | 3005 | | | none (development token issuer) |
+| Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored |
 | Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
 | `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
 

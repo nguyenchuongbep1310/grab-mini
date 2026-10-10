@@ -47,3 +47,4 @@ body {
 .tip-chip { padding: 0.4rem 0.8rem; font: inherit; border: 1px solid currentColor; border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
 .tip-chip[aria-pressed="true"] { background: var(--gm-color-primary, #00b14f); border-color: var(--gm-color-primary, #00b14f); color: #fff; }
 .tip-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.price-row { display: flex; align-items: center; justify-content: space-between; gap: var(--gm-space-3); }

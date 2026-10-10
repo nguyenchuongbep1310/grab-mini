@@ -40,6 +40,24 @@ CREATE TABLE IF NOT EXISTS orders_per_minute AS
   EMIT CHANGES;
 
 -- ---------------------------------------------------------------------------
+-- Surge pricing: per minute and vehicle type, how many orders and what
+-- multiplier they were booked at. COALESCE covers order.created messages
+-- written before schema v3 (no surgeMultiplier field: those were 1.0).
+-- Note: the orders_created stream's columns are inferred when it is first
+-- created, so a ksqlDB that already ran needs `scripts/dev.sh --reset` (or the
+-- stream dropped and recreated) to see the surge columns.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS surge_demand AS
+  SELECT COALESCE(vehicleType, 'CAR') AS vehicle_type,
+         COUNT(*) AS orders,
+         AVG(COALESCE(surgeMultiplier, 1.0)) AS avg_multiplier,
+         MAX(COALESCE(surgeMultiplier, 1.0)) AS max_multiplier
+  FROM orders_created
+  WINDOW TUMBLING (SIZE 1 MINUTE)
+  GROUP BY COALESCE(vehicleType, 'CAR')
+  EMIT CHANGES;
+
+-- ---------------------------------------------------------------------------
 -- How long matching takes: join each order.created to its order.matched
 -- (within a minute) and measure the gap between their record timestamps.
 -- ---------------------------------------------------------------------------

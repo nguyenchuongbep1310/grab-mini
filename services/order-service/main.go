@@ -28,7 +28,9 @@ import (
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/outbox"
+	"grab-mini/pkg/redisconn"
 	"grab-mini/pkg/serve"
+	"grab-mini/pkg/surge"
 	"grab-mini/pkg/tracing"
 )
 
@@ -38,6 +40,13 @@ type createOrderRequest struct {
 	Dropoff *events.LatLng `json:"dropoff"`
 	// Optional; defaults to CAR.
 	VehicleType events.VehicleType `json:"vehicleType"`
+	// Optional: the quote the rider was shown (GET /quotes on Pricing
+	// Service). Booking with it locks that price; see pricer.Price.
+	QuoteID string `json:"quoteId"`
+
+	// Set by the server once the price is settled, never read from the body.
+	surgeMultiplier float64
+	price           *float64
 }
 
 func isValidLatLng(p *events.LatLng) bool {
@@ -57,6 +66,8 @@ type server struct {
 	db    *pgxpool.Pool
 	relay *outbox.Relay
 	codec *eventcodec.Codec
+	// Settles the price of a booking; nil means no surge (tests).
+	pricer *pricer
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +113,28 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	orderID := uuid.NewString()
 	ctx := r.Context()
 
+	pr := s.pricer
+	if pr == nil {
+		pr = defaultPricer()
+	}
+	settled, err := pr.Price(ctx, req.RiderID, req, req.QuoteID)
+	var moved *conflict
+	switch {
+	case errors.As(err, &moved):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": "the price has changed", "newQuote": moved.NewQuote})
+		return
+	case errors.Is(err, errInvalidQuote):
+		http.Error(w, `{"error":"quote is invalid: request a new one"}`, http.StatusBadRequest)
+		return
+	case err != nil:
+		log.Printf("failed to price order: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	req.surgeMultiplier, req.price = settled.Multiplier, &settled.Price
+
 	event := events.OrderCreated{
 		Envelope: events.Envelope{
 			EventID: uuid.NewString(),
@@ -115,6 +148,9 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Dropoff: *req.Dropoff,
 
 		VehicleType: req.VehicleType,
+
+		SurgeMultiplier: settled.Multiplier,
+		Price:           &settled.Price,
 	}
 
 	// Encode before touching the database: if the schema registry is down
@@ -139,10 +175,17 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"orderId": orderID, "status": "PENDING"})
+	json.NewEncoder(w).Encode(map[string]any{
+		"orderId": orderID, "status": "PENDING",
+		"surgeMultiplier": settled.Multiplier, "price": settled.Price, "currency": surge.Currency,
+	})
 }
 
 func (s *server) insertOrder(ctx context.Context, orderID string, req createOrderRequest, payload []byte) error {
+	multiplier := req.surgeMultiplier
+	if multiplier == 0 {
+		multiplier = 1.0 // an order built without pricing (tests)
+	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -150,9 +193,10 @@ func (s *server) insertOrder(ctx context.Context, orderID string, req createOrde
 	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(ctx, `
-		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')`,
+		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9)`,
 		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng, req.VehicleType,
+		multiplier, req.price,
 	)
 	if err != nil {
 		return err
@@ -176,14 +220,18 @@ type orderView struct {
 	CancelledAt  *time.Time `json:"cancelledAt,omitempty"`
 	CancelledBy  string     `json:"cancelledBy,omitempty"`
 	CancelReason string     `json:"cancelReason,omitempty"`
+	// What the rider pays (VND) and the surge multiplier it includes; Price is
+	// null on orders booked before surge pricing existed.
+	SurgeMultiplier float64  `json:"surgeMultiplier"`
+	Price           *float64 `json:"price"`
 }
 
-const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, cancelled_at, cancelled_by, cancel_reason`
+const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, cancelled_at, cancelled_by, cancel_reason`
 
 func queryOrder(ctx context.Context, db *pgxpool.Pool, where string, arg string) (*orderView, error) {
 	var o orderView
 	err := db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE `+where+` ORDER BY created_at DESC LIMIT 1`, arg).
-		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.CancelledAt, &o.CancelledBy, &o.CancelReason)
+		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.SurgeMultiplier, &o.Price, &o.CancelledAt, &o.CancelledBy, &o.CancelReason)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +328,16 @@ func main() {
 
 	codec := eventcodec.New(env.SchemaRegistryURL)
 	relay := outbox.NewRelay(db, producer, outboxSource)
-	s := &server{db: db, relay: relay, codec: codec}
+	signer, err := surge.SignerFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	rdb := redisconn.MustNew(env.RedisAddr)
+	defer rdb.Close()
+	s := &server{db: db, relay: relay, codec: codec, pricer: &pricer{
+		signer: signer, mult: redisMultipliers{rdb}, tolerance: env.QuoteTolerance,
+		cellDeg: surge.CellDegrees(), now: time.Now,
+	}}
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })

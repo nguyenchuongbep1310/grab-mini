@@ -8,9 +8,11 @@ import {
   MapMarker,
   MapView,
   SegmentedControl,
+  PriceTag,
   Stat,
   StarRating,
   StatusBadge,
+  SurgeBadge,
   ToastProvider,
   TripStatusTimeline,
   useToast,
@@ -102,6 +104,13 @@ function Gallery() {
               <StarRating value={0} size="sm" label="Driver rating" />
             </div>
           </Card>
+        </Section>
+
+        <Section title="PriceTag and SurgeBadge">
+          <PriceTag amount={62000} />
+          <PriceTag size="lg" amount={87000} was={62000} />
+          <SurgeBadge multiplier={1.4} />
+          <SurgeBadge multiplier={1} />
         </Section>
 
         <Section title="StatusBadge">
