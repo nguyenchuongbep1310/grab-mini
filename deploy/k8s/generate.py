@@ -31,6 +31,7 @@ TOPICS = {
     "order.created": (12, 7 * DAY, 2),
     "order.matched": (12, 7 * DAY, 2),
     "order.no_driver_found": (6, 7 * DAY, 2),
+    "order.cancelled": (6, 7 * DAY, 2),
     "trip.status.changed": (12, 7 * DAY, 2),
     "trip.rated": (6, 7 * DAY, 2),
     "driver.location.updated": (48, 1 * DAY, 1),

@@ -34,7 +34,7 @@ func testEnv(t *testing.T) (*pgxpool.Pool, *redis.Client) {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
-	if _, err := db.Exec(ctx, `DELETE FROM outbox; DELETE FROM processed_events; DELETE FROM trips`); err != nil {
+	if _, err := db.Exec(ctx, `DELETE FROM outbox; DELETE FROM processed_events; DELETE FROM cancelled_orders; DELETE FROM trips`); err != nil {
 		t.Fatal(err)
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: addr})

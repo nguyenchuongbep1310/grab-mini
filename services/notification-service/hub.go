@@ -224,6 +224,18 @@ func (h *hub) riderForDriver(ctx context.Context, driverID string) (string, erro
 	return getOrEmpty(ctx, h.rdb, driverRiderKey(driverID))
 }
 
+// The driver an order was matched to, so order.cancelled (which names no
+// driver) can also reach them.
+func orderDriverKey(orderID string) string { return "notify:order-driver:" + orderID }
+
+func (h *hub) rememberOrderDriver(ctx context.Context, orderID, driverID string) error {
+	return h.rdb.Set(ctx, orderDriverKey(orderID), driverID, routeTTL).Err()
+}
+
+func (h *hub) driverForOrder(ctx context.Context, orderID string) (string, error) {
+	return getOrEmpty(ctx, h.rdb, orderDriverKey(orderID))
+}
+
 func (h *hub) forgetDriverRider(ctx context.Context, driverID string) error {
 	return h.rdb.Del(ctx, driverRiderKey(driverID)).Err()
 }

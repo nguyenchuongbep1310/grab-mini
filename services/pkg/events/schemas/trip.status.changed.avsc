@@ -9,6 +9,8 @@
     {"name": "orderId", "type": "string"},
     {"name": "driverId", "type": "string"},
     {"name": "status", "type": "string"},
-    {"name": "riderId", "type": "string", "default": ""}
+    {"name": "riderId", "type": "string", "default": ""},
+    {"name": "cancelledBy", "type": "string", "default": ""},
+    {"name": "reason", "type": "string", "default": ""}
   ]
 }

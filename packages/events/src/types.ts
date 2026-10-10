@@ -4,7 +4,9 @@ export interface EventEnvelope {
   occurredAt: string;
 }
 
-export type OrderStatus = "PENDING" | "MATCHED" | "NO_DRIVER";
+export type OrderStatus = "PENDING" | "MATCHED" | "NO_DRIVER" | "CANCELLED";
+/** Who cancelled a ride. Empty string on events from before cancellations were recorded. */
+export type CancelledBy = "RIDER" | "DRIVER" | "";
 export type TripStatus = "ASSIGNED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
 export type VehicleType = "CAR" | "BIKE";
 export type DriverStatus = "AVAILABLE" | "ASSIGNED" | "ON_TRIP";
@@ -31,6 +33,15 @@ export interface OrderNoDriverFound extends EventEnvelope {
   riderId: string;
 }
 
+/** The rider cancelled an order that had no driver yet (or none known to them). */
+export interface OrderCancelled extends EventEnvelope {
+  orderId: string;
+  riderId: string;
+  cancelledBy: CancelledBy;
+  /** What the rider said, or empty. */
+  reason: string;
+}
+
 export interface DriverLocationUpdated extends EventEnvelope {
   driverId: string;
   lat: number;
@@ -46,6 +57,9 @@ export interface TripStatusChanged extends EventEnvelope {
   status: TripStatus;
   /** Empty on messages from before this field existed. */
   riderId: string;
+  /** Set when status is CANCELLED; empty otherwise and on older messages. */
+  cancelledBy: CancelledBy;
+  reason: string;
 }
 
 export interface TripRated extends EventEnvelope {

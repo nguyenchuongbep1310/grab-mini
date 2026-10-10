@@ -56,28 +56,32 @@ type server struct {
 	codec *eventcodec.Codec
 }
 
-func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events.TripStatus) ([]byte, error) {
-	return s.codec.Encode(ctx, events.TopicTripStatusChanged, events.TripStatusChanged{
+func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events.TripStatus, cancel ...cancelInfo) ([]byte, error) {
+	evt := events.TripStatusChanged{
 		Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: time.Now().UTC().Format(time.RFC3339)},
 		TripID:   t.ID,
 		OrderID:  t.OrderID,
 		DriverID: t.DriverID,
 		Status:   status,
 		RiderID:  t.RiderID,
-	})
+	}
+	if len(cancel) > 0 {
+		evt.CancelledBy, evt.Reason = cancel[0].By, cancel[0].Reason
+	}
+	return s.codec.Encode(ctx, events.TopicTripStatusChanged, evt)
 }
 
 // transitionWithEvent moves a trip to targetStatus and queues its event in
 // one transaction, so the state and the announcement can't disagree. It
 // reports false (and queues nothing) if the trip wasn't in one of fromStatuses.
-func (s *server) transitionWithEvent(ctx context.Context, id string, fromStatuses []events.TripStatus, targetStatus events.TripStatus, field timestampField, key, payload []byte) (bool, error) {
+func (s *server) transitionWithEvent(ctx context.Context, id string, fromStatuses []events.TripStatus, targetStatus events.TripStatus, field timestampField, key, payload []byte, cancel ...cancelInfo) (bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
 
-	transitioned, err := transitionTrip(ctx, tx, id, fromStatuses, targetStatus, field)
+	transitioned, err := transitionTrip(ctx, tx, id, fromStatuses, targetStatus, field, cancel...)
 	if err != nil || !transitioned {
 		return false, err
 	}
@@ -183,7 +187,8 @@ func (s *server) handleComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 // US-4.3: cancelling is allowed from ASSIGNED or IN_PROGRESS, never once
-// COMPLETED.
+// COMPLETED. The caller's role says who cancelled (a rider or the driver),
+// and an optional {"reason": "..."} body says why; both go out on the event.
 func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	s.handleTransition(w, r, isParty,
 		[]events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress},
@@ -208,6 +213,15 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 	ctx := r.Context()
 	id := r.PathValue("id")
 
+	var cancel []cancelInfo
+	if targetStatus == events.TripStatusCancelled {
+		info, ok := readCancelInfo(w, r, c)
+		if !ok {
+			return
+		}
+		cancel = append(cancel, info)
+	}
+
 	t, err := getTripByID(ctx, s.db, id)
 	if errors.Is(err, errTripNotFound) || (err == nil && !mayDo(c, t)) {
 		http.Error(w, `{"error":"trip not found"}`, http.StatusNotFound)
@@ -228,14 +242,14 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 	// Encode before changing any state: if the schema registry is down we
 	// refuse the request rather than move the trip without telling anyone.
 	// The event is queued with the state change (see transitionWithEvent).
-	payload, err := s.encodeStatusChanged(ctx, t, targetStatus)
+	payload, err := s.encodeStatusChanged(ctx, t, targetStatus, cancel...)
 	if err != nil {
 		log.Printf("failed to encode trip.status.changed: %v", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	transitioned, err := s.transitionWithEvent(ctx, id, fromStatuses, targetStatus, field, []byte(t.ID), payload)
+	transitioned, err := s.transitionWithEvent(ctx, id, fromStatuses, targetStatus, field, []byte(t.ID), payload, cancel...)
 	if err != nil {
 		log.Printf("failed to transition trip: %v", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -429,6 +443,7 @@ func main() {
 	background.Go(func() { relay.Run(ctx) })
 	background.Go(func() { runOrderMatchedConsumer(ctx, env, db, rdb, codec) })
 	background.Go(func() { runDriverReleaseConsumer(ctx, env, db, rdb, codec) })
+	background.Go(func() { runOrderCancelledConsumer(ctx, env, s, codec) })
 
 	verifier, err := auth.VerifierFromEnv()
 	if err != nil {

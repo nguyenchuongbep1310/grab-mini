@@ -1,4 +1,4 @@
-import type { TripStatus, VehicleType } from "@grab-mini/events";
+import type { CancelledBy, OrderStatus, TripStatus, VehicleType } from "@grab-mini/events";
 import { forgetToken, getToken, isSignedIn } from "./auth";
 
 export type { VehicleType };
@@ -20,8 +20,12 @@ export interface Order {
   pickup: LatLng;
   dropoff: LatLng;
   vehicleType: VehicleType;
-  /** PENDING until matching reports back, then MATCHED or NO_DRIVER. */
-  status: "PENDING" | "MATCHED" | "NO_DRIVER";
+  /** PENDING until matching reports back, then MATCHED or NO_DRIVER; CANCELLED if the ride was cancelled. */
+  status: OrderStatus;
+  /** Set once CANCELLED. */
+  cancelledAt?: string;
+  cancelledBy?: CancelledBy;
+  cancelReason?: string;
 }
 
 export interface Trip {
@@ -33,6 +37,9 @@ export interface Trip {
   status: TripStatus;
   /** Stars the rider gave, once they have. */
   rating?: number;
+  /** Set once CANCELLED. */
+  cancelledBy?: CancelledBy;
+  cancelReason?: string;
 }
 
 export interface DriverRating {
@@ -108,8 +115,30 @@ export async function waitForTripByOrder(orderId: string, attempts = 8, delayMs 
 
 export type TripAction = "pickup" | "complete" | "cancel";
 
-export function tripAction(tripId: string, action: TripAction): Promise<{ tripId: string; status: TripStatus }> {
-  return request(`${TRIP_API}/trips/${tripId}/${action}`, { method: "POST" });
+/** `reason` is only used by "cancel": an optional note on why. */
+export function tripAction(
+  tripId: string,
+  action: TripAction,
+  reason?: string,
+): Promise<{ tripId: string; status: TripStatus }> {
+  const note = action === "cancel" && reason ? reason : undefined;
+  return request(`${TRIP_API}/trips/${tripId}/${action}`, {
+    method: "POST",
+    ...(note && { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: note }) }),
+  });
+}
+
+/**
+ * Cancels an order that has no driver yet. If a driver was matched in the
+ * meantime the server answers 409 (cancel the trip instead); repeating the
+ * call for an order already cancelled succeeds.
+ */
+export function cancelOrder(orderId: string, reason?: string): Promise<Order> {
+  return request(`${ORDER_API}/orders/${orderId}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
 }
 
 export function rateTrip(tripId: string, riderId: string, stars: number, comment = ""): Promise<{ tripId: string; stars: number }> {

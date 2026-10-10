@@ -47,8 +47,9 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | `order.created` | `orderId` | 3 | |
 | `order.matched` | `orderId` | 3 | |
 | `order.no_driver_found` | `orderId` | 3 | |
+| `order.cancelled` | `orderId` | 3 | Published by Order Service (via the outbox) when a rider cancels a `PENDING` order. Fields: `riderId`, `cancelledBy`, `reason` (all defaulted, so the schema stays backward compatible). Consumed by Matching (Redis key `order:{id}:cancelled`, 24h), Trip Service (`trip-order-cancelled-group`) and Notification |
 | `driver.location.updated` | `driverId` | 3 | Highest throughput; keyed by driver to preserve per-driver ordering |
-| `trip.status.changed` | `tripId` | 3 | |
+| `trip.status.changed` | `tripId` | 3 | On `CANCELLED` also carries `cancelledBy` (`RIDER`/`DRIVER`) and `reason`; Order Service consumes it to move a `MATCHED` order to `CANCELLED` |
 | `trip.rated` | `driverId` | 3 | Published by Trip Service when a rider rates a COMPLETED trip (once per trip) |
 | `*.DLQ` | same as source topic | 1 | Dead-letter topic per topic above |
 
@@ -58,13 +59,14 @@ Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so
 
 **Order** (Postgres)
 ```
-id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER], createdAt
-(status starts PENDING and is moved by Order Service's own consumer of the matching outcomes)
+id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER|CANCELLED], createdAt, cancelledAt, cancelledBy, cancelReason
+(status starts PENDING and is moved by Order Service's own consumer of the matching outcomes; `POST /orders/{id}/cancel` moves PENDING -> CANCELLED with a conditional UPDATE, so it and a concurrent order.matched cannot both win; trip cancellations move MATCHED -> CANCELLED through a separate function)
 ```
 
 **Trip** (Postgres)
 ```
-id, orderId, driverId, status[ASSIGNED|IN_PROGRESS|COMPLETED|CANCELLED], startedAt, completedAt, rating, ratingComment, ratedAt
+id, orderId, driverId, status[ASSIGNED|IN_PROGRESS|COMPLETED|CANCELLED], startedAt, completedAt, cancelledAt, cancelledBy, cancelReason, rating, ratingComment, ratedAt
+(cancelled_orders: order ids whose order.cancelled was seen, so a late order.matched creates no trip; both consumers take a per-order advisory lock)
 ```
 
 **Driver status** (Redis)

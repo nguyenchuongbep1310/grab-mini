@@ -60,7 +60,7 @@ spec:
   class: io.confluent.connect.s3.S3SinkConnector
   tasksMax: 6
   config:
-    topics: order.created,order.matched,order.no_driver_found,trip.status.changed,trip.rated
+    topics: order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,trip.rated
     s3.bucket.name: grab-mini-event-archive            # edit
     s3.region: ap-southeast-1                           # edit
     storage.class: io.confluent.connect.s3.storage.S3Storage
