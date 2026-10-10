@@ -50,8 +50,8 @@ CREATE TABLE IF NOT EXISTS orders_per_minute AS
 CREATE TABLE IF NOT EXISTS surge_demand AS
   SELECT COALESCE(vehicleType, 'CAR') AS vehicle_type,
          COUNT(*) AS orders,
-         AVG(COALESCE(surgeMultiplier, 1.0)) AS avg_multiplier,
-         MAX(COALESCE(surgeMultiplier, 1.0)) AS max_multiplier
+         AVG(COALESCE(surgeMultiplier, CAST(1.0 AS DOUBLE))) AS avg_multiplier,
+         MAX(COALESCE(surgeMultiplier, CAST(1.0 AS DOUBLE))) AS max_multiplier
   FROM orders_created
   WINDOW TUMBLING (SIZE 1 MINUTE)
   GROUP BY COALESCE(vehicleType, 'CAR')
