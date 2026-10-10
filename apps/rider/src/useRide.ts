@@ -26,6 +26,9 @@ export interface RideState {
   driverPos: LatLng | null;
   /** First driver position seen, so the map fits it once instead of on every update. */
   driverAnchor: LatLng | null;
+  /** What the rider pays (VND), locked at booking; null until booked. */
+  price: number | null;
+  surgeMultiplier: number;
 }
 
 export const initialRide: RideState = {
@@ -38,6 +41,8 @@ export const initialRide: RideState = {
   vehicleType: "CAR",
   driverPos: null,
   driverAnchor: null,
+  price: null,
+  surgeMultiplier: 1,
 };
 
 /** A ride that was already under way when the page opened. */
@@ -48,6 +53,8 @@ export interface ActiveRide {
   dropoff: LatLng;
   driverId?: string;
   tripId?: string;
+  price?: number | null;
+  surgeMultiplier?: number;
 }
 
 /** How a search that was still pending turned out (found by asking, not by a push). */
@@ -61,7 +68,7 @@ type Action =
   | { type: "restored"; ride: ActiveRide }
   | { type: "outcome"; orderId: string; outcome: Outcome }
   | { type: "bookStarted" }
-  | { type: "bookSucceeded"; orderId: string }
+  | { type: "bookSucceeded"; orderId: string; price?: number | null; surgeMultiplier?: number }
   | { type: "bookFailed" }
   | { type: "tripLoaded"; tripId: string }
   | { type: "notification"; message: NotificationMessage }
@@ -99,6 +106,8 @@ function reduce(state: RideState, action: Action): RideState {
         dropoff: ride.dropoff,
         driverId: ride.driverId ?? null,
         tripId: ride.tripId ?? null,
+        price: ride.price ?? null,
+        surgeMultiplier: ride.surgeMultiplier ?? 1,
       });
     }
 
@@ -120,9 +129,10 @@ function reduce(state: RideState, action: Action): RideState {
     case "bookSucceeded":
       // The match can be pushed over the WebSocket before the POST response
       // lands, in which case the ride has already moved past "booking".
+      const priced = { price: action.price ?? null, surgeMultiplier: action.surgeMultiplier ?? 1 };
       return state.phase === "booking"
-        ? moveTo(state, "searching", { orderId: action.orderId })
-        : { ...state, orderId: state.orderId ?? action.orderId };
+        ? moveTo(state, "searching", { orderId: action.orderId, ...priced })
+        : { ...state, orderId: state.orderId ?? action.orderId, ...priced };
 
     case "bookFailed":
       return moveTo(state, "idle");

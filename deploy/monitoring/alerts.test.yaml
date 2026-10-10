@@ -286,6 +286,57 @@ tests:
         alertname: NoDriverRatioHigh
         exp_alerts: []
 
+  - name: surge multipliers that can't be read are a ticket
+    interval: 1m
+    input_series:
+      - series: 'pricing_fail_open_total'
+        values: '0+1x30'
+      - series: 'orders_surge_fail_open_total'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SurgePricingFailOpen
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Surge multipliers can't be read: prices fall back to 1.0"
+              runbook: "docs/runbook.md#surge-pricing"
+
+  - name: a healthy pricing service raises nothing
+    interval: 1m
+    input_series:
+      - series: 'pricing_fail_open_total'
+        values: '0+0x30'
+      - series: 'orders_surge_fail_open_total'
+        values: '0+0x30'
+      - series: 'pricing_ticks_total'
+        values: '0+12x30'
+      - series: 'orders_created_total'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SurgePricingFailOpen
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SurgeSamplerStalled
+        exp_alerts: []
+
+  - name: orders without any sampling means surge is off
+    interval: 1m
+    input_series:
+      - series: 'pricing_ticks_total'
+        values: '5+0x30'
+      - series: 'orders_created_total'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SurgeSamplerStalled
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Pricing Service is not sampling supply: surge is off"
+              runbook: "docs/runbook.md#surge-pricing"
+
   - name: sustained booking errors burn the error budget
     interval: 1m
     input_series:

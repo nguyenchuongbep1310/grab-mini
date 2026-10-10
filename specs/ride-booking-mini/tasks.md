@@ -57,6 +57,7 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
+- [x] Surge pricing — `services/pkg/surge` (cells, multiplier formula, EMA, signed quotes), Pricing Service (`GET /quotes`, demand from `order.created`, supply sampler, Redis multipliers with TTL, fail open), `order.created` Avro v3 (`surgeMultiplier`, `price`), Order Service migration 00006 + quote honouring / 409 re-quote, Rider App `useQuote` + `PriceTag`/`SurgeBadge`, ops panel, k8s/ACL/alerts, runbook
 - [x] Multiple vehicle types (car/bike) affecting matching — `vehicleType` as Avro schema v2 (defaulted), vehicle-aware atomic claim, `SegmentedControl` in the design system
 - [x] Kafka Streams/ksqlDB for analytics instead of manual consumers — ksqlDB (`ksql/statements.sql`) plus an Ops dashboard (`apps/ops`)
 - [x] Schema Registry (Avro/Protobuf) instead of plain JSON — learn schema evolution (Avro; `services/pkg/eventcodec`)

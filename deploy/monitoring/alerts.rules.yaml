@@ -139,6 +139,26 @@ groups:
           description: "Either supply is short, or driver locations/status are wrong (stale Redis, a stuck lease)."
           runbook: "docs/runbook.md#slow-matching"
 
+      - alert: SurgePricingFailOpen
+        # Pricing never blocks a booking: when Redis can't be read the price falls
+        # back to 1.0. That is safe for riders, but it means surge is off.
+        expr: sum(rate(orders_surge_fail_open_total[5m])) + sum(rate(pricing_fail_open_total[5m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Surge multipliers can't be read: prices fall back to 1.0"
+          runbook: "docs/runbook.md#surge-pricing"
+
+      - alert: SurgeSamplerStalled
+        # Pricing Service samples supply every few seconds. If it stopped while
+        # orders keep coming, multipliers expire after 30s and surge silently turns off.
+        expr: sum(rate(pricing_ticks_total[5m])) < 0.05 and on() sum(rate(orders_created_total[10m])) > 0.05
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Pricing Service is not sampling supply: surge is off"
+          runbook: "docs/runbook.md#surge-pricing"
+
       - alert: OrderCreationErrorBudgetBurn
         # SLO 99.9% of POST /orders succeed. Page when the budget burns 14.4x too
         # fast (2% of a 30-day budget in an hour) over both the last 5m and 1h,

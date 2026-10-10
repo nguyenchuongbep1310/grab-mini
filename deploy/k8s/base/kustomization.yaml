@@ -22,5 +22,6 @@ resources:
 - services/matching-service.yaml
 - services/notification-service.yaml
 - services/order-service.yaml
+- services/pricing-service.yaml
 - services/rating-service.yaml
 - services/trip-service.yaml

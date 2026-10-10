@@ -220,6 +220,29 @@ Mã 5xx nghĩa là một trong ba thứ đó hỏng. Phân biệt bằng log c�
 - **401 tăng đột ngột** (không phải 5xx, nhưng người dùng thấy lỗi): `JWT_SECRET` không đồng nhất giữa các service
   hoặc token hết hạn hàng loạt. Tất cả service verify và nhà phát hành token phải dùng cùng một secret.
 
+## Surge pricing
+
+**Cảnh báo:** `SurgePricingFailOpen` (không đọc được hệ số surge, giá rơi về 1.0), `SurgeSamplerStalled` (pricing-service ngừng lấy mẫu cung/cầu).
+
+Surge **không bao giờ chặn đặt xe**: mọi lỗi đọc Redis đều cho hệ số 1.0, nên hậu quả của sự cố là *giá không tăng*, không phải đặt xe lỗi.
+
+1. **Xem hệ số hiện tại của một ô:** ô = `floor(lat/độ):floor(lng/độ)` (độ = `SURGE_CELL_DEGREES`, hoặc `GEO_SHARD_DEGREES`, mặc định 0.05).
+   ```bash
+   redis-cli SMEMBERS surge:cells                      # các ô đang có nhu cầu, dạng CAR|215:2134
+   redis-cli GET surge:mult:CAR:215:2134               # hệ số; không có key = 1.0
+   redis-cli TTL surge:mult:CAR:215:2134               # tối đa 30 giây, được làm mới mỗi 5 giây
+   redis-cli MGET surge:demand:CAR:215:2134:<phút unix/60>
+   ```
+2. **`SurgePricingFailOpen`:** Redis chậm/đứt (timeout đọc 300 ms). Xem [Pods not ready](#pods-not-ready), `/readyz` của pricing-service và order-service.
+3. **`SurgeSamplerStalled`:** `pricing_ticks_total` không tăng. Chỉ một instance giữ khóa `surge:sampler:lock` mỗi chu kỳ; kiểm tra pod
+   pricing-service có chạy không, log `surge sample failed`, và `pricing_sample_errors_total` (lỗi `driverlocation.Search`, ví dụ bán kính vượt `maxCells` khi `GEO_SHARD_DEGREES` quá nhỏ).
+   Consumer `pricing-service-group` trễ làm *cầu* bị đếm thiếu: xem [Consumer lag](#consumer-lag).
+4. **Rider báo 409 khi đặt xe:** đúng thiết kế. Báo giá đã hết hạn và hệ số đã lệch quá `SURGE_QUOTE_TOLERANCE` (0.2); app hiển thị giá mới để xác nhận.
+   Nhiều **400 "quote is invalid"** nghĩa là `QUOTE_SECRET` khác nhau giữa order-service và pricing-service (hoặc có người giả mạo báo giá).
+5. **Giá cao bất thường:** `pricing_surge_multiplier_max` / `pricing_surging_cells`; trần là `SURGE_MAX` (3.0). Muốn tắt surge khẩn cấp:
+   đặt `SURGE_MAX=1` cho pricing-service rồi restart, hoặc `redis-cli DEL` các key `surge:mult:*` (chúng tự tạo lại ở lần lấy mẫu kế tiếp nếu chưa đổi cấu hình).
+6. **Dữ liệu cũ:** đơn tạo trước migration 00006 có `price` NULL, `surge_multiplier` 1.0. Tin `order.created` cũ (schema v2) được đọc với `surgeMultiplier` 1.0.
+
 ## Pods not ready
 
 **Cảnh báo:** `DeploymentReplicasUnavailable`.

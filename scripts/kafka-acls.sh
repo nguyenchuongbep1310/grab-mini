@@ -42,6 +42,7 @@ declare -A PRODUCES=(
 declare -A CONSUMES=(
   [order-service]="order-service-group=order.matched,order.no_driver_found"
   [matching-service]="matching-service-group=order.created"
+  [pricing-service]="pricing-service-group=order.created"
   [trip-service]="trip-service-group=order.matched;trip-driver-release-group=trip.status.changed"
   [driver-location-service]="driver-location-service-group=driver.location.updated"
   [rating-service]="rating-service-group=trip.rated"

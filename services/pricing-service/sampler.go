@@ -32,7 +32,7 @@ var (
 		Help: "Cell samples that failed (Redis or supply lookup); the cell keeps its old multiplier until it expires.",
 	})
 	sampleTicks = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "pricing_sample_ticks_total",
+		Name: "pricing_ticks_total",
 		Help: "Sampling rounds this instance ran as the leader.",
 	})
 )

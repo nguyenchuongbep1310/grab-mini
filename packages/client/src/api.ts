@@ -8,6 +8,7 @@ export type { VehicleType };
 const ORDER_API = "/order-api";
 const TRIP_API = "/trip-api";
 const RATING_API = "/rating-api";
+const PRICING_API = "/pricing-api";
 
 export interface LatLng {
   lat: number;
@@ -22,6 +23,21 @@ export interface Order {
   vehicleType: VehicleType;
   /** PENDING until matching reports back, then MATCHED or NO_DRIVER. */
   status: "PENDING" | "MATCHED" | "NO_DRIVER";
+  /** Surge multiplier the price includes; 1 when there was no surge. */
+  surgeMultiplier?: number;
+  /** Price locked at booking (VND); null for orders from before surge pricing. */
+  price?: number | null;
+}
+
+/** A price offer from Pricing Service, good for booking until it expires. */
+export interface Quote {
+  quoteId: string;
+  baseFare: number;
+  multiplier: number;
+  price: number;
+  currency: string;
+  /** ISO time. */
+  expiresAt: string;
 }
 
 export interface Trip {
@@ -46,6 +62,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The parsed response body, e.g. `{ newQuote }` on a 409 from POST /orders. */
+    readonly body: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -65,21 +83,45 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     res = await send(url, init, await getToken());
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status);
+  if (!res.ok) throw new ApiError(body.error ?? `Request failed (${res.status})`, res.status, body);
   return body as T;
 }
 
+/**
+ * Books a ride. With a quoteId the price shown in the quote is honoured; if the
+ * quote has expired and the price moved, this rejects with an ApiError of
+ * status 409 whose `body.newQuote` is the price to confirm (see `newQuoteOf`).
+ */
 export function createOrder(
   riderId: string,
   pickup: LatLng,
   dropoff: LatLng,
   vehicleType: VehicleType,
-): Promise<{ orderId: string }> {
+  quoteId?: string,
+): Promise<{ orderId: string; price?: number; surgeMultiplier?: number }> {
   return request(`${ORDER_API}/orders`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ riderId, pickup, dropoff, vehicleType }),
+    body: JSON.stringify({ riderId, pickup, dropoff, vehicleType, ...(quoteId ? { quoteId } : {}) }),
   });
+}
+
+/** The fresh quote carried by a 409 from createOrder, or null if err isn't one. */
+export function newQuoteOf(err: unknown): Quote | null {
+  if (err instanceof ApiError && err.status === 409 && err.body.newQuote) return err.body.newQuote as Quote;
+  return null;
+}
+
+/** Price for a trip, with the current surge multiplier at the pickup. */
+export function getQuote(pickup: LatLng, dropoff: LatLng, vehicleType: VehicleType): Promise<Quote> {
+  const q = new URLSearchParams({
+    pickupLat: String(pickup.lat),
+    pickupLng: String(pickup.lng),
+    dropoffLat: String(dropoff.lat),
+    dropoffLng: String(dropoff.lng),
+    vehicleType,
+  });
+  return request(`${PRICING_API}/quotes?${q}`);
 }
 
 export function getOrder(orderId: string): Promise<Order> {

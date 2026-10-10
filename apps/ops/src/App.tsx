@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, StarRating, Stat } from "@grab-mini/ui";
+import { Card, StarRating, Stat, SurgeBadge } from "@grab-mini/ui";
 import { loadSnapshot, type Snapshot } from "./stats";
 
 const REFRESH_MS = 3000;
@@ -129,6 +129,30 @@ function Dashboard({ s }: { s: Snapshot }) {
                     <td>{v.matches}</td>
                     <td>{(v.avgMs / 1000).toFixed(2)}s</td>
                     <td>{(v.maxMs / 1000).toFixed(2)}s</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
+
+        <Card>
+          <h2>Surge pricing</h2>
+          {s.surge.length === 0 ? (
+            <p className="ops__empty">No surge data yet.</p>
+          ) : (
+            <table className="table">
+              <thead>
+                <tr><th>Minute</th><th>Vehicle</th><th>Orders</th><th>Avg</th><th>Peak</th></tr>
+              </thead>
+              <tbody>
+                {s.surge.map((r) => (
+                  <tr key={`${r.minute}-${r.vehicle}`}>
+                    <td>{clock(r.minute)}</td>
+                    <td>{r.vehicle === "BIKE" ? "Bike" : "Car"}</td>
+                    <td>{r.orders}</td>
+                    <td>x{r.avgMultiplier.toFixed(1)}</td>
+                    <td>{r.maxMultiplier > 1 ? <SurgeBadge multiplier={r.maxMultiplier} label="" /> : "x1.0"}</td>
                   </tr>
                 ))}
               </tbody>

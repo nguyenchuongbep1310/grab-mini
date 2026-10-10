@@ -11,10 +11,12 @@ export interface Snapshot {
   ordersPerMinute: Array<{ minute: number; car: number; bike: number }>;
   matchByVehicle: Array<{ vehicle: string; matches: number; avgMs: number; maxMs: number }>;
   ratings: Array<{ driverId: string; average: number; count: number }>;
+  /** Last few minutes of surge, newest first; empty if the surge_demand table doesn't exist yet. */
+  surge: Array<{ minute: number; vehicle: string; orders: number; avgMultiplier: number; maxMultiplier: number }>;
 }
 
 export async function loadSnapshot(): Promise<Snapshot> {
-  const [matched, noDriver, matchStats, tripStatus, locations, perMinute, ratings] = await Promise.all([
+  const [matched, noDriver, matchStats, tripStatus, locations, perMinute, ratings, surge] = await Promise.all([
     pull("SELECT ORDERS FROM matched_total;"),
     pull("SELECT ORDERS FROM no_driver_total;"),
     pull("SELECT VEHICLE_TYPE, MATCHES, AVG_MATCH_MS, MAX_MATCH_MS FROM match_stats;"),
@@ -22,6 +24,8 @@ export async function loadSnapshot(): Promise<Snapshot> {
     pull("SELECT WINDOWSTART, UPDATES FROM location_updates_per_minute;"),
     pull("SELECT VEHICLE_TYPE, WINDOWSTART, ORDERS FROM orders_per_minute;"),
     pull("SELECT DRIVER_ID, RATINGS, AVG_STARS FROM driver_rating_stats;"),
+    // Optional: a ksqlDB set up before surge pricing has no such table.
+    pull("SELECT VEHICLE_TYPE, WINDOWSTART, ORDERS, AVG_MULTIPLIER, MAX_MULTIPLIER FROM surge_demand;").catch((): Row[] => []),
   ]);
 
   const tripCount = (status: string) => num(tripStatus.find((r) => r.STATUS === status)?.CHANGES);
@@ -60,5 +64,15 @@ export async function loadSnapshot(): Promise<Snapshot> {
     ratings: ratings
       .map((r) => ({ driverId: String(r.DRIVER_ID), average: num(r.AVG_STARS), count: num(r.RATINGS) }))
       .sort((a, b) => b.average - a.average || b.count - a.count),
+    surge: surge
+      .map((r) => ({
+        minute: num(r.WINDOWSTART),
+        vehicle: String(r.VEHICLE_TYPE),
+        orders: num(r.ORDERS),
+        avgMultiplier: num(r.AVG_MULTIPLIER),
+        maxMultiplier: num(r.MAX_MULTIPLIER),
+      }))
+      .sort((a, b) => b.minute - a.minute)
+      .slice(0, 6),
   };
 }

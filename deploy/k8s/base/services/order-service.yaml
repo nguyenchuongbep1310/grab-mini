@@ -77,6 +77,8 @@ spec:
           value: /etc/secrets/db/url
         - name: JWT_SECRET_FILE
           value: /etc/secrets/jwt/secret
+        - name: QUOTE_SECRET_FILE
+          value: /etc/secrets/quote/secret
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user
@@ -89,6 +91,9 @@ spec:
           readOnly: true
         - name: jwt
           mountPath: /etc/secrets/jwt
+          readOnly: true
+        - name: quote
+          mountPath: /etc/secrets/quote
           readOnly: true
         startupProbe:
           httpGet:
@@ -148,6 +153,12 @@ spec:
       - name: jwt
         secret:
           secretName: grab-mini-jwt
+          items:
+          - key: secret
+            path: secret
+      - name: quote
+        secret:
+          secretName: grab-mini-quote
           items:
           - key: secret
             path: secret

@@ -15,6 +15,10 @@ export interface OrderCreated extends EventEnvelope {
   pickup: { lat: number; lng: number };
   dropoff: { lat: number; lng: number };
   vehicleType: VehicleType;
+  /** Surge multiplier the order was booked at (schema v3); 1 when absent. */
+  surgeMultiplier?: number;
+  /** Price locked at booking, in VND (schema v3); null/absent on older messages. */
+  price?: number | null;
 }
 
 export interface OrderMatched extends EventEnvelope {
