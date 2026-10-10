@@ -55,6 +55,10 @@ type OrderCreated struct {
 	Dropoff LatLng `json:"dropoff" avro:"dropoff"`
 	// Added in schema v2 (default CAR), so older messages still decode.
 	VehicleType VehicleType `json:"vehicleType" avro:"vehicleType"`
+	// Added in schema v3. SurgeMultiplier is 1.0 and Price nil on older
+	// messages. Price is in VND, locked when the order was booked.
+	SurgeMultiplier float64  `json:"surgeMultiplier" avro:"surgeMultiplier"`
+	Price           *float64 `json:"price" avro:"price"`
 }
 
 type OrderMatched struct {

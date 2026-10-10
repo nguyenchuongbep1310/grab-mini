@@ -298,3 +298,23 @@ func TestClaimFirstForOrderWithNoClaimableDriver(t *testing.T) {
 		t.Errorf("no match should be recorded, got %q", d)
 	}
 }
+
+func TestAvailableVehiclesListsOnlyAvailableDrivers(t *testing.T) {
+	rdb := newClient(t)
+	ctx := context.Background()
+	seed(t, rdb, "car-free", "CAR", Available)
+	seed(t, rdb, "bike-free", "BIKE", Available)
+	seed(t, rdb, "car-busy", "CAR", OnTrip)
+	seed(t, rdb, "car-assigned", "CAR", Assigned)
+
+	got, err := AvailableVehicles(ctx, rdb, []string{"car-free", "bike-free", "car-busy", "car-assigned", "ghost"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["car-free"] != "CAR" || got["bike-free"] != "BIKE" {
+		t.Errorf("got %v, want the two AVAILABLE drivers with their vehicles", got)
+	}
+	if got, err := AvailableVehicles(ctx, rdb, nil); err != nil || len(got) != 0 {
+		t.Errorf("no ids: got %v, %v", got, err)
+	}
+}

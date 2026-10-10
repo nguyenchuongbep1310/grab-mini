@@ -12,6 +12,8 @@
       "fields": [{"name": "lat", "type": "double"}, {"name": "lng", "type": "double"}]
     }},
     {"name": "dropoff", "type": "LatLng"},
-    {"name": "vehicleType", "type": "string", "default": "CAR"}
+    {"name": "vehicleType", "type": "string", "default": "CAR"},
+    {"name": "surgeMultiplier", "type": "double", "default": 1.0},
+    {"name": "price", "type": ["null", "double"], "default": null}
   ]
 }

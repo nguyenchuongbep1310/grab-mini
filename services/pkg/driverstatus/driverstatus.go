@@ -54,6 +54,30 @@ func SetVehicle(ctx context.Context, rdb *redis.Client, driverID, vehicle string
 	return rdb.Set(ctx, vehicleKey(driverID), vehicle, 0).Err()
 }
 
+// AvailableVehicles returns, for each of driverIDs that is AVAILABLE, the
+// vehicle they drive ("" if unrecorded), in one round trip. Drivers that are
+// assigned, on a trip or unknown are left out. Pricing Service uses it to
+// count the supply of each vehicle type.
+func AvailableVehicles(ctx context.Context, rdb *redis.Client, driverIDs []string) (map[string]string, error) {
+	pipe := rdb.Pipeline()
+	statuses := make([]*redis.StringCmd, len(driverIDs))
+	vehicles := make([]*redis.StringCmd, len(driverIDs))
+	for i, id := range driverIDs {
+		statuses[i] = pipe.Get(ctx, key(id))
+		vehicles[i] = pipe.Get(ctx, vehicleKey(id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for i, id := range driverIDs {
+		if statuses[i].Val() == string(Available) {
+			out[id] = vehicles[i].Val()
+		}
+	}
+	return out, nil
+}
+
 // claimScript atomically moves a driver from expectedCurrent to newStatus,
 // but only if they drive the wanted vehicle, so concurrent callers (e.g.
 // two Matching Service instances) can never both succeed for the same driver.

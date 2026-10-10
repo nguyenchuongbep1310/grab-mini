@@ -11,6 +11,7 @@ use (
 	./services/location-gateway
 	./services/notification-service
 	./services/order-service
+	./services/pricing-service
 	./services/pkg/driverlocation
 	./services/pkg/redisconn
 	./services/pkg/auth
@@ -26,6 +27,7 @@ use (
 	./services/pkg/outbox
 	./services/pkg/secret
 	./services/pkg/serve
+	./services/pkg/surge
 	./services/pkg/tracing
 	./services/rating-service
 	./services/trip-service
