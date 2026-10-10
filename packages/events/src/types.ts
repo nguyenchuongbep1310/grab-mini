@@ -56,4 +56,7 @@ export interface TripRated extends EventEnvelope {
   /** 1 to 5. */
   stars: number;
   comment: string;
+  /** Recorded tip in whole VND; 0 or absent when there is none. */
+  tipAmount?: number;
+  currency?: string;
 }

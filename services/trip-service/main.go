@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -262,9 +264,32 @@ type rateRequest struct {
 	RiderID string `json:"riderId"`
 	Stars   int    `json:"stars"`
 	Comment string `json:"comment"`
+	// TipAmount is optional, whole VND (0 to maxTip). It is recorded only.
+	TipAmount int64 `json:"tipAmount"`
 }
 
-const maxCommentLength = 500
+const (
+	maxCommentLength = 500
+	maxTipAmount     = 1_000_000 // VND
+)
+
+// normalizeRating trims the comment in place and returns a client-facing
+// error message, or "" when the request is valid.
+func normalizeRating(req *rateRequest) string {
+	req.Comment = strings.TrimSpace(req.Comment)
+	if req.Stars < 1 || req.Stars > 5 || utf8.RuneCountInString(req.Comment) > maxCommentLength {
+		return "stars (1 to 5) are required; comment is at most 500 characters"
+	}
+	for _, r := range req.Comment {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return "comment contains control characters"
+		}
+	}
+	if req.TipAmount < 0 || req.TipAmount > maxTipAmount {
+		return "tipAmount must be a whole number from 0 to 1000000"
+	}
+	return ""
+}
 
 // A rider rates a completed trip once, from 1 to 5 stars. There's no real
 // authentication in this project, so riderId comes from the request (the
@@ -280,8 +305,8 @@ func (s *server) handleRateTrip(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 		return
 	}
-	if req.Stars < 1 || req.Stars > 5 || utf8.RuneCountInString(req.Comment) > maxCommentLength {
-		http.Error(w, `{"error":"stars (1 to 5) are required; comment is at most 500 characters"}`, http.StatusBadRequest)
+	if msg := normalizeRating(&req); msg != "" {
+		http.Error(w, `{"error":"`+msg+`"}`, http.StatusBadRequest)
 		return
 	}
 	// The rider is whoever the token says; a body naming someone else is refused.
@@ -320,13 +345,15 @@ func (s *server) handleRateTrip(w http.ResponseWriter, r *http.Request) {
 
 	// Encode before saving, like status changes: no rating without an event.
 	payload, err := s.codec.Encode(ctx, events.TopicTripRated, events.TripRated{
-		Envelope: events.Envelope{EventID: uuid.NewString(), OccurredAt: time.Now().UTC().Format(time.RFC3339)},
-		TripID:   t.ID,
-		OrderID:  t.OrderID,
-		RiderID:  req.RiderID,
-		DriverID: t.DriverID,
-		Stars:    req.Stars,
-		Comment:  req.Comment,
+		Envelope:  events.Envelope{EventID: uuid.NewString(), OccurredAt: time.Now().UTC().Format(time.RFC3339)},
+		TripID:    t.ID,
+		OrderID:   t.OrderID,
+		RiderID:   req.RiderID,
+		DriverID:  t.DriverID,
+		Stars:     req.Stars,
+		Comment:   req.Comment,
+		TipAmount: req.TipAmount,
+		Currency:  "VND",
 	})
 	if err != nil {
 		log.Printf("failed to encode trip.rated: %v", err)
@@ -347,7 +374,7 @@ func (s *server) handleRateTrip(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{"tripId": t.ID, "stars": req.Stars})
+	json.NewEncoder(w).Encode(map[string]any{"tripId": t.ID, "stars": req.Stars, "tipAmount": req.TipAmount})
 }
 
 // rateWithEvent saves the rating and queues trip.rated in one transaction, so
@@ -359,7 +386,7 @@ func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, pa
 	}
 	defer tx.Rollback(ctx)
 
-	saved, err := saveRating(ctx, tx, t.ID, req.Stars, req.Comment)
+	saved, err := saveRating(ctx, tx, t.ID, req.Stars, req.Comment, req.TipAmount)
 	if err != nil || !saved {
 		return false, err
 	}

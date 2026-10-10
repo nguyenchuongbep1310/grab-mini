@@ -40,6 +40,20 @@ export interface DriverRating {
   /** Mean of all ratings, or 0 when there are none. */
   average: number;
   count: number;
+  /** Sum of recorded tips in VND (no money moves; it is a record). */
+  totalTips: number;
+  /** How many ratings carried a tip. */
+  tipCount: number;
+}
+
+export interface DriverReview {
+  tripId: string;
+  stars: number;
+  comment: string;
+  /** Whole VND. */
+  tipAmount: number;
+  /** RFC 3339; pass the last one as `before` to get the next page. */
+  createdAt: string;
 }
 
 export class ApiError extends Error {
@@ -112,16 +126,32 @@ export function tripAction(tripId: string, action: TripAction): Promise<{ tripId
   return request(`${TRIP_API}/trips/${tripId}/${action}`, { method: "POST" });
 }
 
-export function rateTrip(tripId: string, riderId: string, stars: number, comment = ""): Promise<{ tripId: string; stars: number }> {
+export function rateTrip(
+  tripId: string,
+  riderId: string,
+  stars: number,
+  comment = "",
+  tipAmount = 0,
+): Promise<{ tripId: string; stars: number; tipAmount: number }> {
   return request(`${TRIP_API}/trips/${tripId}/rating`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ riderId, stars, comment }),
+    body: JSON.stringify({ riderId, stars, comment, tipAmount }),
   });
 }
 
 export function getDriverRating(driverId: string): Promise<DriverRating> {
   return request(`${RATING_API}/drivers/${driverId}/rating`);
+}
+
+/** A driver's own reviews, newest first. Only that driver may read them. */
+export async function getDriverReviews(driverId: string, opts: { limit?: number; before?: string } = {}): Promise<DriverReview[]> {
+  const q = new URLSearchParams();
+  if (opts.limit) q.set("limit", String(opts.limit));
+  if (opts.before) q.set("before", opts.before);
+  const qs = q.toString();
+  const res = await request<{ reviews: DriverReview[] }>(`${RATING_API}/drivers/${driverId}/reviews${qs ? `?${qs}` : ""}`);
+  return res.reviews;
 }
 
 /** The driver's trip that is still in flight, or null if they have none. */

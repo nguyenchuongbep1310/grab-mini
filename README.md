@@ -39,7 +39,7 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**.
 2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
 3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
-4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. The driver's app shows a toast and their updated average.
+4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. You can also add a comment and a tip (0, 10k, 20k, 50k or custom VND). A tip is only recorded, there is no payment system: Rating Service keeps a per-driver total and the driver's app shows it in the toast. The driver's app shows a toast and their updated average.
 
 Also try: rating a trip twice (the second is rejected), booking a bike (only `driver-4`/`driver-5` can take it), **Cancel trip** from either side, or booking when every driver is busy (you get "No drivers nearby" after the matching service's retries). `?rider=rider-2` picks a different rider.
 
@@ -178,10 +178,11 @@ curl -X POST localhost:3002/trips/<tripId>/pickup     # ASSIGNED -> IN_PROGRESS
 curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED, driver becomes AVAILABLE
 curl -X POST localhost:3002/trips/<tripId>/cancel     # from ASSIGNED or IN_PROGRESS; 409 once COMPLETED
 curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/json" \
-  -d '{"riderId": "rider-1", "stars": 5, "comment": "Smooth ride"}'   # COMPLETED trips only, once (409 otherwise)
+  -d '{"riderId": "rider-1", "stars": 5, "comment": "Smooth ride", "tipAmount": 20000}'   # COMPLETED trips only, once (409 otherwise); tipAmount is optional whole VND, 0 to 1,000,000
 
 # Rating Service
-curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count": 3}
+curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count": 3, "totalTips": 30000, "tipCount": 2}
+curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a driver's own reviews, newest first (driver token only)
 ```
 
 Repeating `pickup` or `complete` is a no-op. The WebSocket is `ws://localhost:3003/ws/rider/<id>` or `/ws/driver/<id>`, pushing `{"type": "...", "payload": {...}}`.

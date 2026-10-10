@@ -78,7 +78,11 @@ export function App() {
 
   const socket = useNotificationSocket("driver", driverId, (message) => {
     if (message.type === "trip.rated") {
-      toast.show(`${message.payload.stars}-star rating from ${message.payload.riderId}`, "success");
+      const tip = message.payload.tipAmount ?? 0;
+      toast.show(
+        `${message.payload.stars}-star rating from ${message.payload.riderId}${tip > 0 ? `, tip ${tip.toLocaleString("vi-VN")}đ` : ""}`,
+        "success",
+      );
       // Rating Service updates its totals asynchronously, so give it a moment.
       setTimeout(refreshRating, 800);
       return;

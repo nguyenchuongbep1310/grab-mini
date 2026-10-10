@@ -112,7 +112,7 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 		events.TopicOrderNoDriverFound:   &events.OrderNoDriverFound{OrderID: "o"},
 		events.TopicDriverLocationUpdate: &events.DriverLocationUpdated{DriverID: "d", Lat: 1, Lng: 2, Timestamp: "t"},
 		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
-		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great"},
+		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
 	}
 	for topic, in := range cases {
 		data, err := c.Encode(ctx, topic, in)
@@ -315,4 +315,34 @@ func TestCurrentEventsReadMessagesWrittenBeforeRiderId(t *testing.T) {
 			t.Errorf("got %+v, want the old fields intact and an empty riderId", got)
 		}
 	})
+}
+
+func TestTripRatedV1PayloadDecodesWithZeroTip(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+	const v1 = `{"type":"record","name":"TripRated","namespace":"grabmini.events","fields":[
+		{"name":"eventId","type":"string"},{"name":"occurredAt","type":"string"},{"name":"tripId","type":"string"},
+		{"name":"orderId","type":"string"},{"name":"riderId","type":"string"},{"name":"driverId","type":"string"},
+		{"name":"stars","type":"int"},{"name":"comment","type":"string","default":""}]}`
+	type v1Rated struct {
+		events.Envelope
+		TripID   string `avro:"tripId"`
+		OrderID  string `avro:"orderId"`
+		RiderID  string `avro:"riderId"`
+		DriverID string `avro:"driverId"`
+		Stars    int    `avro:"stars"`
+		Comment  string `avro:"comment"`
+	}
+	data, err := New(url, WithSchemaSource(func(string) (string, error) { return v1, nil })).
+		Encode(ctx, events.TopicTripRated, v1Rated{Envelope: sampleOrder.Envelope, TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 4, Comment: "ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got events.TripRated
+	if err := New(url).Decode(ctx, events.TopicTripRated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Stars != 4 || got.TipAmount != 0 || got.Currency != "VND" {
+		t.Errorf("got %+v, want stars=4 tip=0 currency=VND (defaults)", got)
+	}
 }
