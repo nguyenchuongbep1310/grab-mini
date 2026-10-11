@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PROMETHEUS_VERSION: "3.5.0"
+
+jobs:
+  # Derive the module list from go.work so new modules are picked up automatically.
+  go-modules:
+    name: go modules list
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.list.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          set -euo pipefail
+          modules=$(sed -n 's#^[[:space:]]*\(\./[^[:space:]]*\)[[:space:]]*$#\1#p' go.work \
+            | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+          echo "modules=${modules}" >> "$GITHUB_OUTPUT"
+          echo "${modules}"
+
+  go:
+    name: go (${{ matrix.module }})
+    needs: go-modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.modules) }}
+    # Versions match docker-compose.yml. Tests skip themselves when these env vars are
+    # unset; Kafka-gated tests (TEST_KAFKA_BROKERS etc.) are not run in CI and skip.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: grabmini
+          POSTGRES_PASSWORD: grabmini
+          POSTGRES_DB: grabmini
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U grabmini -d grabmini"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://grabmini:grabmini@localhost:5432/grabmini?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            **/go.sum
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needed on:"
+            echo "$out"
+            exit 1
+          fi
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r typecheck
+      - run: pnpm --filter @grab-mini/rider build
+      - run: pnpm --filter @grab-mini/driver build
+      - run: pnpm --filter @grab-mini/ops build
+
+  monitoring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install promtool
+        run: |
+          set -euo pipefail
+          dir="prometheus-${PROMETHEUS_VERSION}.linux-amd64"
+          curl -fsSL -o "${RUNNER_TEMP}/prom.tgz" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${dir}.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/prom.tgz" -C "${RUNNER_TEMP}" "${dir}/promtool"
+          echo "${RUNNER_TEMP}/${dir}" >> "$GITHUB_PATH"
+      - run: promtool --version
+      - run: promtool check rules deploy/monitoring/alerts.rules.yaml
+      - run: promtool test rules deploy/monitoring/alerts.test.yaml
+
+  k8s:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: python3 deploy/k8s/generate.py --check
+      - name: kustomize render + cross-checks
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/k8s/base | python3 deploy/k8s/check.py
