@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       modules: ${{ steps.list.outputs.modules }}
+      kafka_modules: ${{ steps.list.outputs.kafka_modules }}
     steps:
       - uses: actions/checkout@v4
       - id: list
@@ -31,6 +32,19 @@ jobs:
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "modules=${modules}" >> "$GITHUB_OUTPUT"
           echo "${modules}"
+          # Modules with tests that talk to a real broker (TEST_KAFKA_BROKERS) also run in go-kafka.
+          kafka_modules=$(grep -rl --include='*_test.go' 'TEST_KAFKA_BROKERS' . | MODULES="${modules}" python3 -c '
+          import json, os, sys
+          mods = json.loads(os.environ["MODULES"])
+          found = set()
+          for line in sys.stdin:
+              path = line.strip()
+              best = max((m for m in mods if path.startswith(m + "/")), key=len, default=None)
+              if best:
+                  found.add(best)
+          print(json.dumps(sorted(found)))')
+          echo "kafka_modules=${kafka_modules}" >> "$GITHUB_OUTPUT"
+          echo "kafka modules: ${kafka_modules}"
 
   go:
     name: go (${{ matrix.module }})
@@ -110,6 +124,100 @@ jobs:
           skip=$(grep -c -E '^[[:space:]]*--- SKIP' "$log" || true)
           fail=$(grep -c -E '^[[:space:]]*--- FAIL' "$log" || true)
           line="${{ matrix.module }}: pass=${pass} skip=${skip} fail=${fail}"
+          echo "$line"
+          echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Same checks as `go`, but with a real Kafka broker, for the modules whose tests need one
+  # (they skip themselves in the plain `go` job).
+  go-kafka:
+    name: go + kafka (${{ matrix.module }})
+    needs: go-modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.kafka_modules) }}
+    services:
+      # Single-node KRaft broker, same image as docker-compose.yml. The initial rebalance
+      # delay is 0 because tests join a fresh consumer group and give up after ~2s, shorter
+      # than Kafka's 3s default wait.
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:19093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:19093
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+          CLUSTER_ID: grabminikafkacluster01
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: grabmini
+          POSTGRES_PASSWORD: grabmini
+          POSTGRES_DB: grabmini
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U grabmini -d grabmini"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_KAFKA_BROKERS: localhost:9092
+      TEST_DATABASE_URL: postgres://grabmini:grabmini@localhost:5432/grabmini?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            **/go.sum
+      - name: test
+        run: |
+          set -euo pipefail
+          go test -v ./... 2>&1 | tee "${RUNNER_TEMP}/go-test.log"
+      - name: test summary
+        if: always()
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/go-test.log"
+          [ -f "$log" ] || exit 0
+          pass=$(grep -c -E '^[[:space:]]*--- PASS' "$log" || true)
+          skip=$(grep -c -E '^[[:space:]]*--- SKIP' "$log" || true)
+          fail=$(grep -c -E '^[[:space:]]*--- FAIL' "$log" || true)
+          line="kafka ${{ matrix.module }}: pass=${pass} skip=${skip} fail=${fail}"
           echo "$line"
           echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
 
