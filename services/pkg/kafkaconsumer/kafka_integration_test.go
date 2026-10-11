@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/kafkaconn"
 )
 
 // These tests run against a real broker: set TEST_KAFKA_BROKERS (e.g.
@@ -52,7 +55,9 @@ func newTopic(t *testing.T, brokers []string, partitions int) string {
 
 func publish(t *testing.T, brokers []string, topic string, key, value string) {
 	t.Helper()
-	w := &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: topic, RequiredAcks: kafka.RequireAll}
+	// kafka-go holds a message for up to a second before sending a batch that is not full, and
+	// the timing tests below must not count that.
+	w := &kafka.Writer{Addr: kafka.TCP(brokers...), Topic: topic, RequiredAcks: kafka.RequireAll, BatchTimeout: kafkaconn.DefaultBatchTimeout}
 	defer w.Close()
 	if err := w.WriteMessages(context.Background(), kafka.Message{Key: []byte(key), Value: []byte(value)}); err != nil {
 		t.Fatal(err)
@@ -341,7 +346,12 @@ func TestWorkersHandlePartitionsInParallelEachInOrder(t *testing.T) {
 	var running, peak int
 	all := make(chan struct{})
 	var handled int
+	var warm atomic.Int32
 	start(t, cfg, func(_ context.Context, msg kafka.Message) error {
+		if strings.HasPrefix(string(msg.Value), "warm-up") {
+			warm.Add(1)
+			return nil
+		}
 		mu.Lock()
 		running++
 		peak = max(peak, running)
@@ -359,10 +369,18 @@ func TestWorkersHandlePartitionsInParallelEachInOrder(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	time.Sleep(2 * time.Second) // let the group form before the clock starts
 
-	w := &kafka.Writer{Addr: kafka.TCP(b...), Topic: topic, Balancer: &kafka.RoundRobin{}, RequiredAcks: kafka.RequireAll}
+	w := &kafka.Writer{Addr: kafka.TCP(b...), Topic: topic, Balancer: &kafka.RoundRobin{}, RequiredAcks: kafka.RequireAll, BatchTimeout: kafkaconn.DefaultBatchTimeout}
 	defer w.Close()
+
+	// Joining the group takes a few seconds on a fresh broker (Kafka waits 3s before a group's
+	// first rebalance), so a fixed sleep either wastes time or ends too early. One warm-up
+	// message per partition (round robin) shows every partition is being read.
+	if err := w.WriteMessages(context.Background(),
+		kafka.Message{Value: []byte("warm-up 0")}, kafka.Message{Value: []byte("warm-up 1")}, kafka.Message{Value: []byte("warm-up 2")}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the consumer to be reading every partition", func() bool { return warm.Load() == 3 })
 	var batch []kafka.Message
 	for i := 0; i < 30; i++ {
 		batch = append(batch, kafka.Message{Value: []byte(fmt.Sprint(i))})
