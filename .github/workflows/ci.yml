@@ -95,7 +95,23 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test ./...
+        run: |
+          set -euo pipefail
+          go test -v ./... 2>&1 | tee "${RUNNER_TEMP}/go-test.log"
+      # Tests that need a service the job lacks (Kafka, ...) skip themselves, so a green run
+      # can hide them. Count what actually ran so the numbers are visible per module.
+      - name: test summary
+        if: always()
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/go-test.log"
+          [ -f "$log" ] || exit 0
+          pass=$(grep -c -E '^[[:space:]]*--- PASS' "$log" || true)
+          skip=$(grep -c -E '^[[:space:]]*--- SKIP' "$log" || true)
+          fail=$(grep -c -E '^[[:space:]]*--- FAIL' "$log" || true)
+          line="${{ matrix.module }}: pass=${pass} skip=${skip} fail=${fail}"
+          echo "$line"
+          echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
 
   frontend:
     runs-on: ubuntu-latest
