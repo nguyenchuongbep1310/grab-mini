@@ -279,7 +279,9 @@ func TestAFailingMessageDoesNotHoldUpTheOnesBehindIt(t *testing.T) {
 	publish(t, b, topic, "k", "B")
 
 	waitFor(t, "B to be handled", func() bool { return handled("B") })
-	if waited := time.Since(started); waited > 2500*time.Millisecond {
+	waited := time.Since(started)
+	t.Logf("B was handled %s after A and B were published (limit 2.5s)", waited.Round(time.Millisecond))
+	if waited > 2500*time.Millisecond {
 		t.Errorf("B waited %s: it was held up by A's retry", waited)
 	}
 }
@@ -378,6 +380,7 @@ func TestWorkersHandlePartitionsInParallelEachInOrder(t *testing.T) {
 	elapsed := time.Since(began)
 
 	// 30 messages of 100 ms: one at a time that is 3 seconds; three partitions at once, about 1.
+	t.Logf("30 messages of 100ms took %s (limit 2.2s)", elapsed.Round(time.Millisecond))
 	if elapsed > 2200*time.Millisecond {
 		t.Errorf("took %s: partitions were not handled in parallel", elapsed)
 	}
