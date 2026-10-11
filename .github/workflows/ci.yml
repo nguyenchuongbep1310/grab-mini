@@ -139,9 +139,8 @@ jobs:
       matrix:
         module: ${{ fromJSON(needs.go-modules.outputs.kafka_modules) }}
     services:
-      # Single-node KRaft broker, same image as docker-compose.yml. The initial rebalance
-      # delay is 0 because tests join a fresh consumer group and give up after ~2s, shorter
-      # than Kafka's 3s default wait.
+      # Single-node KRaft broker, same image and default settings as docker-compose.yml
+      # (including Kafka's 3s wait before a new consumer group's first rebalance).
       kafka:
         image: apache/kafka:3.8.0
         ports:
@@ -158,7 +157,6 @@ jobs:
           KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
           KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
           KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
           KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
           CLUSTER_ID: grabminikafkacluster01
         options: >-
