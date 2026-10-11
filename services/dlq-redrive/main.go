@@ -30,6 +30,7 @@ func main() {
 		max    = flag.Int("max", 0, "redrive at most this many (0: all)")
 		errSub = flag.String("error", "", "only dead letters whose error contains this text")
 		idle   = flag.Duration("idle", 3*time.Second, "stop after this long with no new dead letter")
+		join   = flag.Duration("join", 30*time.Second, "extra time the first read may take to join the group when dead letters are waiting")
 	)
 	flag.Parse()
 
@@ -48,7 +49,7 @@ func main() {
 	defer stop()
 
 	res, err := Run(ctx, Config{
-		Brokers: brokers, Topic: *topic, Group: g, DryRun: *dryRun, Max: *max, ErrorContains: *errSub, Idle: *idle,
+		Brokers: brokers, Topic: *topic, Group: g, DryRun: *dryRun, Max: *max, ErrorContains: *errSub, Idle: *idle, Join: *join,
 	})
 	verb := "redriven"
 	if *dryRun {

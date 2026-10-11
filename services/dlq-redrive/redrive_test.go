@@ -229,3 +229,46 @@ func TestGroupNameFromAFilter(t *testing.T) {
 		}
 	}
 }
+
+// A new consumer group can take longer to join than Idle (Kafka waits 3s before a
+// group's first rebalance unless the broker is configured otherwise). With dead
+// letters waiting, that must not look like a drained topic.
+func TestASlowGroupJoinIsNotMistakenForADrainedTopic(t *testing.T) {
+	b := brokers(t)
+	topic := topics(t, b)
+	deadLetter(t, b, topic, "k", []byte("v"), "boom")
+	c := cfg(b, topic)
+	c.Idle = 200 * time.Millisecond
+
+	if res, err := Run(context.Background(), c); err != nil || res.Redriven != 1 {
+		t.Fatalf("Run = %+v, %v; want the 1 dead letter redriven despite the short Idle", res, err)
+	}
+}
+
+// With nothing waiting there is nothing to join the group for: it returns at once
+// instead of sitting out the join time.
+func TestAnEmptyDeadLetterTopicReturnsWithoutWaiting(t *testing.T) {
+	b := brokers(t)
+	topic := topics(t, b)
+	c := cfg(b, topic)
+	c.Join = time.Minute
+
+	start := time.Now()
+	res, err := Run(context.Background(), c)
+	if err != nil || res.Redriven != 0 || res.Skipped != 0 {
+		t.Fatalf("Run = %+v, %v; want nothing", res, err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("took %v for an empty dead-letter topic", took)
+	}
+}
+
+// A topic that has never dead-lettered anything has no DLQ topic at all.
+func TestATopicWithoutADeadLetterTopicHasNothingToRedrive(t *testing.T) {
+	b := brokers(t)
+	c := cfg(b, "rd-never-"+uuid.NewString()[:8])
+
+	if res, err := Run(context.Background(), c); err != nil || res.Redriven != 0 {
+		t.Fatalf("Run = %+v, %v; want nothing", res, err)
+	}
+}
