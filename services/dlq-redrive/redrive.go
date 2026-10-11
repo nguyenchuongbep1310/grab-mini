@@ -84,7 +84,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	// reading; counting it from the start would report a drained topic when the
 	// reader had merely not finished joining yet. If the broker can't tell us,
 	// fall back to reading with the extra join time.
-	waiting, err := pending(ctx, cfg, dlq, sec)
+	waiting, err := pendingWithRetry(ctx, cfg, dlq, sec)
 	switch {
 	case err != nil:
 		log.Printf("could not tell whether %s has dead letters waiting (%v); reading anyway", dlq, err)
@@ -168,6 +168,30 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		res.Redriven++
 	}
 	return res, nil
+}
+
+// pendingTimeout is how long pendingWithRetry keeps trying while the broker
+// says "not yet" (see below).
+const pendingTimeout = 15 * time.Second
+
+// pendingWithRetry is pending, trying again while the broker's answer is a
+// temporary one: a topic created a moment ago has no leader yet, and a broker
+// that has just started is not yet the coordinator of any group. Giving up on
+// those would send an empty topic down the slow path.
+func pendingWithRetry(ctx context.Context, cfg Config, dlq string, sec *kafkaconn.Security) (int64, error) {
+	deadline := time.Now().Add(pendingTimeout)
+	for {
+		n, err := pending(ctx, cfg, dlq, sec)
+		var kerr kafka.Error
+		if err == nil || !errors.As(err, &kerr) || !kerr.Temporary() || time.Now().After(deadline) {
+			return n, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // pending counts the dead letters on dlq that the group has not handled yet:
