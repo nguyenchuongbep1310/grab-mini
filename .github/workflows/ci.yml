@@ -23,6 +23,7 @@ jobs:
     outputs:
       modules: ${{ steps.list.outputs.modules }}
       kafka_modules: ${{ steps.list.outputs.kafka_modules }}
+      secure_kafka_modules: ${{ steps.list.outputs.secure_kafka_modules }}
     steps:
       - uses: actions/checkout@v4
       - id: list
@@ -32,8 +33,10 @@ jobs:
             | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
           echo "modules=${modules}" >> "$GITHUB_OUTPUT"
           echo "${modules}"
-          # Modules with tests that talk to a real broker (TEST_KAFKA_BROKERS) also run in go-kafka.
-          kafka_modules=$(grep -rl --include='*_test.go' 'TEST_KAFKA_BROKERS' . | MODULES="${modules}" python3 -c '
+          # Modules whose tests need a real broker also run in go-kafka (plain), and those that
+          # need the TLS/SASL/ACL broker in go-kafka-secure.
+          modules_with() {
+            grep -rl --include='*_test.go' "$1" . | MODULES="${modules}" python3 -c '
           import json, os, sys
           mods = json.loads(os.environ["MODULES"])
           found = set()
@@ -42,9 +45,14 @@ jobs:
               best = max((m for m in mods if path.startswith(m + "/")), key=len, default=None)
               if best:
                   found.add(best)
-          print(json.dumps(sorted(found)))')
+          print(json.dumps(sorted(found)))'
+          }
+          kafka_modules=$(modules_with 'TEST_KAFKA_BROKERS')
+          secure_kafka_modules=$(modules_with 'TEST_SECURE_KAFKA_BROKER')
           echo "kafka_modules=${kafka_modules}" >> "$GITHUB_OUTPUT"
+          echo "secure_kafka_modules=${secure_kafka_modules}" >> "$GITHUB_OUTPUT"
           echo "kafka modules: ${kafka_modules}"
+          echo "secure kafka modules: ${secure_kafka_modules}"
 
   go:
     name: go (${{ matrix.module }})
@@ -218,6 +226,70 @@ jobs:
           line="kafka ${{ matrix.module }}: pass=${pass} skip=${skip} fail=${fail}"
           echo "$line"
           echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Kafka with TLS, SASL/SCRAM and ACLs, set up by the repo's own deploy/kafka-secure/start-local.sh
+  # (which runs scripts/kafka-acls.sh), for the tests that check least privilege.
+  go-kafka-secure:
+    name: go + secure kafka (${{ matrix.module }})
+    needs: go-modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.secure_kafka_modules) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            **/go.sum
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Start Kafka with TLS, SASL and ACLs
+        run: |
+          set -euo pipefail
+          # The Kafka distribution comes from the same pinned image the plain job uses.
+          docker create --name kafka-dist apache/kafka:3.8.0 >/dev/null
+          docker cp kafka-dist:/opt/kafka "${RUNNER_TEMP}/kafka"
+          docker rm kafka-dist >/dev/null
+          export KAFKA_HOME="${RUNNER_TEMP}/kafka" DIR="${RUNNER_TEMP}/kafka-secure"
+          deploy/kafka-secure/start-local.sh
+          {
+            echo "TEST_SECURE_KAFKA_BROKER=localhost:9094"
+            echo "TEST_SECURE_KAFKA_CA=${DIR}/ca.pem"
+            echo "TEST_SECURE_KAFKA_SECRETS=${DIR}/secrets"
+            echo "TEST_SECURE_KAFKA_ADMIN=$(cat "${DIR}/admin.password")"
+            echo "KAFKA_SECURE_DIR=${DIR}"
+          } >> "$GITHUB_ENV"
+      - name: test
+        working-directory: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          # Only the tests in the files that use the secure broker; the plain ones run in go-kafka.
+          files=$(grep -l 'TEST_SECURE_KAFKA_BROKER' ./*_test.go)
+          names=$(grep -h -o '^func Test[A-Za-z0-9_]*' $files | sed 's/^func //' | paste -sd'|' -)
+          go test -v -run "^(${names})\$" ./... 2>&1 | tee "${RUNNER_TEMP}/go-test.log"
+      - name: test summary
+        if: always()
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/go-test.log"
+          [ -f "$log" ] || exit 0
+          pass=$(grep -c -E '^[[:space:]]*--- PASS' "$log" || true)
+          skip=$(grep -c -E '^[[:space:]]*--- SKIP' "$log" || true)
+          fail=$(grep -c -E '^[[:space:]]*--- FAIL' "$log" || true)
+          line="secure kafka ${{ matrix.module }}: pass=${pass} skip=${skip} fail=${fail}"
+          echo "$line"
+          echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
+      - name: broker log
+        if: failure()
+        run: tail -n 100 "${KAFKA_SECURE_DIR}/broker.log" || true
 
   frontend:
     runs-on: ubuntu-latest
