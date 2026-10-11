@@ -257,20 +257,28 @@ func TestAFailingMessageDoesNotHoldUpTheOnesBehindIt(t *testing.T) {
 		return nil
 	})
 
-	started := time.Now()
-	publish(t, b, topic, "k", "A")
-	publish(t, b, topic, "k", "B")
-
-	waitFor(t, "B to be handled", func() bool {
+	handled := func(value string) bool {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		for _, c := range rec.calls {
-			if c.value == "B" {
+			if c.value == value {
 				return true
 			}
 		}
 		return false
-	})
+	}
+
+	// Joining the consumer group can take a few seconds on a fresh broker (Kafka waits 3s
+	// before a group's first rebalance). Wait until the consumer is really reading, so the
+	// clock below measures A's retry and not the join.
+	publish(t, b, topic, "k", "warm-up")
+	waitFor(t, "the consumer to be reading", func() bool { return handled("warm-up") })
+
+	started := time.Now()
+	publish(t, b, topic, "k", "A")
+	publish(t, b, topic, "k", "B")
+
+	waitFor(t, "B to be handled", func() bool { return handled("B") })
 	if waited := time.Since(started); waited > 2500*time.Millisecond {
 		t.Errorf("B waited %s: it was held up by A's retry", waited)
 	}
