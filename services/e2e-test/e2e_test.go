@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,9 +28,11 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/driverstatus"
+	"grab-mini/pkg/events"
 )
 
 type stack struct {
@@ -58,6 +61,71 @@ func freePort(t *testing.T) string {
 	return port
 }
 
+// createTopics provisions the topics the fleet reads and writes, the way the
+// kafka-init service does in docker-compose.yml. The services create only their
+// own retry and dead-letter topics, never these: a production broker doesn't
+// auto-create topics.
+//
+// It has to happen before the services start, not whenever the first event
+// happens to create a topic. A consumer group that joined while its topic didn't
+// exist yet never sees the partitions that appear afterwards, so on a fresh
+// broker the first events would reach nobody (and a producer's first write can
+// fail with Unknown Topic Or Partition while the broker creates the topic).
+func createTopics(t *testing.T, brokers string) {
+	t.Helper()
+	topics := []string{
+		events.TopicOrderCreated,
+		events.TopicOrderMatched,
+		events.TopicOrderNoDriverFound,
+		events.TopicOrderCancelled,
+		events.TopicDriverLocationUpdate,
+		events.TopicTripStatusChanged,
+		events.TopicTripRated,
+	}
+
+	var specs []kafka.TopicConfig
+	for _, topic := range topics {
+		specs = append(specs, kafka.TopicConfig{Topic: topic, NumPartitions: 3, ReplicationFactor: 1})
+	}
+	client := &kafka.Client{Addr: kafka.TCP(strings.Split(brokers, ",")...), Timeout: 10 * time.Second}
+	resp, err := client.CreateTopics(context.Background(), &kafka.CreateTopicsRequest{Topics: specs})
+	if err != nil {
+		t.Fatalf("create topics: %v", err)
+	}
+	for topic, err := range resp.Errors {
+		if err != nil && !errors.Is(err, kafka.TopicAlreadyExists) {
+			t.Fatalf("create topic %s: %v", topic, err)
+		}
+	}
+
+	// Creating a topic returns before every partition has a leader to talk to.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		meta, err := client.Metadata(context.Background(), &kafka.MetadataRequest{Topics: topics})
+		ready := err == nil && len(meta.Topics) == len(topics)
+		if ready {
+			for _, tp := range meta.Topics {
+				if tp.Error != nil || len(tp.Partitions) != 3 {
+					ready = false
+					break
+				}
+				for _, p := range tp.Partitions {
+					if p.Error != nil || p.Leader.ID < 0 {
+						ready = false
+					}
+				}
+			}
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("topics were not ready in time: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func startStack(t *testing.T) *stack {
 	t.Helper()
 	brokers := os.Getenv("TEST_KAFKA_BROKERS")
@@ -66,6 +134,8 @@ func startStack(t *testing.T) *stack {
 	if brokers == "" || dbURL == "" || redisAddr == "" {
 		t.Skip("TEST_KAFKA_BROKERS, TEST_DATABASE_URL, and TEST_REDIS_ADDR required for full-stack E2E test")
 	}
+
+	createTopics(t, brokers)
 
 	ctx := context.Background()
 	db, err := pgxpool.New(ctx, dbURL)
