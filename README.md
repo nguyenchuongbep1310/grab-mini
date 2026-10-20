@@ -14,7 +14,7 @@ The requirements, design and task breakdown live in [specs/ride-booking-mini](sp
 
 ## Quick start
 
-**Prerequisites:** Docker Desktop (running), Go 1.26+, Node 20+, and pnpm 9 (`corepack enable`, or `npm i -g pnpm`).
+**Prerequisites:** Docker Desktop (running), Go 1.26+, Node 24 (22.22+ also works; Node 20 is too old for the test toolchain), and pnpm 9 (`corepack enable`, or `npm i -g pnpm`).
 
 ```bash
 pnpm install

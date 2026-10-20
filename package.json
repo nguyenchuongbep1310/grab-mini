@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "description": "Ride-booking mini project for learning Kafka and design systems",
   "engines": {
-    "node": ">=20"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "packageManager": "pnpm@9.15.0",
   "scripts": {

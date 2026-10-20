@@ -300,7 +300,10 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # The test toolchain needs it: jsdom 30 requires ^22.22.2 || ^24.15.0 || >=26, and
+          # its undici needs zlib.createZstdDecompress, which Node 20 doesn't have (vitest
+          # then fails to start its workers). Keep in step with "engines" in package.json.
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r typecheck
