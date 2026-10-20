@@ -1,0 +1,71 @@
+# Prometheus configuration for local development (docker-compose).
+# Scrapes all Go services running on the host via host.docker.internal
+# and evaluates the alerting rules in alerts.rules.yaml.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    environment: dev
+    cluster: grab-mini-local
+
+rule_files:
+  - /etc/prometheus/alerts.rules.yaml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: order-service
+    static_configs:
+      - targets: ["host.docker.internal:3001"]
+        labels:
+          service: order-service
+
+  - job_name: trip-service
+    static_configs:
+      - targets: ["host.docker.internal:3002"]
+        labels:
+          service: trip-service
+
+  - job_name: notification-service
+    static_configs:
+      - targets: ["host.docker.internal:3003"]
+        labels:
+          service: notification-service
+
+  - job_name: rating-service
+    static_configs:
+      - targets: ["host.docker.internal:3004"]
+        labels:
+          service: rating-service
+
+  - job_name: auth-service
+    static_configs:
+      - targets: ["host.docker.internal:3005"]
+        labels:
+          service: auth-service
+
+  - job_name: location-gateway
+    static_configs:
+      - targets: ["host.docker.internal:3006"]
+        labels:
+          service: location-gateway
+
+  - job_name: pricing-service
+    static_configs:
+      - targets: ["host.docker.internal:3007"]
+        labels:
+          service: pricing-service
+
+  - job_name: matching-service
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          service: matching-service
+
+  - job_name: driver-location-service
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+        labels:
+          service: driver-location-service

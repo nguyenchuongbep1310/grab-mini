@@ -15,7 +15,19 @@
     "dev:driver": "pnpm --filter @grab-mini/driver dev",
     "dev:ui": "pnpm --filter @grab-mini/ui dev",
     "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:go": "for f in services/*/go.mod services/pkg/*/go.mod; do (cd \"$(dirname \"$f\")\" && go test ./...) || exit 1; done",
     "dev:all": "bash scripts/dev.sh",
     "dev:ops": "pnpm --filter @grab-mini/ops dev"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "jsdom": "^30.1.3",
+    "vitest": "^5.0.5"
   }
 }

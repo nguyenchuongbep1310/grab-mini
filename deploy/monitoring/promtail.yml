@@ -1,0 +1,43 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Tail local service and frontend logs written by scripts/dev.sh into .dev/logs/*.log
+  - job_name: grab-mini-services
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: grab-mini
+          __path__: /var/log/grab-mini/*.log
+    pipeline_stages:
+      # Extract the service name from the filename: /var/log/grab-mini/<service>.log
+      - regex:
+          source: filename
+          expression: '^/var/log/grab-mini/(?P<service>[^/]+)\.log$'
+      - labels:
+          service:
+      # Parse structured slog JSON lines when present (time, level, msg, service, trace_id, span_id)
+      - match:
+          selector: '{job="grab-mini"} |~ "^\\s*\\{"'
+          stages:
+            - json:
+                expressions:
+                  level: level
+                  msg: msg
+                  service: service
+                  trace_id: trace_id
+                  span_id: span_id
+            - labels:
+                level:
+                service:
+            - structured_metadata:
+                trace_id:
+                span_id:

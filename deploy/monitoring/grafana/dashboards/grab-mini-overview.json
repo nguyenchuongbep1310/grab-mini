@@ -1,0 +1,344 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": [],
+      "title": "Service Health & HTTP Traffic",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": { "color": "red", "index": 1, "text": "DOWN" },
+                "1": { "color": "green", "index": 0, "text": "UP" }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 1 },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "up{job!=\"prometheus\"}",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Go Services Status (/metrics scrape)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum by (job, route, code) (rate(http_requests_total[1m]))",
+          "legendFormat": "{{job}} {{route}} ({{code}})",
+          "refId": "A"
+        }
+      ],
+      "title": "HTTP Request Rate (by Route & Status)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, job, route) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 {{job}} {{route}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, job, route) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50 {{job}} {{route}}",
+          "refId": "B"
+        }
+      ],
+      "title": "HTTP Request Latency (p50 & p95)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "id": 5,
+      "panels": [],
+      "title": "Ride-Booking Business Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum by (vehicle_type) (rate(orders_created_total[1m]))",
+          "legendFormat": "created ({{vehicle_type}})",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (result) (rate(matching_orders_total[1m]))",
+          "legendFormat": "matching: {{result}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Orders Created & Matching Outcomes Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(matching_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95 match latency (SLO: 3s)",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(matching_latency_seconds_bucket[5m])))",
+          "legendFormat": "p50 match latency",
+          "refId": "B"
+        }
+      ],
+      "title": "Driver Matching Latency (SLO: p95 < 3s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum by (status) (increase(trip_transitions_total[5m]))",
+          "legendFormat": "trip -> {{status}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (result) (increase(ratings_recorded_total[5m]))",
+          "legendFormat": "rating: {{result}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (kind) (notification_sockets_open)",
+          "legendFormat": "ws open: {{kind}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Trips, Ratings & Open WebSockets",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "id": 9,
+      "panels": [],
+      "title": "Kafka Event Streaming, Outbox & Location Pipeline",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum by (group, topic, result) (rate(kafka_consumer_messages_total[1m]))",
+          "legendFormat": "{{group}} [{{topic}}] -> {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Kafka Consumer Throughput (ok / retried / dead_lettered)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "max by (source) (outbox_oldest_pending_age_seconds)",
+          "legendFormat": "outbox oldest age ({{source}})",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, topic) (rate(kafka_publish_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 publish ({{topic}})",
+          "refId": "B"
+        }
+      ],
+      "title": "Outbox Pending Age & Kafka Publish Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(location_reports_total[1m]))",
+          "legendFormat": "gateway: {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (result) (rate(location_updates_total[1m]))",
+          "legendFormat": "consumer: {{result}}",
+          "refId": "B"
+        },
+        {
+          "expr": "max by (vehicle_type) (pricing_surge_multiplier_max)",
+          "legendFormat": "max surge ({{vehicle_type}})",
+          "refId": "C"
+        }
+      ],
+      "title": "Location Pipeline & Surge Pricing Multiplier",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 13,
+      "panels": [],
+      "title": "Centralized Service Logs (Loki)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 32 },
+      "id": 14,
+      "targets": [
+        {
+          "expr": "sum by (service, level) (count_over_time({job=\"grab-mini\"}[1m]))",
+          "legendFormat": "{{service}} ({{level}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Log Volume by Service & Level (1m window)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 38 },
+      "id": 15,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"grab-mini\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Live Service Logs (filter by trace_id, orderId, or service in Explore)",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["grab-mini", "kafka", "observability"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "grab-mini — Observability (Metrics & Logs)",
+  "uid": "grab-mini-overview",
+  "version": 1
+}

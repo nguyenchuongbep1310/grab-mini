@@ -6,29 +6,30 @@ use (
 	./services/dlq-redrive
 	./services/driver-app-sim
 	./services/driver-location-service
-	./services/matching-service
+	./services/e2e-test
 	./services/loadtest
 	./services/location-gateway
+	./services/matching-service
 	./services/notification-service
 	./services/order-service
-	./services/pricing-service
-	./services/pkg/driverlocation
-	./services/pkg/redisconn
 	./services/pkg/auth
+	./services/pkg/driverlocation
 	./services/pkg/driverstatus
 	./services/pkg/eventcodec
 	./services/pkg/events
 	./services/pkg/health
 	./services/pkg/kafkaconn
-	./services/pkg/logging
 	./services/pkg/kafkaconsumer
+	./services/pkg/logging
 	./services/pkg/metrics
 	./services/pkg/migrate
 	./services/pkg/outbox
+	./services/pkg/redisconn
 	./services/pkg/secret
 	./services/pkg/serve
 	./services/pkg/surge
 	./services/pkg/tracing
+	./services/pricing-service
 	./services/rating-service
 	./services/trip-service
 )

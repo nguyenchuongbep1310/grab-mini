@@ -21,18 +21,21 @@ pnpm install
 pnpm dev:all
 ```
 
-`pnpm dev:all` (which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra (Kafka, Schema Registry, ksqlDB, Postgres, Redis, Kafka UI), waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts both apps. When it prints `grab-mini is up`:
+`pnpm dev:all` (or `make dev`, which runs [scripts/dev.sh](scripts/dev.sh)) starts the Docker infra (Kafka, Schema Registry, ksqlDB, Postgres, Redis, Kafka UI, Prometheus, Loki, Promtail, Grafana), waits for it to be healthy, seeds five drivers, builds and runs every Go service plus the driver simulator, and starts the apps. Run `make help` to see all automation targets. When it prints `grab-mini is up`:
 
 | What | URL |
 |---|---|
 | Rider App | http://localhost:5171 |
 | Driver App | http://localhost:5172/?driver=driver-1 |
 | Ops dashboard | http://localhost:5173 |
+| Grafana (Metrics & Logs) | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| Loki | http://localhost:3100/ready |
 | Kafka UI | http://localhost:8080 |
 | Schema Registry | http://localhost:8081/subjects |
 | ksqlDB | http://localhost:8088/info |
 
-Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log`. Use `scripts/dev.sh --reset` to wipe Kafka, Postgres and Redis data first, and `docker compose down` to stop the infra.
+Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log` and shipped by Promtail to Loki so you can query them in Grafana (`{job="grab-mini"}`). Use `make dev-reset` (`scripts/dev.sh --reset`) to wipe data first, and `make infra-down` (`docker compose down`) to stop the infra.
 
 ### Take a ride
 
@@ -219,28 +222,133 @@ Explore the design system on its own with `pnpm dev:ui` (http://localhost:5170).
 
 In dev, the apps reach the Go services through Vite's proxy, since the services send no CORS headers.
 
+## Automation Tools & Makefile
+
+The project includes a comprehensive [Makefile](Makefile) for development, infrastructure, testing, and operations. Run `make help` (or `make`) to see all targets:
+
+```bash
+make help
+```
+
+### Development & Build
+- `make dev`: Starts the complete environment (Docker infra, Observability stack, Go services, driver simulator, web apps).
+- `make dev-reset`: Wipes Docker volumes and resets everything from scratch (`scripts/dev.sh --reset`).
+- `make build`: Compiles all Go binaries to `.dev/bin` and builds all frontend applications.
+- `make seed`: Seeds the 5 default drivers (cars and bikes) into Redis.
+
+### Infrastructure & Docker
+- `make infra-up`: Starts all Docker containers (Kafka, Postgres, Redis, Schema Registry, ksqlDB, Prometheus, Loki, Promtail, Grafana).
+- `make infra-down`: Stops all Docker containers (retaining volumes).
+- `make infra-reset`: Stops all Docker containers and deletes volumes.
+- `make infra-ps`: Lists status and health of all Docker containers.
+- `make obs-up`: Starts only the Observability stack (`prometheus`, `loki`, `promtail`, `grafana`).
+
+### Logging & Metrics CLI
+- `make logs`: Tails all service logs in `.dev/logs/*.log`.
+- `make logs SVC=order-service`: Tails logs of a specific service.
+- `make logs-errors`: Filters all `WARN` and `ERROR` lines across `.dev/logs/*.log`.
+- `make logs-loki SVC=matching-service LIMIT=50`: Queries recent logs directly from Loki via HTTP API.
+- `make metrics-check`: Probes `/readyz`, counts active `/metrics` series across all 9 Go services, and lists active Prometheus scrape targets.
+- `make prom-check`: Validates Prometheus configuration (`prometheus.yml`), alert rules (`alerts.rules.yaml`), and executes rule unit tests (`alerts.test.yaml`).
+
+### Quality, Testing & Operations
+- `make test`: Runs unit tests across all Go modules in `go.work`.
+- `make test-integration`: Runs Go tests requiring real Postgres, Redis, and Kafka.
+- `make fmt`: Formats all Go code (`gofmt -s -w`).
+- `make lint`: Runs format check, `go vet`, and TypeScript `typecheck`.
+- `make verify`: Executes [deploy/verify.sh](deploy/verify.sh) (K8s manifests, CRDs, alert rules, static builds).
+- `make migrate`: Runs SQL schema migrations for `order-service`, `trip-service`, and `rating-service`.
+- `make kafka-topics`: Lists all Kafka topics in the cluster.
+- `make kafka-lag`: Describes consumer group offsets and lag across all services.
+- `make dlq-dry-run TOPIC=order.created`: Inspects dead-letter messages without redriving.
+- `make dlq-redrive TOPIC=order.created`: Redrives dead-letter messages back to their source topic.
+- `make loadtest RATE=50 DURATION=30s DRIVERS=100`: Runs the end-to-end load simulator.
+- `make clean`: Removes `.dev/bin`, `.dev/logs`, and frontend `dist` build outputs.
+
+## Observability (Metrics & Logging)
+
+The local stack includes a full observability suite running via Docker Compose:
+
+1. **Grafana (http://localhost:3000)**:
+   - Log in automatically as Admin (anonymous authentication enabled).
+   - Pre-configured dashboard: **`grab-mini — Observability (Metrics & Logs)`**, featuring:
+     - **Service Health & HTTP Traffic**: Up/Down status, HTTP request rates by route & code, p50/p95 latency.
+     - **Business Metrics**: Order creation rate, matching outcomes, matching latency vs 3s SLO, trip transitions, ratings, open WebSockets.
+     - **Kafka Streaming & Outbox**: Consumer throughput (ok / retried / dead_lettered), outbox pending age, publish latency, surge multipliers.
+     - **Centralized Logs (Loki)**: Live log stream and log volume over time.
+   - Explore logs interactively in Grafana Explore with LogQL:
+     - By service: `{job="grab-mini", service="order-service"}`
+     - By severity: `{job="grab-mini", level="ERROR"}`
+     - By distributed trace: `{job="grab-mini"} |= "<trace_id>"`
+2. **Prometheus (http://localhost:9090)**:
+   - Scrapes `/metrics` every 5s from all Go services (via `host.docker.internal`).
+   - Evaluates alerting rules from [deploy/monitoring/alerts.rules.yaml](deploy/monitoring/alerts.rules.yaml) (check status at http://localhost:9090/alerts).
+3. **Loki (http://localhost:3100) & Promtail**:
+   - Promtail tails `.dev/logs/*.log`, automatically extracts `service` from the filename, and parses structured `slog` JSON attributes (`level`, `service`, `trace_id`, `span_id`).
+
 ## Operating it
 
 Every service logs JSON in production (with `trace_id` on lines inside a span) and serves Prometheus metrics; a request keeps one trace across HTTP, the outbox, Kafka and the retry topics. `deploy/` has a Dockerfile, a Kustomize base (Kubernetes, Strimzi Kafka across three zones, KEDA scaling on consumer lag, alerts) and `deploy/verify.sh` to check it without a cluster; [docs/runbook.md](docs/runbook.md) says what to do when an alert fires, [docs/disaster-recovery.md](docs/disaster-recovery.md) covers backups and failing over, and `deploy/loadtest` measures throughput without Docker ([results and what they mean](docs/performance.md)). `dlq-redrive` sends dead letters back to their topic once the cause is fixed:
 
 ```bash
 KAFKA_BROKERS=localhost:9092 go run ./services/dlq-redrive -topic order.created -dry-run
+# or simply:
+make dlq-dry-run TOPIC=order.created
+```
+
+## Running Tools Locally
+
+### Design System Playground
+```bash
+pnpm dev:ui
+```
+Opens the UI components and design token explorer at http://localhost:5170.
+
+### End-to-End Load Testing
+```bash
+# Run against the running `make dev` stack:
+make loadtest RATE=30 DURATION=30s DRIVERS=50
+```
+Or start an isolated, non-Docker Go stack with `dev-registry` using [deploy/loadtest/stack.sh](deploy/loadtest/stack.sh):
+```bash
+DATABASE_URL='postgres://grabmini:grabmini@localhost:5432/grabmini_load?sslmode=disable' deploy/loadtest/stack.sh start
+go run ./services/loadtest -rate 50 -duration 30s -drivers 100
+DATABASE_URL='postgres://grabmini:grabmini@localhost:5432/grabmini_load?sslmode=disable' deploy/loadtest/stack.sh stop
+```
+
+### Secure Kafka (TLS + SASL + ACLs)
+```bash
+KAFKA_HOME=/path/to/kafka_2.13-3.8.0 deploy/kafka-secure/start-local.sh
 ```
 
 ## Tests
 
 ```bash
-for f in services/*/go.mod services/pkg/*/go.mod; do (cd "$(dirname "$f")" && go test ./...); done
+# Run all Go unit tests + Frontend unit & component tests (Vitest)
+make test
+
+# Frontend unit & component tests only (Vitest + Testing Library)
+pnpm test
+
+# Browser E2E tests across Rider, Driver & Ops apps (Playwright)
+pnpm test:e2e
+
+# Go integration + full-stack system tests against local Postgres, Redis, Kafka
+make test-integration
+
+# Code quality and typecheck
+make lint
 ```
 
-Most tests need nothing. A few run against a real Postgres or Redis and skip themselves unless you point them at a throwaway instance (they delete rows and `FLUSH` Redis): `TEST_DATABASE_URL=postgres://grabmini:grabmini@localhost:5432/grabmini_test` and `TEST_REDIS_ADDR=localhost:6379` (use a separate Redis, not the one the running app uses). Tests of the Kafka consumer, the outbox relay and the Location Gateway's producer also want a broker: `TEST_KAFKA_BROKERS=localhost:9092` (they create topics with random names). The security tests in `services/pkg/kafkaconsumer` run against a broker made by `deploy/kafka-secure/start-local.sh`: set `TEST_SECURE_KAFKA_BROKER` (`localhost:9094`), `TEST_SECURE_KAFKA_CA` (`<dir>/ca.pem`), `TEST_SECURE_KAFKA_SECRETS` (`<dir>/secrets`) and `TEST_SECURE_KAFKA_ADMIN` (the contents of `<dir>/admin.password`).
+Most Go tests need nothing. A few (including the full-stack system test in [services/e2e-test](services/e2e-test)) run against a real Postgres, Redis, and Kafka and skip themselves unless you point them at a throwaway instance: `TEST_DATABASE_URL=postgres://grabmini:grabmini@localhost:5432/grabmini_test` and `TEST_REDIS_ADDR=localhost:6379`. Tests of the Kafka consumer, the outbox relay, the Location Gateway's producer, and `services/e2e-test` also want a broker: `TEST_KAFKA_BROKERS=localhost:9092`. The security tests in `services/pkg/kafkaconsumer` run against a broker made by `deploy/kafka-secure/start-local.sh`.
 
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3001-3004, 5171-5173, 5432, 6379, 8080, 8081, 8088, 9092): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:5171 -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3000-3007, 5170-5173, 5432, 6379, 8080, 8081, 8088, 9090, 9092, 9101, 9102): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The rider app is on a screen that doesn't match the trip**: reload it. It asks Order Service for the rider's latest order and Trip Service for its trip, and resumes searching, assigned or in-progress rides (a missed WebSocket push while searching is also caught by polling every 3s).
 - **The driver app shows no trip**: check the `?driver=` id matches the driver the rider was matched with (the rider's card shows it). A trip already under way is restored when the page opens or reloads.
 - **The Ops dashboard says ksqlDB is unreachable, or shows no data**: ksqlDB is a JVM and takes a minute to start; `docker logs grab-mini-ksqldb` shows its progress, and `docker logs grab-mini-ksql-init` shows whether the tables were created. The tables fill as events flow, so book a ride first.
-- **Start from scratch**: `scripts/dev.sh --reset`.
+- **Start from scratch**: `make dev-reset` (or `scripts/dev.sh --reset`).
+

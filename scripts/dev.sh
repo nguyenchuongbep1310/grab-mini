@@ -81,6 +81,9 @@ wait_for "Schema Registry" healthy grab-mini-schema-registry
 wait_for "topics" topics_ready
 wait_for "ksqlDB" healthy grab-mini-ksqldb
 wait_for "analytics tables" ksql_ready
+wait_for "Prometheus" healthy grab-mini-prometheus
+wait_for "Loki" healthy grab-mini-loki
+wait_for "Grafana" healthy grab-mini-grafana
 
 echo "Building Go services..."
 SERVICES="auth-service order-service matching-service trip-service driver-location-service notification-service rating-service location-gateway pricing-service driver-app-sim"
@@ -92,8 +95,21 @@ done
 echo "Seeding drivers..."
 "$BIN/matching-service" seed-drivers
 
+# Emit JSON logs by default so Promtail/Loki can index level, service and trace_id.
+export LOG_FORMAT="${LOG_FORMAT:-json}"
+
 for svc in $SERVICES; do
-  start "$svc" "services/$svc" "$ROOT/$BIN/$svc"
+  case "$svc" in
+    matching-service)
+      start "$svc" "services/$svc" env HEALTH_PORT=9101 "$ROOT/$BIN/$svc"
+      ;;
+    driver-location-service)
+      start "$svc" "services/$svc" env HEALTH_PORT=9102 "$ROOT/$BIN/$svc"
+      ;;
+    *)
+      start "$svc" "services/$svc" "$ROOT/$BIN/$svc"
+      ;;
+  esac
 done
 start rider apps/rider pnpm dev
 start driver apps/driver pnpm dev
@@ -106,6 +122,8 @@ wait_for "Notification Service" curl -fs localhost:3003/health
 wait_for "Rating Service" curl -fs localhost:3004/health
 wait_for "Location Gateway" curl -fs localhost:3006/health
 wait_for "Pricing Service" curl -fs localhost:3007/health
+wait_for "Matching Service" curl -fs localhost:9101/readyz
+wait_for "Driver Location Service" curl -fs localhost:9102/readyz
 wait_for "Rider App" curl -fs localhost:5171
 wait_for "Driver App" curl -fs localhost:5172
 wait_for "Ops dashboard" curl -fs localhost:5173
@@ -117,6 +135,8 @@ grab-mini is up.
   Rider App    http://localhost:5171
   Driver App   http://localhost:5172/?driver=driver-1   (open as the driver the rider gets matched with)
   Ops          http://localhost:5173   (live analytics from ksqlDB)
+  Grafana      http://localhost:3000   (dashboards for Prometheus metrics & Loki logs)
+  Prometheus   http://localhost:9090
   Kafka UI     http://localhost:8080
   Schema Reg.  http://localhost:8081/subjects
   ksqlDB       http://localhost:8088/info
@@ -125,3 +145,4 @@ grab-mini is up.
 MSG
 
 wait
+

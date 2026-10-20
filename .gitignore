@@ -21,3 +21,5 @@ dump.rdb
 /services/*/loadtest
 /services/*/location-gateway
 /services/*/pricing-service
+test-results/
+playwright-report/

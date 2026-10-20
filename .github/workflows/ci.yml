@@ -304,9 +304,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r typecheck
+      - run: pnpm test
       - run: pnpm --filter @grab-mini/rider build
       - run: pnpm --filter @grab-mini/driver build
       - run: pnpm --filter @grab-mini/ops build
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run Playwright E2E tests
+        run: pnpm test:e2e
 
   monitoring:
     runs-on: ubuntu-latest
