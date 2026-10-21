@@ -1,51 +1,51 @@
 # Production design: Ride-booking Mini on Kafka
 
-Tài liệu này mô tả cách đưa grab-mini từ bản học tập (1 broker, 3 partition, chạy local) lên một hệ thống có thể chạy production. Nó **không đổi code**: mọi điểm "hiện tại" bên dưới đã được đối chiếu với code trong `services/`. Các con số tải là **giả định** để tính toán, không phải số đo.
+This document describes how to take grab-mini from the learning version (1 broker, 3 partitions, running locally) to a system that can run in production. It **does not change code**: every "current" statement below was checked against the code in `services/`. The load figures are **assumptions** used for calculation, not measurements.
 
-Tham chiếu: [design.md](./design.md) (thiết kế bản học tập), [requirements.md](./requirements.md).
+References: [design.md](./design.md) (design of the learning version), [requirements.md](./requirements.md).
 
-## 1. Mục tiêu và giả định
+## 1. Goals and assumptions
 
-| | Giả định |
+| | Assumption |
 |---|---|
-| Tài xế online cùng lúc | 100.000 |
-| Tần suất báo vị trí | 1 lần / 4 giây, tức khoảng 25.000 msg/s |
-| Đơn đặt xe đỉnh | 500 đơn/s |
-| Kích thước event | ~150 byte (Avro) cho vị trí, ~300 byte cho các event khác |
-| Độ khả dụng | 99,9% cho đường đặt xe (đặt, match, trip) |
-| Độ trễ match | p95 dưới 3 giây từ `order.created` đến `order.matched` |
-| Mất dữ liệu | Không được mất đơn, trip, rating. Được phép mất một phần vị trí (chỉ cần bản mới nhất) |
+| Drivers online at the same time | 100,000 |
+| Location report frequency | 1 per 4 seconds, i.e. about 25,000 msg/s |
+| Peak booking rate | 500 orders/s |
+| Event size | ~150 bytes (Avro) for locations, ~300 bytes for other events |
+| Availability | 99.9% for the booking path (create, match, trip) |
+| Match latency | p95 under 3 seconds from `order.created` to `order.matched` |
+| Data loss | Orders, trips and ratings must not be lost. Some location loss is acceptable (only the latest value matters) |
 
-Từ giả định: luồng vị trí là ~2,5 MB/s, nhỏ so với năng lực Kafka. Vấn đề chính của production **không phải throughput** mà là **độ đúng đắn khi có lỗi** (mục 3) và **vận hành** (mục 6 đến 8).
+From these assumptions: the location stream is ~2.5 MB/s, small compared with what Kafka can handle. The main production problem is **not throughput** but **correctness under failure** (section 3) and **operations** (sections 6 to 8).
 
-## 2. Hai loại luồng, hai chính sách khác nhau
+## 2. Two kinds of streams, two different policies
 
-Gộp mọi topic vào một cấu hình là sai lầm phổ biến. Tách hai nhóm:
+Putting every topic under a single configuration is a common mistake. Split them into two groups:
 
-| | Luồng giao dịch (business events) | Luồng telemetry (vị trí) |
+| | Transactional stream (business events) | Telemetry stream (locations) |
 |---|---|---|
-| Topic | `order.*`, `trip.*` | `driver.location.updated` |
-| Mất message | Không chấp nhận | Chấp nhận được |
+| Topics | `order.*`, `trip.*` | `driver.location.updated` |
+| Message loss | Not acceptable | Acceptable |
 | Producer `acks` | `all` | `1` |
 | `min.insync.replicas` | 2 | 1 |
-| Idempotent producer | Bật | Không cần |
-| Retention | 7 ngày (đủ để replay khi sự cố cuối tuần) | 1 ngày hoặc ít hơn |
-| Nén | `lz4` | `lz4` hoặc `zstd` |
-| Compaction | Không | Có thể dùng `cleanup.policy=compact` (key = driverId) nếu cần "vị trí mới nhất" khi consumer khởi động lại |
+| Idempotent producer | On | Not needed |
+| Retention | 7 days (enough to replay after a weekend incident) | 1 day or less |
+| Compression | `lz4` | `lz4` or `zstd` |
+| Compaction | No | `cleanup.policy=compact` can be used (key = driverId) if the "latest location" is needed when a consumer restarts |
 
-Hiện tại `kafka.Writer` trong mọi service không đặt `RequiredAcks`, nên dùng mặc định của kafka-go (`RequireNone`). Trên production phải đặt tường minh: `RequireAll` cho luồng giao dịch.
+Currently the `kafka.Writer` in every service does not set `RequiredAcks`, so it uses the kafka-go default (`RequireNone`). In production this must be set explicitly: `RequireAll` for the transactional stream.
 
-## 3. Độ đúng đắn: các lỗ hổng trong bản hiện tại và cách vá
+## 3. Correctness: gaps in the current version and how to close them
 
-Đây là phần quan trọng nhất. Mỗi mục có: hiện tượng, vị trí trong code, kịch bản hỏng, hướng xử lý.
+This is the most important part. Each item has: the symptom, the location in the code, the failure scenario, and the fix.
 
-### 3.1 Ghi DB rồi publish không atomic (dual write)
+### 3.1 DB write followed by publish is not atomic (dual write)
 
-**Hiện tại.** `order-service/main.go` `handleCreateOrder`: `INSERT` order, sau đó mới `WriteMessages`. Nếu publish lỗi hoặc process chết giữa hai bước, đơn nằm `PENDING` mãi mà không ai match.
+**Currently.** `order-service/main.go` `handleCreateOrder`: `INSERT` the order, and only then `WriteMessages`. If the publish fails or the process dies between the two steps, the order stays `PENDING` forever and nobody matches it.
 
-Tệ hơn ở Trip Service: `handleTransition` và `handleRateTrip` chỉ `log.Printf` khi publish lỗi rồi vẫn trả thành công. Trip đã sang `COMPLETED` trong DB nhưng `trip.status.changed` không bao giờ được gửi, nên rider không nhận thông báo và ksqlDB đếm thiếu. Với `trip.rated`, rating đã lưu vào `trips` nhưng Rating Service không bao giờ nhận được, nên điểm trung bình sai vĩnh viễn.
+It is worse in Trip Service: `handleTransition` and `handleRateTrip` only `log.Printf` when the publish fails and still return success. The trip has moved to `COMPLETED` in the DB but `trip.status.changed` is never sent, so the rider gets no notification and ksqlDB undercounts. For `trip.rated`, the rating is saved in `trips` but Rating Service never receives it, so the average score is wrong permanently.
 
-**Giải pháp: Transactional Outbox.**
+**Solution: Transactional Outbox.**
 
 ```
 BEGIN
@@ -53,333 +53,333 @@ BEGIN
   INSERT INTO outbox (id, topic, key, payload, created_at) ...
 COMMIT
         │
-        ▼ (relay đọc outbox, publish, đánh dấu đã gửi)
+        ▼ (relay reads outbox, publishes, marks as sent)
      Kafka
 ```
 
-- Bảng `outbox` nằm cùng database và cùng transaction với dữ liệu nghiệp vụ, nên hoặc có cả hai hoặc không có gì.
-- Relay có hai lựa chọn: (a) goroutine poll bảng outbox theo lô (`SELECT ... FOR UPDATE SKIP LOCKED`), đơn giản; (b) CDC bằng Debezium đọc WAL của Postgres, độ trễ thấp và không tải DB, nhưng thêm một thành phần vận hành. Khuyến nghị bắt đầu bằng (a).
-- Relay publish **at-least-once**, nên consumer phải idempotent. Bản hiện tại đã có `eventId` và dedupe, nên điều kiện này đã thỏa.
-- Payload Avro đã được encode trước khi lưu, giữ được nguyên tắc "encode trước, ghi sau" hiện có.
+- The `outbox` table lives in the same database and the same transaction as the business data, so either both are written or neither is.
+- The relay has two options: (a) a goroutine that polls the outbox table in batches (`SELECT ... FOR UPDATE SKIP LOCKED`), which is simple; (b) CDC with Debezium reading the Postgres WAL, which has low latency and puts no load on the DB, but adds one more component to operate. Recommendation: start with (a).
+- The relay publishes **at-least-once**, so consumers must be idempotent. The current version already has `eventId` and dedupe, so this condition is already met.
+- The Avro payload is encoded before it is stored, which preserves the existing "encode first, write after" principle.
 
-### 3.2 Matching: claim tài xế rồi mới publish, và không idempotent khi giao lại
+### 3.2 Matching: claim the driver and then publish, and not idempotent on redelivery
 
-**Hiện tại.** `matching-service/main.go`: claim tài xế bằng Lua script rồi publish `order.matched`. Có hai lỗ hổng:
+**Currently.** `matching-service/main.go`: claims the driver with a Lua script and then publishes `order.matched`. There are two gaps:
 
-1. Nếu process chết **sau claim, trước publish** thì tài xế kẹt `ASSIGNED` mãi (code chỉ phục hồi khi publish trả về lỗi, không phục hồi khi process chết).
-2. Nếu process chết **sau publish, trước commit offset** thì `order.created` được giao lại và matching chạy lần hai: claim thêm **một tài xế khác** cho cùng một đơn. Trip Service chặn được trip thứ hai nhờ `order_id UNIQUE`, nhưng tài xế thứ hai đã bị claim và không ai giải phóng.
+1. If the process dies **after the claim, before the publish**, the driver is stuck `ASSIGNED` forever (the code only recovers when the publish returns an error, not when the process dies).
+2. If the process dies **after the publish, before the offset commit**, `order.created` is redelivered and matching runs a second time: it claims **another driver** for the same order. Trip Service can block the second trip thanks to `order_id UNIQUE`, but the second driver has already been claimed and nobody releases it.
 
-**Giải pháp.**
-- Lưu quyết định match theo `orderId` làm khóa idempotent: trước khi claim, `SET match:{orderId} <driverId> NX EX 3600`. Nếu khóa đã tồn tại, publish lại `order.matched` với tài xế đã lưu thay vì claim mới.
-- Đặt TTL cho trạng thái `ASSIGNED` (ví dụ 60 giây). Hết hạn mà chưa có trip thì tài xế tự về `AVAILABLE`. Việc này cũng cứu trường hợp tài xế mất kết nối. Trip Service gia hạn hoặc đổi sang `ON_TRIP` khi tạo trip.
-- Dùng outbox hoặc ghi `match:{orderId}` và event trong cùng một bước logic để khoảng hở nhỏ nhất.
+**Solution.**
+- Store the match decision keyed by `orderId` as an idempotency key: before claiming, `SET match:{orderId} <driverId> NX EX 3600`. If the key already exists, republish `order.matched` with the stored driver instead of making a new claim.
+- Put a TTL on the `ASSIGNED` state (for example 60 seconds). If it expires with no trip, the driver returns to `AVAILABLE` on its own. This also covers the case where the driver loses connectivity. Trip Service extends it or switches to `ON_TRIP` when it creates the trip.
+- Use the outbox, or write `match:{orderId}` and the event in the same logical step, to keep the window as small as possible.
 
-### 3.3 Vòng retry chặn partition
+### 3.3 The retry loop blocks the partition
 
-**Hiện tại.** `pkg/kafkaconsumer`: retry bằng `time.Sleep` ngay trong vòng fetch (3 lần × 2 giây). Một message lỗi chặn mọi message sau nó trong cùng partition tới 6 giây. Với lỗi tạm thời kéo dài (DB sập), cả consumer đứng và lag tăng.
+**Currently.** `pkg/kafkaconsumer`: retries with `time.Sleep` directly inside the fetch loop (3 attempts × 2 seconds). One failing message blocks every message behind it in the same partition for up to 6 seconds. With a prolonged transient failure (DB down), the whole consumer stalls and lag grows.
 
-**Giải pháp: retry topic.**
-- Lỗi tạm thời: publish sang `<topic>.retry.5s`, `<topic>.retry.1m`, `<topic>.retry.10m` rồi commit ngay, không chặn partition chính.
-- Hết các bậc retry mới sang `<topic>.DLQ`.
-- Lỗi vĩnh viễn (`Permanent()`) đi thẳng DLQ như hiện tại.
-- DLQ có cảnh báo (mục 7) và công cụ **redrive** (đọc DLQ, publish lại về topic gốc sau khi sửa lỗi).
+**Solution: retry topics.**
+- Transient errors: publish to `<topic>.retry.5s`, `<topic>.retry.1m`, `<topic>.retry.10m` and commit immediately, without blocking the main partition.
+- Only after the retry tiers are exhausted does the message go to `<topic>.DLQ`.
+- Permanent errors (`Permanent()`) go straight to the DLQ as they do today.
+- The DLQ has an alert (section 7) and a **redrive** tool (read the DLQ and publish back to the original topic after the bug is fixed).
 
-Lưu ý thứ tự: retry topic phá thứ tự trong partition. Với topic mà thứ tự quan trọng (`trip.status.changed`), consumer phải tự chống đảo thứ tự bằng cách so trạng thái (đã có sẵn trong Trip Service: chuyển trạng thái idempotent theo `fromStatuses`).
+Note on ordering: retry topics break ordering within a partition. For topics where ordering matters (`trip.status.changed`), the consumer must guard against reordering itself by comparing state (already present in Trip Service: state transitions are idempotent via `fromStatuses`).
 
-### 3.4 Consumer thoát cả process khi fetch lỗi
+### 3.4 The consumer exits the whole process on a fetch error
 
-**Hiện tại.** `kafkaconsumer.Run` gọi `log.Fatalf` khi `FetchMessage` trả lỗi, kể cả khi `ctx` bị hủy (tắt máy bình thường). Điều này tạo exit code 1 khi shutdown và chưa có graceful shutdown.
+**Currently.** `kafkaconsumer.Run` calls `log.Fatalf` when `FetchMessage` returns an error, even when `ctx` has been cancelled (normal shutdown). This produces exit code 1 on shutdown, and there is no graceful shutdown yet.
 
-**Giải pháp.** Khi `ctx.Err() != nil` thì thoát vòng lặp, commit offset đang xử lý, đóng reader và writer. Lỗi fetch khác thì retry với exponential backoff thay vì kết thúc process. `main` của mỗi service bắt `SIGTERM` (Kubernetes gửi khi rollout) để dùng `signal.NotifyContext`.
+**Solution.** When `ctx.Err() != nil`, leave the loop, commit the offset being processed, and close the reader and writer. For other fetch errors, retry with exponential backoff instead of ending the process. Each service's `main` catches `SIGTERM` (which Kubernetes sends during a rollout) using `signal.NotifyContext`.
 
-### 3.5 Notification Service không scale ngang được
+### 3.5 Notification Service cannot scale horizontally
 
-**Hiện tại.** Mọi instance dùng chung `GroupID: "notification-service-group"`, nên Kafka **chia** partition giữa các instance. Rider kết nối WebSocket vào instance A nhưng event của họ có thể do instance B đọc, và B không có socket của rider đó, nên tin bị rơi. Ngoài ra bản đồ `orderRider` và `driverRider` nằm trong bộ nhớ: restart là mất, và `order.matched` đến mà chưa biết rider thì bị bỏ qua. Notification Service còn đang là điểm mất thông tin im lặng, vì `pushToRider` trả về khi không có socket mà không lưu lại.
+**Currently.** Every instance shares `GroupID: "notification-service-group"`, so Kafka **splits** the partitions among the instances. A rider connects their WebSocket to instance A, but their events may be read by instance B, and B does not hold that rider's socket, so the message is dropped. In addition, the `orderRider` and `driverRider` maps are in memory: a restart loses them, and an `order.matched` that arrives before the rider is known is ignored. Notification Service is also a point of silent information loss, because `pushToRider` returns when there is no socket and does not store the message.
 
-**Giải pháp (chọn một).**
+**Solution (pick one).**
 
-| Phương án | Cách làm | Đánh đổi |
+| Option | How | Trade-off |
 |---|---|---|
-| A. Fan-out qua pub/sub | Notification đọc Kafka trong group chung, tra `riderId` từ Redis, rồi `PUBLISH` lên Redis Pub/Sub kênh `rider:{id}`. Mọi gateway WebSocket subscribe kênh của các socket đang giữ. | Thêm Redis Pub/Sub, nhưng tách rõ "xử lý event" khỏi "giữ socket". **Khuyến nghị.** |
-| B. Mỗi instance một group riêng | `GroupID` kèm instance id, mọi instance đọc mọi event, tự lọc theo socket đang giữ. | Đơn giản nhưng mỗi instance đọc toàn bộ lưu lượng, tốn khi lớn. Group rác tích lũy. |
-| C. Sticky theo partition | Định tuyến rider vào đúng instance giữ partition của họ. | Rebalance làm đứt kết nối, phức tạp. |
+| A. Fan-out via pub/sub | Notification reads Kafka in a shared group, looks up `riderId` in Redis, then `PUBLISH`es to the Redis Pub/Sub channel `rider:{id}`. Every WebSocket gateway subscribes to the channels of the sockets it holds. | Adds Redis Pub/Sub, but cleanly separates "event processing" from "holding sockets". **Recommended.** |
+| B. One group per instance | `GroupID` includes the instance id; every instance reads every event and filters by the sockets it holds. | Simple, but every instance reads the entire traffic, which is expensive at scale. Stale groups accumulate. |
+| C. Sticky by partition | Route each rider to the instance that holds their partition. | A rebalance drops connections; complex. |
 
-Trong mọi phương án, ánh xạ `orderId → riderId` và `driverId → riderId` chuyển từ bản đồ trong RAM sang Redis (TTL vài giờ), hoặc đưa `riderId` thẳng vào `order.matched` và `trip.status.changed` để consumer khỏi phải tra. Cách thứ hai tốt hơn: **event mang đủ dữ liệu cho người đọc** (xem 4.2).
+In every option, the `orderId → riderId` and `driverId → riderId` mappings move from in-RAM maps to Redis (TTL of a few hours), or `riderId` is put directly into `order.matched` and `trip.status.changed` so the consumer does not need to look it up. The second approach is better: **events carry enough data for the reader** (see 4.2).
 
-Ghi nhớ: WebSocket chỉ là kênh best-effort. Client luôn có đường khôi phục bằng REST (design.md mục 4d), và đó vẫn là cơ chế bảo đảm cuối cùng.
+Remember: WebSocket is only a best-effort channel. Clients always have a recovery path via REST (design.md section 4d), and that remains the final guarantee.
 
-### 3.6 Exactly-once: cần hay không?
+### 3.6 Exactly-once: is it needed?
 
-Không dùng Kafka transactions (EOS) cho toàn hệ thống. Lý do: side effect của chúng ta nằm ngoài Kafka (Postgres, Redis, WebSocket), nên EOS của Kafka không bao trùm được. Hướng đi đúng và rẻ hơn là **at-least-once + consumer idempotent + outbox**, vốn đã là mô hình của dự án. Chỉ cân nhắc Kafka transactions nếu có đoạn read-process-write thuần Kafka (ví dụ ksqlDB hoặc Kafka Streams, vốn đã tự lo).
+Do not use Kafka transactions (EOS) for the whole system. Reason: our side effects live outside Kafka (Postgres, Redis, WebSocket), so Kafka's EOS cannot cover them. The right, cheaper direction is **at-least-once + idempotent consumers + outbox**, which is already the project's model. Only consider Kafka transactions if there is a purely Kafka read-process-write segment (for example ksqlDB or Kafka Streams, which handle it themselves).
 
-## 4. Thiết kế Kafka
+## 4. Kafka design
 
-### 4.1 Topic, partition, replication
+### 4.1 Topics, partitions, replication
 
-| Topic | Key | Partition (prod) | RF | Ghi chú |
+| Topic | Key | Partitions (prod) | RF | Notes |
 |---|---|---|---|---|
-| `order.created` | `orderId` | 12 | 3 | Tải thấp, 12 để dư chỗ scale Matching |
+| `order.created` | `orderId` | 12 | 3 | Low load; 12 leaves room to scale Matching |
 | `order.matched` | `orderId` | 12 | 3 | |
 | `order.no_driver_found` | `orderId` | 6 | 3 | |
 | `trip.status.changed` | `tripId` | 12 | 3 | |
-| `trip.rated` | `driverId` | 6 | 3 | Key theo driver để Rating gom được theo tài xế |
-| `driver.location.updated` | `driverId` | 48 | 3 (hoặc 2) | Tải cao nhất, xem 4.3 |
-| `*.retry.*`, `*.DLQ` | như topic gốc | 3 | 3 | |
+| `trip.rated` | `driverId` | 6 | 3 | Keyed by driver so Rating can aggregate per driver |
+| `driver.location.updated` | `driverId` | 48 | 3 (or 2) | Highest load, see 4.3 |
+| `*.retry.*`, `*.DLQ` | same as source topic | 3 | 3 | |
 
-Cách chọn số partition: lấy **số consumer tối đa muốn chạy song song** làm trần, nhân thêm một hệ số dư. Không thể giảm partition sau này, và tăng partition làm đổi ánh xạ key → partition (phá thứ tự tạm thời), nên chọn dư từ đầu.
+How to choose the partition count: take the **maximum number of consumers you want to run in parallel** as the ceiling, then multiply by a headroom factor. Partitions cannot be reduced later, and increasing them changes the key → partition mapping (temporarily breaking ordering), so over-provision from the start.
 
-Cluster tối thiểu 3 broker, rải ra 3 availability zone, `broker.rack` được đặt để Kafka rải replica qua zone. KRaft với 3 controller riêng (không gộp vai trò với broker ở production).
+The cluster has at least 3 brokers, spread across 3 availability zones, with `broker.rack` set so Kafka spreads replicas across zones. KRaft with 3 dedicated controllers (do not combine the controller and broker roles in production).
 
-### 4.2 Hợp đồng sự kiện
+### 4.2 Event contract
 
-- **Đặt tên theo quá khứ, nói về sự thật đã xảy ra** (`order.created`, `trip.status.changed`). Đã đúng trong dự án.
-- **Event mang đủ dữ liệu** để consumer không phải gọi ngược lại service khác. Ví dụ hiện tại `order.matched` không có `riderId`, buộc Notification phải nhớ ánh xạ trong RAM. Thêm `riderId` (trường mới có default rỗng, tương thích BACKWARD) giải quyết tận gốc.
-- **Schema Registry** giữ chế độ `BACKWARD_TRANSITIVE` (kiểm tra với mọi phiên bản cũ, không chỉ bản liền trước), vì consumer có thể replay dữ liệu rất cũ.
-- Đăng ký schema trong **CI/CD** (kiểm tra tương thích trước khi merge) thay vì để service tự đăng ký lúc chạy. Production tắt `auto.register.schemas`.
-- Thêm vào `Envelope` các trường `schemaVersion` hoặc `traceId` để truy vết xuyên service.
+- **Name events in the past tense, stating a fact that has happened** (`order.created`, `trip.status.changed`). Already the case in the project.
+- **Events carry enough data** so the consumer does not have to call back into another service. For example, currently `order.matched` has no `riderId`, which forces Notification to remember the mapping in RAM. Adding `riderId` (a new field with an empty default, BACKWARD compatible) fixes this at the root.
+- **Schema Registry** stays in `BACKWARD_TRANSITIVE` mode (checks against all previous versions, not just the immediately preceding one), because consumers may replay very old data.
+- Register schemas in **CI/CD** (check compatibility before merge) instead of letting services register them at runtime. Turn off `auto.register.schemas` in production.
+- Add `schemaVersion` or `traceId` fields to `Envelope` for tracing across services.
 
-### 4.3 Luồng vị trí: nút cổ chai thật
+### 4.3 The location stream: the real bottleneck
 
-Hiện tại `driver-app-sim` publish thẳng lên Kafka vì đang giả lập. Trong production, app tài xế **không bao giờ** nói chuyện trực tiếp với Kafka. Cần một lớp:
+Currently `driver-app-sim` publishes directly to Kafka because it is a simulation. In production, the driver app **never** talks to Kafka directly. A layer is needed:
 
 ```
 Driver App ──HTTPS/gRPC/WebSocket──> Location Gateway ──batch──> [driver.location.updated]
 ```
 
-- Gateway xác thực, giới hạn tần suất theo tài xế, validate tọa độ, gắn `timestamp` phía server nếu thiết bị nói dối.
-- Producer đặt `linger.ms=20-50` và `batch.size` lớn, bật nén, để gom nhiều bản ghi vào một request.
-- Consumer Driver Location Service dùng **pipeline Redis** (hoặc `GEOADD` hàng loạt) thay vì gọi một lệnh cho mỗi message, vì Redis sẽ là điểm nóng trước khi Kafka là điểm nóng.
-- Có thể **bỏ qua cập nhật** nếu tài xế gần như không di chuyển (dưới 5m), giảm tải đáng kể.
-- Redis GEO nên **shard theo khu vực** (ví dụ theo geohash hoặc thành phố) thay vì một key `drivers:geo` duy nhất cho cả nước. Một sorted set quá lớn làm `GEOSEARCH` chậm dần.
+- The gateway authenticates, rate-limits per driver, validates coordinates, and attaches a server-side `timestamp` in case the device lies.
+- The producer sets `linger.ms=20-50` and a large `batch.size`, and enables compression, to pack many records into one request.
+- The Driver Location Service consumer uses a **Redis pipeline** (or bulk `GEOADD`) instead of issuing one command per message, because Redis will become a hot spot before Kafka does.
+- Updates can be **skipped** if the driver has barely moved (under 5m), which significantly reduces load.
+- Redis GEO should be **sharded by region** (for example by geohash or by city) instead of a single `drivers:geo` key for the whole country. A sorted set that is too large makes `GEOSEARCH` progressively slower.
 
-## 5. Dữ liệu và trạng thái
+## 5. Data and state
 
-| Dữ liệu | Hiện tại | Production |
+| Data | Currently | Production |
 |---|---|---|
-| Orders, Trips, Ratings | Một Postgres chung (cùng database `grabmini`) | **Mỗi service một database** (hoặc ít nhất một schema/user riêng) để thật sự độc lập. Primary + replica, failover tự động, PITR backup. |
-| Trạng thái và vị trí tài xế | Redis đơn | Redis Cluster hoặc Sentinel. Chấp nhận mất vị trí khi failover vì sẽ tự phục hồi sau vài giây. **Trạng thái ASSIGNED/ON_TRIP** thì không thể coi là phù du, vì thế cần nguồn sự thật bền (Postgres) và Redis chỉ là cache có thể dựng lại từ `trip.status.changed`. |
-| Bảng `processed_events` | Tăng vô hạn | Dọn theo lịch (xóa bản ghi cũ hơn thời gian retention của topic cộng biên an toàn). Phân vùng theo ngày để xóa nhanh. |
-| Tạo bảng khi khởi động | `CREATE TABLE IF NOT EXISTS` trong `connectDB` | Dùng công cụ migration (golang-migrate hoặc goose) chạy trong pipeline deploy, không chạy DDL lúc service khởi động (tránh race khi nhiều instance cùng lên và tránh quyền DDL cho service). |
+| Orders, Trips, Ratings | One shared Postgres (the same `grabmini` database) | **One database per service** (or at least a separate schema/user) to be truly independent. Primary + replica, automatic failover, PITR backup. |
+| Driver state and location | Single Redis | Redis Cluster or Sentinel. Losing locations on failover is acceptable because they recover on their own within a few seconds. **The ASSIGNED/ON_TRIP state** cannot be treated as ephemeral, so it needs a durable source of truth (Postgres), and Redis is only a cache that can be rebuilt from `trip.status.changed`. |
+| `processed_events` table | Grows without bound | Clean up on a schedule (delete records older than the topic retention plus a safety margin). Partition by day for fast deletion. |
+| Creating tables at startup | `CREATE TABLE IF NOT EXISTS` in `connectDB` | Use a migration tool (golang-migrate or goose) run in the deploy pipeline, not DDL at service startup (avoids races when several instances start together and avoids granting DDL privileges to the service). |
 
-Vì nguồn sự thật của trạng thái tài xế nên là bền, cân nhắc đặt "tài xế đang bận" vào Postgres của Trip Service (cột `driver_id` + chỉ mục unique một phần `WHERE status IN ('ASSIGNED','IN_PROGRESS')`) để DB tự đảm bảo "một tài xế một trip đang chạy". Khi đó Redis chỉ còn dùng cho tìm kiếm không gian.
+Because the source of truth for driver state should be durable, consider putting "driver is busy" into Trip Service's Postgres (a `driver_id` column + a partial unique index `WHERE status IN ('ASSIGNED','IN_PROGRESS')`) so that the DB itself guarantees "one driver, one active trip". Redis is then used only for spatial search.
 
-## 6. Triển khai và vận hành
+## 6. Deployment and operations
 
-### 6.1 Chạy trên Kubernetes
+### 6.1 Running on Kubernetes
 
-- Mỗi service một `Deployment`, 2 replica tối thiểu, `PodDisruptionBudget`, trải qua nhiều zone (`topologySpreadConstraints`).
-- **Autoscaling theo consumer lag** (KEDA với scaler Kafka) thay vì theo CPU, vì consumer chờ I/O. Số replica bị chặn bởi số partition.
-- Probe: `/health` hiện chỉ trả `ok`. Tách **liveness** (process còn sống) khỏi **readiness** (kết nối được Kafka, DB, Redis). Một service chưa kết nối được dependency không nên nhận traffic.
-- Rolling update với `maxUnavailable: 0`. Nhờ schema tương thích và consumer idempotent, phiên bản cũ và mới chạy song song an toàn.
-- Rebalance: dùng **cooperative sticky assignor** để scale/rollout không dừng toàn bộ group. Đặt `group.instance.id` (static membership) để restart nhanh không gây rebalance.
+- One `Deployment` per service, at least 2 replicas, a `PodDisruptionBudget`, spread across multiple zones (`topologySpreadConstraints`).
+- **Autoscaling on consumer lag** (KEDA with the Kafka scaler) instead of CPU, because consumers wait on I/O. The number of replicas is capped by the number of partitions.
+- Probes: `/health` currently only returns `ok`. Separate **liveness** (the process is alive) from **readiness** (can connect to Kafka, DB, Redis). A service that cannot reach its dependencies should not receive traffic.
+- Rolling update with `maxUnavailable: 0`. Thanks to compatible schemas and idempotent consumers, old and new versions can safely run side by side.
+- Rebalance: use the **cooperative sticky assignor** so scaling/rollouts do not stop the whole group. Set `group.instance.id` (static membership) so quick restarts do not trigger a rebalance.
 
-### 6.2 Bảo mật
+### 6.2 Security
 
-- Kafka: TLS giữa client và broker, xác thực **SASL/SCRAM hoặc mTLS**, **ACL theo service** theo nguyên tắc ít quyền nhất (Order Service chỉ `WRITE order.created` và `READ` hai topic kết quả). Hiện tại mọi thứ là `PLAINTEXT` không xác thực.
-- Schema Registry, ksqlDB, Kafka UI: nằm sau xác thực, **không mở ra internet**. Kafka UI và ksqlDB hiện mở cổng cho mọi người trong dev.
-- API công khai: có xác thực thật (JWT). Hiện `riderId` lấy từ body request (`handleRateTrip` ghi chú rõ là không có auth). Phải lấy danh tính từ token và kiểm tra rider đó đúng là chủ của trip.
-- WebSocket: xác thực lúc nâng cấp kết nối và kiểm tra `Origin` (hiện `CheckOrigin` luôn trả `true`).
-- Dữ liệu cá nhân (vị trí, tên): xem xét mã hóa trường, và đặt retention ngắn cho topic vị trí vì đây là dữ liệu nhạy cảm.
-- Secrets (mật khẩu DB, credential Kafka) đi qua secret manager, không để trong env mặc định như `grabmini:grabmini` hiện tại.
+- Kafka: TLS between client and broker, **SASL/SCRAM or mTLS** authentication, **per-service ACLs** following least privilege (Order Service gets only `WRITE order.created` and `READ` on the two result topics). Currently everything is `PLAINTEXT` with no authentication.
+- Schema Registry, ksqlDB, Kafka UI: behind authentication, **not exposed to the internet**. Kafka UI and ksqlDB currently expose their ports to everyone in dev.
+- Public APIs: real authentication (JWT). Currently `riderId` is taken from the request body (`handleRateTrip` notes explicitly that there is no auth). Identity must be taken from the token, and the service must check that this rider actually owns the trip.
+- WebSocket: authenticate when upgrading the connection and check `Origin` (currently `CheckOrigin` always returns `true`).
+- Personal data (location, name): consider field-level encryption, and set a short retention on the location topic because it is sensitive data.
+- Secrets (DB password, Kafka credentials) go through a secret manager, not default env values like the current `grabmini:grabmini`.
 
-### 6.3 Sao lưu và khôi phục thảm họa
+### 6.3 Backup and disaster recovery
 
-- Kafka không phải là backup. Retention hữu hạn. Với dữ liệu cần giữ lâu, đổ sang object storage bằng Kafka Connect S3 sink.
-- MirrorMaker 2 sao chép sang cluster thứ hai (region khác) nếu cần DR đa vùng. Lưu ý offset consumer không tự trùng khớp giữa hai cluster.
-- Postgres: backup liên tục (WAL archiving) và thử khôi phục định kỳ.
-- Replay có chủ đích: reset offset của một consumer group (như bài thử rating trong README) là công cụ phục hồi hợp lệ **vì** consumer idempotent. Viết thành runbook.
+- Kafka is not a backup. Retention is finite. For data that must be kept long term, dump it to object storage with the Kafka Connect S3 sink.
+- MirrorMaker 2 replicates to a second cluster (another region) if multi-region DR is needed. Note that consumer offsets do not automatically line up between the two clusters.
+- Postgres: continuous backup (WAL archiving) and periodic restore drills.
+- Deliberate replay: resetting the offsets of a consumer group (like the rating experiment in the developer guide) is a legitimate recovery tool **because** consumers are idempotent. Write it up as a runbook.
 
-## 7. Quan sát (observability)
+## 7. Observability
 
-**Metric cần có** (Prometheus, qua kafka exporter và metric của từng service):
+**Required metrics** (Prometheus, via the Kafka exporter and each service's own metrics):
 
-| Nhóm | Metric | Cảnh báo khi |
+| Group | Metric | Alert when |
 |---|---|---|
-| Consumer | `consumer lag` theo group và partition | lag tăng liên tục quá 2 phút |
-| Consumer | tỷ lệ lỗi handler, số retry | tỷ lệ lỗi vượt ngưỡng |
-| DLQ | số message đến `*.DLQ` | **bất kỳ** message nào trong luồng giao dịch |
-| Broker | under-replicated partitions, ISR shrink | khác 0 |
-| Producer | độ trễ publish, tỷ lệ lỗi | p99 tăng bất thường |
-| Outbox | tuổi của bản ghi chưa gửi cũ nhất | quá 30 giây |
-| Nghiệp vụ | thời gian từ `order.created` đến `order.matched`, tỷ lệ `no_driver_found` | p95 trên 3 giây, hoặc tỷ lệ tăng đột biến |
+| Consumer | `consumer lag` per group and partition | lag keeps growing for more than 2 minutes |
+| Consumer | handler error rate, retry count | error rate exceeds the threshold |
+| DLQ | number of messages arriving in `*.DLQ` | **any** message on the transactional stream |
+| Broker | under-replicated partitions, ISR shrink | non-zero |
+| Producer | publish latency, error rate | p99 rises abnormally |
+| Outbox | age of the oldest unsent record | over 30 seconds |
+| Business | time from `order.created` to `order.matched`, `no_driver_found` rate | p95 above 3 seconds, or the rate spikes |
 
-**Truy vết phân tán** (OpenTelemetry): truyền `traceId` qua header Kafka (`kafka.Message.Headers`), để theo một đơn từ HTTP đến WebSocket qua mọi service. **Log có cấu trúc** (JSON) với `orderId`, `tripId`, `eventId`, `topic`, `partition`, `offset` làm trường chuẩn, thay vì `log.Printf` văn bản tự do như hiện tại.
+**Distributed tracing** (OpenTelemetry): propagate `traceId` through Kafka headers (`kafka.Message.Headers`), so a single order can be followed from HTTP to WebSocket across every service. **Structured logs** (JSON) with `orderId`, `tripId`, `eventId`, `topic`, `partition`, `offset` as standard fields, instead of free-form text `log.Printf` as today.
 
-SLO gợi ý: 99,9% đơn tạo thành công, 95% đơn được match trong 3 giây (khi có tài xế), 99% thông báo trạng thái trip đến client trong 2 giây.
+Suggested SLOs: 99.9% of orders created successfully, 95% of orders matched within 3 seconds (when drivers are available), 99% of trip status notifications reaching the client within 2 seconds.
 
-## 8. Kiểm thử trước khi lên production
+## 8. Testing before production
 
-- **Contract test cho schema**: kiểm tra mỗi phiên bản `.avsc` mới tương thích với bản cũ trong CI. Đã có mẫu trong `eventcodec_test.go`.
-- **Integration test với Kafka thật** (Testcontainers): hiện test chỉ dùng fake Schema Registry, chưa có test cho đường publish và consume thật.
-- **Kiểm thử hỗn loạn**: giết broker, giết consumer giữa lúc xử lý, làm chậm Redis, và kiểm tra các bất biến: không mất đơn, không hai trip cho một đơn, không tài xế kẹt, rating không đếm trùng.
-- **Kiểm thử tải**: mô phỏng 25.000 msg/s vị trí và 500 đơn/s, đo lag và độ trễ match.
+- **Contract tests for schemas**: check in CI that each new `.avsc` version is compatible with the old one. There is already an example in `eventcodec_test.go`.
+- **Integration tests with a real Kafka** (Testcontainers): currently the tests only use a fake Schema Registry, and there are no tests for the real publish and consume path.
+- **Chaos testing**: kill a broker, kill a consumer mid-processing, slow down Redis, and check the invariants: no lost orders, no two trips for one order, no stuck driver, no double-counted rating.
+- **Load testing**: simulate 25,000 msg/s of locations and 500 orders/s, and measure lag and match latency.
 
-## 9. Lộ trình đề xuất
+## 9. Proposed roadmap
 
-Thứ tự theo mức độ rủi ro, không theo độ hấp dẫn kỹ thuật:
+Ordered by level of risk, not by technical appeal:
 
-| Giai đoạn | Việc | Vì sao trước |
+| Phase | Work | Why first |
 |---|---|---|
-| 1. Đúng đắn | Outbox cho Order/Trip (3.1); khóa idempotent và TTL cho matching (3.2); graceful shutdown (3.4); `acks=all` | Đang có thể mất event và kẹt tài xế một cách im lặng |
-| 2. Chịu lỗi | Retry topic (3.3); notification scale được (3.5); migration DB; dependency health check | Tránh sự cố dây chuyền khi một thành phần chậm |
-| 3. An toàn | Xác thực người dùng, TLS/ACL Kafka, secret manager, Location Gateway | Điều kiện để mở ra internet |
-| 4. Vận hành | Cluster 3 broker nhiều zone, K8s, KEDA, metric/trace/alert, runbook | Cần có trước khi có lưu lượng thật |
-| 5. Quy mô | Shard Redis GEO, sao lưu S3, DR đa vùng, kiểm thử tải | Làm khi số liệu thật cho thấy cần |
+| 1. Correctness | Outbox for Order/Trip (3.1); idempotency key and TTL for matching (3.2); graceful shutdown (3.4); `acks=all` | Events can currently be lost and drivers stuck, silently |
+| 2. Fault tolerance | Retry topics (3.3); scalable notification (3.5); DB migrations; dependency health checks | Prevents cascading failures when one component is slow |
+| 3. Security | User authentication, Kafka TLS/ACL, secret manager, Location Gateway | Prerequisite for exposing the system to the internet |
+| 4. Operations | 3-broker multi-zone cluster, K8s, KEDA, metrics/traces/alerts, runbook | Needed before real traffic arrives |
+| 5. Scale | Shard Redis GEO, S3 backup, multi-region DR, load testing | Do it when real numbers show it is needed |
 
-## 10. Những điều cố tình KHÔNG làm
+## 10. What we deliberately do NOT do
 
-- **Không** dùng Kafka làm cơ sở dữ liệu truy vấn cho API. Trạng thái hiện hành nằm trong Postgres, Kafka là đường truyền và nhật ký.
-- **Không** chuyển sang microservice nhỏ hơn nữa. Sáu service hiện có đã đủ ranh giới; thêm nữa chỉ tăng chi phí vận hành.
-- **Không** cho client kết nối Kafka trực tiếp (giữ nguyên nguyên tắc ở design.md mục 1).
-- **Không** bật exactly-once toàn cục (xem 3.6).
-- **Không** tăng partition "cho chắc" quá mức: mỗi partition tốn file handle, bộ nhớ broker và thời gian rebalance.
+- **Do not** use Kafka as a query database for the API. The current state lives in Postgres; Kafka is the transport and the log.
+- **Do not** split into even smaller microservices. The six existing services already have enough boundaries; adding more only increases operational cost.
+- **Do not** let clients connect to Kafka directly (keep the principle from design.md section 1).
+- **Do not** enable exactly-once globally (see 3.6).
+- **Do not** over-provision partitions "just to be safe": each partition costs file handles, broker memory and rebalance time.
 
-## 11. Trạng thái triển khai
+## 11. Implementation status
 
-### Giai đoạn 1 (đã làm)
+### Phase 1 (done)
 
-| Mục | Kết quả | Nơi trong code |
+| Item | Result | Where in the code |
 |---|---|---|
-| 3.1 Outbox | Order Service và Trip Service lưu event vào bảng `outbox` cùng transaction với thay đổi trạng thái (đơn, chuyển trạng thái trip, rating). Một relay publish sau khi commit, `Wake()` để gần như không thêm độ trễ. Mỗi service chỉ relay dòng của mình (`source`), một relay mỗi lần (advisory lock) nên thứ tự theo key được giữ. | `services/pkg/outbox`, `order-service/main.go` (`insertOrder`), `trip-service/main.go` (`transitionWithEvent`, `rateWithEvent`) |
-| 3.2 Matching | `match:{orderId}` ghi quyết định match cùng lúc với claim (một Lua script). `order.created` bị giao lại thì dùng lại tài xế cũ. Trạng thái `ASSIGNED` là **lease** (mặc định 120 giây, `ASSIGN_LEASE_SECONDS`) chứ không phải TTL của key: hết hạn thì tài xế claim lại được. | `pkg/driverstatus` (`ClaimForOrder`), `matching-service/main.go` |
-| 3.4 Shutdown | `kafkaconsumer.Run` thoát khi context bị hủy, commit message đã xử lý xong, không commit message đang dở, và không còn `log.Fatalf` khi fetch lỗi (backoff rồi thử lại). Mọi service bắt SIGTERM. | `pkg/kafkaconsumer`, `pkg/serve`, `main.go` của từng service |
-| `acks=all` | Mọi writer của luồng giao dịch (outbox relay của Order/Trip, Matching, DLQ) dùng `RequireAll`. Vị trí tài xế dùng `RequireOne`. | |
+| 3.1 Outbox | Order Service and Trip Service store events in the `outbox` table in the same transaction as the state change (order, trip transition, rating). A relay publishes after the commit, with `Wake()` so it adds almost no latency. Each service relays only its own rows (`source`), and only one relay at a time (advisory lock), so per-key ordering is preserved. | `services/pkg/outbox`, `order-service/main.go` (`insertOrder`), `trip-service/main.go` (`transitionWithEvent`, `rateWithEvent`) |
+| 3.2 Matching | `match:{orderId}` records the match decision at the same time as the claim (a single Lua script). If `order.created` is redelivered, the previous driver is reused. The `ASSIGNED` state is a **lease** (default 120 seconds, `ASSIGN_LEASE_SECONDS`) rather than a key TTL: once it expires, the driver can be claimed again. | `pkg/driverstatus` (`ClaimForOrder`), `matching-service/main.go` |
+| 3.4 Shutdown | `kafkaconsumer.Run` exits when the context is cancelled, commits messages that have finished processing, does not commit a message that is mid-flight, and no longer calls `log.Fatalf` on a fetch error (backs off and retries). Every service catches SIGTERM. | `pkg/kafkaconsumer`, `pkg/serve`, each service's `main.go` |
+| `acks=all` | Every writer on the transactional stream (the outbox relay of Order/Trip, Matching, DLQ) uses `RequireAll`. Driver locations use `RequireOne`. | |
 
-Thay đổi hành vi cần biết:
+Behavior changes to be aware of:
 
-- **`ON_TRIP` bắt đầu từ lúc có trip.** Trước đây tài xế ở `ASSIGNED` suốt chuyến đi. Vì `ASSIGNED` giờ là lease, Trip Service đặt `ON_TRIP` (và kết thúc lease) khi tạo trip từ `order.matched`.
-- **Trip Service tạo trip và ghi `processed_events` trong một transaction.** Trước đây dedupe được ghi trước khi tạo trip, nên nếu việc tạo trip lỗi thì lần retry bị bỏ qua và trip không bao giờ được tạo.
-- Một request tạo đơn trả `201` ngay khi transaction commit, kể cả khi Kafka đang lỗi. Event được gửi sau khi Kafka trở lại.
+- **`ON_TRIP` starts when the trip is created.** Previously the driver stayed `ASSIGNED` for the whole ride. Because `ASSIGNED` is now a lease, Trip Service sets `ON_TRIP` (and ends the lease) when it creates the trip from `order.matched`.
+- **Trip Service creates the trip and writes `processed_events` in a single transaction.** Previously the dedupe record was written before the trip was created, so if creating the trip failed, the retry was skipped and the trip was never created.
+- A create-order request returns `201` as soon as the transaction commits, even when Kafka is down. The event is sent after Kafka comes back.
 
-### Giải phóng tài xế khi xong chuyến (đã làm)
+### Releasing the driver when the trip ends (done)
 
-Trước đây việc đặt tài xế về `AVAILABLE` nằm trong request, ngoài transaction: process chết giữa lúc commit trạng thái trip và lệnh Redis thì tài xế kẹt `ON_TRIP`, và lease không cứu được. Giờ Trip Service còn consume `trip.status.changed` (group `trip-driver-release-group`) và giải phóng tài xế khi trip `COMPLETED` hoặc `CANCELLED`. Event được xếp hàng cùng transaction với trạng thái nên không thể mất. Đường trong request vẫn giữ làm đường nhanh.
+Previously, setting the driver back to `AVAILABLE` happened inside the request, outside the transaction: if the process died between committing the trip state and the Redis command, the driver was stuck `ON_TRIP`, and the lease could not rescue it. Now Trip Service also consumes `trip.status.changed` (group `trip-driver-release-group`) and releases the driver when the trip is `COMPLETED` or `CANCELLED`. The event is enqueued in the same transaction as the state, so it cannot be lost. The in-request path is kept as a fast path.
 
-Consumer kiểm tra hiện tại chứ không tin event, vì event có thể đến muộn hoặc bị phát lại:
+The consumer checks the current state rather than trusting the event, because events can arrive late or be replayed:
 
-- tài xế còn trip đang chạy trong DB thì giữ nguyên;
-- việc giải phóng là compare-and-set `ON_TRIP` → `AVAILABLE` (`driverstatus.Transition`), nên nếu Matching vừa claim tài xế cho đơn mới (DB chưa có trip) thì claim đó không bị ghi đè.
+- if the driver still has an active trip in the DB, leave them as they are;
+- the release is a compare-and-set `ON_TRIP` → `AVAILABLE` (`driverstatus.Transition`), so if Matching has just claimed the driver for a new order (the DB has no trip yet), that claim is not overwritten.
 
 Code: `trip-service/consumer.go` (`releaseDriverAfterTrip`), `pkg/driverstatus` (`Transition`).
 
-### Giới hạn đã biết của giai đoạn 1
+### Known limitations of phase 1
 
-- **Relay là at-least-once**: publish xong mà chết trước khi xóa dòng thì event đi hai lần. Consumer đã dedupe theo `eventId` hoặc idempotent theo trạng thái.
-- Bảng `outbox` dùng chung một Postgres cho cả hai service ở bản local; khi tách database theo service (mục 5) mỗi service có bảng riêng.
-- Matching vẫn publish trực tiếp (không có DB để dùng outbox). Khoảng hở giữa claim và publish được đóng bằng bản ghi match và lease, không phải bằng outbox.
-- Phần Kafka (relay, consumer) đã được kiểm thử trên broker thật ở giai đoạn 2; toàn bộ hệ thống chưa chạy end-to-end (xem phần kiểm thử bên dưới).
+- **The relay is at-least-once**: if it publishes and then dies before deleting the row, the event goes out twice. Consumers already dedupe by `eventId` or are idempotent by state.
+- The `outbox` table shares one Postgres between the two services in the local version; once databases are split per service (section 5), each service has its own table.
+- Matching still publishes directly (it has no DB to use an outbox with). The gap between claim and publish is closed by the match record and the lease, not by an outbox.
+- The Kafka parts (relay, consumer) were tested against a real broker in phase 2; at the time of writing the whole system had not yet been run end-to-end (see the testing section below; this has since been done).
 
-### Cách đã kiểm thử
+### How it was tested
 
-Test tự động chạy trên Postgres 16, Redis 7 và **Kafka 3.8 thật** (KRaft, một node): relay (rollback, thứ tự, lỗi publish, nhiều relay, tách theo source, publish qua `kafka.Writer` thật), lease và claim theo đơn (kể cả 10 claim đồng thời), matching (giao lại, chưa announce, publish lỗi), Trip Service (tạo trip, replay không đảo trạng thái tài xế, transition và rating cùng event, giải phóng tài xế), và consumer (retry qua các tầng, DLQ, lỗi vĩnh viễn, không chặn partition, shutdown, message bị ngắt giữa chừng được giao lại). Các test này tự bỏ qua nếu không đặt `TEST_DATABASE_URL`, `TEST_REDIS_ADDR`, `TEST_KAFKA_BROKERS` (xem README).
+The automated tests run on Postgres 16, Redis 7 and **a real Kafka 3.8** (KRaft, single node): the relay (rollback, ordering, publish failure, multiple relays, split by source, publishing through a real `kafka.Writer`), the lease and per-order claim (including 10 concurrent claims), matching (redelivery, not yet announced, publish failure), Trip Service (trip creation, replay not flipping driver state, transition and rating in the same event, driver release), and the consumer (retry through the tiers, DLQ, permanent errors, not blocking the partition, shutdown, a message interrupted midway being redelivered). These tests skip themselves if `TEST_DATABASE_URL`, `TEST_REDIS_ADDR`, `TEST_KAFKA_BROKERS` are not set (see the [developer guide](../../docs/guide.md)).
 
-**Chưa chạy toàn bộ hệ thống** (Schema Registry, ksqlDB, các app React) vì môi trường phát triển không có Docker daemon. Các service chưa được chạy cùng nhau end-to-end: cần `pnpm dev:all` và thử lại các bài trong README ("Things to try") trước khi merge.
+**Status when this was written:** the whole system had not been run (Schema Registry, ksqlDB, the React apps) because the development environment had no Docker daemon. **Since then** `pnpm dev:all` has run the full stack locally (a ride was booked, driven and rated through the apps), and the `e2e-test` job in CI runs the services against real Kafka, Postgres and Redis. The Kubernetes manifests, KEDA scaling and the Sentinel/ACL deployment have still not been run on a real cluster.
 
-## 12. Giai đoạn 2 (đã làm)
+## 12. Phase 2 (done)
 
-| Mục | Kết quả | Nơi trong code |
+| Item | Result | Where in the code |
 |---|---|---|
-| 3.3 Retry topic | Với `RetryTiers`, lỗi tạm thời đưa message sang `<topic>.retry.1`, `.2`, `.3` (chờ 5 giây, 1 phút, 10 phút) và partition chạy tiếp. Mỗi tầng có reader riêng (group `<group>.retry.<n>`) chờ đến hạn rồi thử lại; hết tầng cuối thì sang DLQ. Lỗi vĩnh viễn vẫn đi thẳng DLQ. Handler luôn thấy `msg.Topic` gốc. Retry topic được tạo khi khởi động nếu chưa có. Order, Matching, Trip, Rating bật `DefaultRetryTiers`. | `pkg/kafkaconsumer` |
-| 3.5 Notification scale ngang | Event mang `riderId` (`order.matched`, `order.no_driver_found`, `trip.status.changed`; trường mới có default `""` nên tương thích BACKWARD). Notification không ghi socket trực tiếp từ event Kafka: nó `PUBLISH` lên kênh Redis `notify:rider:<id>` / `notify:driver:<id>`, instance nào giữ socket (đã `SUBSCRIBE` lúc kết nối) thì ghi. Trạng thái định tuyến (order→rider cho event cũ, driver→rider cho vị trí) nằm trong Redis. | `notification-service/hub.go`, `consumer.go`; `matching-service`, `trip-service` (cột `trips.rider_id`) |
-| Migration DB | Mỗi service có `migrations/*.sql` nhúng trong binary, chạy bằng goose, bảng version riêng (`schema_migrations_<service>`), khóa advisory để nhiều instance không chạy trùng. `<service> migrate` chạy rồi thoát; `RUN_MIGRATIONS=false` bỏ qua lúc khởi động. | `pkg/migrate`, `*/migrations/` |
-| Health check | `/livez` (luôn 200) tách khỏi `/readyz` (kiểm tra Postgres/Redis/Kafka, mỗi check có timeout 2 giây, chạy song song, 503 kèm tên dependency lỗi). `/readyz` trả 503 ngay khi nhận SIGTERM để load balancer rút traffic trước. Matching và driver-location không có API HTTP nên chỉ mở probe khi đặt `HEALTH_PORT`. `/health` cũ giữ nguyên (liveness) cho `dev.sh`. | `pkg/health` |
+| 3.3 Retry topics | With `RetryTiers`, a transient error sends the message to `<topic>.retry.1`, `.2`, `.3` (waiting 5 seconds, 1 minute, 10 minutes) and the partition keeps moving. Each tier has its own reader (group `<group>.retry.<n>`) that waits until the message is due and then retries; after the last tier it goes to the DLQ. Permanent errors still go straight to the DLQ. The handler always sees the original `msg.Topic`. Retry topics are created at startup if they do not exist. Order, Matching, Trip and Rating enable `DefaultRetryTiers`. | `pkg/kafkaconsumer` |
+| 3.5 Notification horizontal scaling | Events carry `riderId` (`order.matched`, `order.no_driver_found`, `trip.status.changed`; the new field has default `""`, so it is BACKWARD compatible). Notification does not write to sockets directly from a Kafka event: it `PUBLISH`es to the Redis channel `notify:rider:<id>` / `notify:driver:<id>`, and whichever instance holds the socket (having `SUBSCRIBE`d at connect time) writes it. Routing state (order→rider for old events, driver→rider for locations) lives in Redis. | `notification-service/hub.go`, `consumer.go`; `matching-service`, `trip-service` (column `trips.rider_id`) |
+| DB migrations | Each service has `migrations/*.sql` embedded in the binary, run by goose, with its own version table (`schema_migrations_<service>`) and an advisory lock so multiple instances do not run it twice. `<service> migrate` runs and exits; `RUN_MIGRATIONS=false` skips it at startup. | `pkg/migrate`, `*/migrations/` |
+| Health checks | `/livez` (always 200) is separate from `/readyz` (checks Postgres/Redis/Kafka, each check with a 2-second timeout, run in parallel, 503 naming the failing dependency). `/readyz` returns 503 immediately on SIGTERM so the load balancer drains traffic first. Matching and driver-location have no HTTP API, so they only expose probes when `HEALTH_PORT` is set. The old `/health` is kept as is (liveness) for `dev.sh`. | `pkg/health` |
 
-Phát hiện khi kiểm thử trên Kafka thật:
+Findings from testing on a real Kafka:
 
-- **`kafka.Reader` mặc định `MaxWait` 10 giây, và `Close()` chờ fetch đang treo.** Service mất tới 6 đến 10 giây để dừng, kể cả phần graceful shutdown của giai đoạn 1. Đặt `MaxWait` 500ms thì `Close()` mất vài mili giây.
-- Một `Reader` có `GroupID` không tự tạo topic chưa tồn tại, nên `kafkaconsumer` tạo retry topic khi khởi động.
+- **`kafka.Reader` defaults `MaxWait` to 10 seconds, and `Close()` waits for the pending fetch.** Services took 6 to 10 seconds to stop, even with the phase 1 graceful shutdown. With `MaxWait` set to 500ms, `Close()` takes a few milliseconds.
+- A `Reader` with a `GroupID` does not create a missing topic by itself, so `kafkaconsumer` creates the retry topics at startup.
 
-Thay đổi hành vi và đánh đổi cần biết:
+Behavior changes and trade-offs to be aware of:
 
-- **Retry topic làm đảo thứ tự**: message được thử lại sau những message đứng sau nó. Các handler bật `RetryTiers` đã chịu được việc này (chuyển trạng thái được bảo vệ bằng trạng thái hiện tại, mọi event có `eventId`). Với `driver.location.updated` và Notification không bật retry tầng: thông báo gửi lại sau vài phút chỉ hiển thị trạng thái cũ.
-- **Redis trở thành dependency của Notification Service** (trước đây chỉ Kafka). Tin nhắn đăng lên kênh Redis lúc không có ai subscribe sẽ bị bỏ, đúng ngữ nghĩa best-effort của WebSocket: app khôi phục qua REST sau khi kết nối lại (design.md mục 4d).
-- Mỗi cập nhật vị trí tốn thêm một `GET` Redis (tra tài xế→rider) và tối đa hai `PUBLISH`. Ở mức 25.000 msg/s (mục 1) đây là chỗ cần đo; nếu thành vấn đề, thêm cache cục bộ cho ánh xạ tài xế→rider.
-- Trip Service lưu `rider_id` trên trip; trip tạo trước thay đổi này có `rider_id` rỗng nên event của chúng dùng đường dự phòng (tra order→rider trong Redis).
+- **Retry topics reorder messages**: a message is retried after the messages that came behind it. The handlers that enable `RetryTiers` already tolerate this (state transitions are guarded by the current state, and every event has an `eventId`). `driver.location.updated` and Notification do not enable tiered retry: a notification re-sent minutes later would only show stale state.
+- **Redis becomes a dependency of Notification Service** (previously only Kafka). A message published to a Redis channel while nobody is subscribed is dropped, which matches the best-effort semantics of WebSocket: the app recovers through REST after reconnecting (design.md section 4d).
+- Each location update costs one extra Redis `GET` (the driver→rider lookup) and at most two `PUBLISH`es. At 25,000 msg/s (section 1) this is the place to measure; if it becomes a problem, add a local cache for the driver→rider mapping.
+- Trip Service stores `rider_id` on the trip; trips created before this change have an empty `rider_id`, so their events use the fallback path (order→rider lookup in Redis).
 
-## 13. Giai đoạn 3 (đã làm)
+## 13. Phase 3 (done)
 
-| Mục | Kết quả | Nơi trong code |
+| Item | Result | Where in the code |
 |---|---|---|
-| Xác thực người dùng (6.2) | Mọi route của Order, Trip, Rating đòi JWT (HS256: khóa tối thiểu 32 byte, ghim thuật toán, kiểm tra issuer, audience và hạn dùng). Danh tính lấy từ token, không từ body: body ghi `riderId` khác với token thì 403. Kiểm tra quyền sở hữu: rider chỉ thấy đơn và trip của mình (người khác nhận 404 như thể không tồn tại); chỉ tài xế của trip được pickup và complete; chỉ rider của trip được chấm điểm; cả hai bên được hủy. | `pkg/auth`, `*/main.go` (`routes`) |
-| Nhà phát hành token | `auth-service` (cổng 3005): chỉ là **giả lập identity provider cho dev**, cấp token cho bất kỳ ai xin. Từ chối khởi động khi `APP_ENV=production` trừ khi đặt `ALLOW_DEV_TOKENS=true`. Production phải thay bằng IdP thật. | `services/auth-service` |
-| WebSocket (6.2) | Token đi qua subprotocol (`bearer, <token>`), không nằm trên query string nên không vào access log. Socket của rider X hay driver X chỉ mở được bằng token đúng vai trò và đúng id. Kiểm tra `Origin` theo `ALLOWED_ORIGINS` (bắt buộc khi production). | `notification-service/main.go` |
-| Frontend | `@grab-mini/client` đăng nhập, gắn token vào mọi request (thử lại một lần khi 401) và vào WebSocket. | `packages/client/src/auth.ts` |
-| Secret manager (6.2) | `NAME_FILE` hoặc `NAME`; mặc định cho dev chỉ dùng ngoài production. Áp dụng cho `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. | `pkg/secret` |
-| Location Gateway (4.3) | App tài xế không bao giờ nói chuyện với Kafka. Gateway (cổng 3006) xác thực tài xế, kiểm tra tọa độ, giới hạn 1 báo cáo mỗi giây mỗi tài xế (429 kèm `Retry-After`), bỏ qua báo cáo của tài xế đứng yên (dưới 5 m) trừ một nhịp mỗi 30 giây, bỏ qua timestamp thiết bị lệch hơn 30 giây so với đồng hồ server, publish theo lô 20ms với lz4 và `acks=1`. `driver-app-sim` giờ gọi gateway qua HTTP như một client thật. | `services/location-gateway` |
-| TLS + SASL/SCRAM + ACL cho Kafka (6.2) | `pkg/kafkaconn` bật TLS và SASL qua biến môi trường (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD[_FILE]`, `KAFKA_CA_FILE`); production từ chối kết nối plaintext trừ khi đặt `KAFKA_ALLOW_PLAINTEXT=true`. Mỗi service một principal; `scripts/kafka-acls.sh` cấp đúng quyền (ghi topic nó sản xuất, đọc topic nó tiêu thụ, và Read/Write/Describe/Create trên prefix `<topic>.` cho retry topic và DLQ của nó). `deploy/kafka-secure/start-local.sh` dựng một broker một node có cả ba lớp bảo mật để thử trên máy. | `pkg/kafkaconn`, `scripts/kafka-acls.sh`, `deploy/kafka-secure/` |
+| User authentication (6.2) | Every Order, Trip and Rating route requires a JWT (HS256: minimum 32-byte key, algorithm pinned, issuer, audience and expiry checked). Identity comes from the token, not the body: a body that names a `riderId` different from the token gets a 403. Ownership checks: a rider sees only their own orders and trips (others get a 404 as if it did not exist); only the trip's driver can pickup and complete; only the trip's rider can rate; both sides can cancel. | `pkg/auth`, `*/main.go` (`routes`) |
+| Token issuer | `auth-service` (port 3005): only a **dev identity-provider stand-in**, which issues a token to anyone who asks. It refuses to start when `APP_ENV=production` unless `ALLOW_DEV_TOKENS=true` is set. Production must replace it with a real IdP. | `services/auth-service` |
+| WebSocket (6.2) | The token travels in a subprotocol (`bearer, <token>`), not in the query string, so it does not end up in access logs. The socket for rider X or driver X can only be opened with a token of the right role and the right id. `Origin` is checked against `ALLOWED_ORIGINS` (mandatory in production). | `notification-service/main.go` |
+| Frontend | `@grab-mini/client` logs in, attaches the token to every request (retrying once on 401) and to the WebSocket. | `packages/client/src/auth.ts` |
+| Secret manager (6.2) | `NAME_FILE` or `NAME`; dev defaults are used only outside production. Applies to `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. | `pkg/secret` |
+| Location Gateway (4.3) | The driver app never talks to Kafka. The gateway (port 3006) authenticates the driver, validates coordinates, limits each driver to 1 report per second (429 with `Retry-After`), drops reports from a stationary driver (under 5 m) except one heartbeat every 30 seconds, drops reports whose device timestamp is more than 30 seconds off the server clock, and publishes in 20ms batches with lz4 and `acks=1`. `driver-app-sim` now calls the gateway over HTTP like a real client. | `services/location-gateway` |
+| TLS + SASL/SCRAM + ACL for Kafka (6.2) | `pkg/kafkaconn` enables TLS and SASL through environment variables (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD[_FILE]`, `KAFKA_CA_FILE`); production refuses plaintext connections unless `KAFKA_ALLOW_PLAINTEXT=true` is set. One principal per service; `scripts/kafka-acls.sh` grants exactly the right permissions (write the topics it produces, read the topics it consumes, and Read/Write/Describe/Create on the `<topic>.` prefix for its own retry topics and DLQ). `deploy/kafka-secure/start-local.sh` brings up a single-node broker with all three security layers for trying it on a laptop. | `pkg/kafkaconn`, `scripts/kafka-acls.sh`, `deploy/kafka-secure/` |
 
-Đã kiểm chứng trên broker thật có TLS, SASL/SCRAM, ACL và `auto.create.topics.enable=false` (dựng bằng chính `start-local.sh`): consumer của matching-service chạy trọn đường lỗi (retry topic, DLQ) với đúng quyền của nó; order-service ghi vào `order.created` được nhưng bị từ chối khi ghi vào `order.matched`; rating-service không đọc được `order.created`; sai mật khẩu, user lạ và chứng chỉ broker không tin cậy đều bị từ chối; `trip-service` chạy với principal riêng và `/readyz` trả 200.
+Verified on a real broker with TLS, SASL/SCRAM, ACLs and `auto.create.topics.enable=false` (brought up with `start-local.sh` itself): the matching-service consumer ran the full failure path (retry topics, DLQ) with exactly its own permissions; order-service can write to `order.created` but is denied when writing to `order.matched`; rating-service cannot read `order.created`; a wrong password, an unknown user and an untrusted broker certificate are all rejected; `trip-service` ran with its own principal and `/readyz` returned 200.
 
-Phát hiện khi làm:
+Findings along the way:
 
-- `auto.create.topics.enable=false` là cấu hình đúng cho production, nhưng DLQ trước đây chỉ tồn tại nhờ auto-create của broker. `kafkaconsumer` giờ tự tạo cả DLQ (dùng quyền Create trên prefix `<topic>.`), như đã làm với retry topic.
-- ACL prefix `order.created.` khớp `order.created.retry.1` và `order.created.DLQ` nhưng **không** khớp chính `order.created`, nên quyền trên topic gốc và quyền trên topic phụ tách bạch.
+- `auto.create.topics.enable=false` is the correct production setting, but the DLQ used to exist only thanks to the broker's auto-create. `kafkaconsumer` now creates the DLQ itself as well (using the Create permission on the `<topic>.` prefix), as it already did for retry topics.
+- The prefix ACL `order.created.` matches `order.created.retry.1` and `order.created.DLQ` but does **not** match `order.created` itself, so permissions on the original topic and on the auxiliary topics are kept separate.
 
-Giới hạn đã biết, chưa làm:
+Known limitations, not done:
 
-- **Token chỉ được kiểm tra lúc mở WebSocket.** Kết nối đang mở vẫn sống sau khi token hết hạn (1 giờ). Cần đóng socket khi token hết hạn, hoặc yêu cầu client gửi token mới.
-- **HS256 dùng khóa chung.** Mọi service giữ khóa có thể tự ký token. Khi có IdP thật, chuyển sang khóa bất đối xứng (RS256/EdDSA) để service chỉ giữ khóa công khai.
-- **Giới hạn tần suất của gateway nằm trong RAM mỗi instance.** Chạy nhiều instance mà không sticky routing thì một tài xế có thể báo nhanh hơn giới hạn (mỗi instance cho một lần). Cần Redis hoặc sticky theo tài xế khi scale.
-- **Một tài xế đọc được mọi đơn nếu biết UUID của đơn** (cần để Driver App lấy điểm đón). UUID khó đoán, nhưng chặt hơn nếu Order Service lưu tài xế được ghép (đã nhận `order.matched`) và chỉ cho tài xế đó đọc; tôi chưa làm vì có race giữa việc ghi `driver_id` và việc Driver App lấy đơn ngay sau khi nhận tin.
-- **Schema Registry, ksqlDB, Kafka UI vẫn chưa có xác thực** và vẫn mở cổng trong `docker-compose.yml` (mục 6.2 của giai đoạn này). Services nói chuyện với Schema Registry qua HTTP không xác thực. `docker-compose.yml` vẫn chạy Kafka PLAINTEXT cho dev.
-- Redis và Postgres chưa bật TLS, và Redis chưa có mật khẩu (chỉ `DATABASE_URL` đi qua `pkg/secret`).
-- Chưa có mTLS giữa các service, chưa mã hóa trường dữ liệu cá nhân, chưa đặt retention ngắn cho topic vị trí.
-- Chưa chạy end-to-end cả hệ thống (Schema Registry, ksqlDB, các app) vì sandbox không có Docker. Gateway và các route xác thực được kiểm thử bằng test tự động và bằng binary thật với Postgres, Redis, Kafka; còn luồng trình duyệt (đăng nhập, WebSocket với subprotocol) mới được kiểm tra bằng typecheck, chưa chạy trong trình duyệt.
+- **The token is checked only when the WebSocket is opened.** An open connection stays alive after the token expires (1 hour). The socket needs to be closed when the token expires, or the client needs to be required to send a new token.
+- **HS256 uses a shared key.** Any service holding the key can sign tokens itself. With a real IdP, switch to asymmetric keys (RS256/EdDSA) so services hold only the public key.
+- **The gateway's rate limit lives in each instance's RAM.** Running several instances without sticky routing lets a driver report faster than the limit (each instance allows one). Redis or driver-sticky routing is needed when scaling.
+- **A driver can read any order if they know its UUID** (needed so the Driver App can fetch the pickup point). UUIDs are hard to guess, but it would be tighter if Order Service stored the matched driver (having received `order.matched`) and let only that driver read it; I haven't done this because there is a race between writing `driver_id` and the Driver App fetching the order right after receiving the notification.
+- **Schema Registry, ksqlDB and Kafka UI still have no authentication** and still expose their ports in `docker-compose.yml` (section 6.2 of this phase). Services talk to Schema Registry over unauthenticated HTTP. `docker-compose.yml` still runs Kafka PLAINTEXT for dev.
+- Redis and Postgres do not have TLS enabled, and Redis has no password (only `DATABASE_URL` goes through `pkg/secret`).
+- There is no mTLS between services, no field-level encryption of personal data, and no short retention set on the location topic.
+- The whole system has not been run end-to-end (Schema Registry, ksqlDB, the apps) because the sandbox has no Docker. The gateway and the authenticated routes were tested with automated tests and with real binaries against Postgres, Redis and Kafka; the browser flow (login, WebSocket with the subprotocol) has only been checked by typecheck and has not been run in a browser.
 
-## 14. Giai đoạn 4 (đã làm)
+## 14. Phase 4 (done)
 
-| Mục | Kết quả | Nơi trong code |
+| Item | Result | Where in the code |
 |---|---|---|
-| Log có cấu trúc (7) | `logging.Setup` đưa mọi dòng log, kể cả `log.Printf`, qua `slog`: JSON có `service` ở production. Dòng nằm trong một span có thêm `trace_id` và `span_id`. Các dòng chính của consumer có `topic`, `partition`, `offset`, `key` làm trường riêng. | `pkg/logging`, `pkg/kafkaconsumer` |
-| Metric (7) | `/metrics` trên mọi service: HTTP theo route (không theo URL), publish theo topic, `kafka_consumer_messages_total{result=ok\|retried\|dead_lettered}`, `outbox_oldest_pending_age_seconds`, độ trễ ghép (SLO 3 giây), đơn tạo, trip chuyển trạng thái, vị trí theo kết quả, socket đang mở. | `pkg/metrics`, từng service |
-| Truy vết (7) | W3C `traceparent` qua HTTP và header Kafka, kể cả qua outbox (lưu cạnh dòng, cột `headers`) và qua retry topic. Một request qua Postgres, Kafka thật và một retry topic là **một trace**, mọi consumer span là con của request span. Xuất OTLP khi đặt `OTEL_EXPORTER_OTLP_ENDPOINT`; lấy mẫu 100% (dev) hoặc 10% (production). | `pkg/tracing`, `pkg/outbox` |
-| Cổng admin (6.1) | `HEALTH_PORT` chuyển `/livez`, `/readyz`, `/metrics` sang một cổng riêng và bỏ chúng khỏi mux công khai: ingress không thể lộ `/metrics`. | `pkg/health` (`Mount`) |
-| Triển khai (6.1) | Dockerfile (distroless, non-root); Kustomize base sinh từ `generate.py`: Deployment (non-root, filesystem chỉ đọc, probe, `maxUnavailable: 0`, trải qua zone, PDB, `preStop`), Job migration, KEDA scale theo lag (chặn bởi số partition), NetworkPolicy, PodMonitor. | `deploy/` |
-| Cluster Kafka (4.1) | Strimzi: 3 controller KRaft và 3 broker trải 3 zone, `replication.factor=3`, `min.insync.replicas=2`, không bầu leader không đồng bộ, không tự tạo topic. `KafkaUser` và ACL **đọc từ `scripts/kafka-acls.sh`**: một bảng quyền duy nhất. | `deploy/k8s/base/kafka/` |
-| Cảnh báo (7) | 15 luật: dead letter (page với bất kỳ message nào), lag tăng, tỷ lệ lỗi, URP, thiếu broker, lỗi publish, outbox kẹt, dòng bị cách ly, SLO ghép 3 giây, tỷ lệ không có tài xế, burn-rate đa cửa sổ cho đặt xe. Mỗi luật có test ca "phải kêu" và ca "không kêu" chạy bằng `promtool test rules`. | `deploy/monitoring/` |
-| Runbook | Một mục cho mỗi cảnh báo: kiểm tra gì, theo thứ tự nào, làm gì; cùng với deploy, replay, xoay vòng secret. | `docs/runbook.md` |
-| Redrive DLQ (3.3) | `dlq-redrive` đẩy dead letter về topic gốc với đúng key và bytes; nhớ vị trí trong consumer group; `-dry-run`, `-error`, `-max`. | `services/dlq-redrive` |
+| Structured logging (7) | `logging.Setup` routes every log line, including `log.Printf`, through `slog`: JSON with `service` in production. A line inside a span additionally gets `trace_id` and `span_id`. The main consumer lines have `topic`, `partition`, `offset`, `key` as separate fields. | `pkg/logging`, `pkg/kafkaconsumer` |
+| Metrics (7) | `/metrics` on every service: HTTP by route (not by URL), publishes by topic, `kafka_consumer_messages_total{result=ok\|retried\|dead_lettered}`, `outbox_oldest_pending_age_seconds`, match latency (3-second SLO), orders created, trip state transitions, locations by outcome, open sockets. | `pkg/metrics`, each service |
+| Tracing (7) | W3C `traceparent` across HTTP and Kafka headers, including through the outbox (stored alongside the row, in the `headers` column) and through retry topics. A request that passes through Postgres, a real Kafka and a retry topic is **one trace**, and every consumer span is a child of the request span. Exports OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; sampling is 100% (dev) or 10% (production). | `pkg/tracing`, `pkg/outbox` |
+| Admin port (6.1) | `HEALTH_PORT` moves `/livez`, `/readyz`, `/metrics` to a separate port and removes them from the public mux: an ingress cannot expose `/metrics`. | `pkg/health` (`Mount`) |
+| Deployment (6.1) | Dockerfile (distroless, non-root); a Kustomize base generated by `generate.py`: Deployment (non-root, read-only filesystem, probes, `maxUnavailable: 0`, spread across zones, PDB, `preStop`), migration Job, KEDA scaling on lag (capped by the partition count), NetworkPolicy, PodMonitor. | `deploy/` |
+| Kafka cluster (4.1) | Strimzi: 3 KRaft controllers and 3 brokers spread across 3 zones, `replication.factor=3`, `min.insync.replicas=2`, no unclean leader election, no topic auto-creation. `KafkaUser` and ACLs are **read from `scripts/kafka-acls.sh`**: a single table of permissions. | `deploy/k8s/base/kafka/` |
+| Alerts (7) | 15 rules: dead letters (page on any message), growing lag, error rate, URP, missing brokers, publish failures, stuck outbox, quarantined rows, the 3-second match SLO, no-driver rate, multi-window burn rate for booking. Each rule has a "must fire" and a "must not fire" test case run with `promtool test rules`. | `deploy/monitoring/` |
+| Runbook | One entry per alert: what to check, in what order, what to do; plus deploy, replay and secret rotation. | `docs/runbook.md` |
+| DLQ redrive (3.3) | `dlq-redrive` pushes dead letters back to the original topic with the exact key and bytes; remembers its position in a consumer group; `-dry-run`, `-error`, `-max`. | `services/dlq-redrive` |
 
-Lỗi tìm thấy và sửa khi làm giai đoạn này:
+Bugs found and fixed while doing this phase:
 
-- **`metrics.HTTP` làm hỏng WebSocket.** Response writer của nó che mất `http.Hijacker`, nên không socket nào mở được qua middleware.
-  Tìm thấy khi chạy test của Notification Service qua đúng chuỗi middleware của production. (Một thay đổi giữa chừng tưởng
-  vô hại sẽ làm Notification Service hỏng hoàn toàn.)
-- **Outbox relay bị chặn bởi một event hỏng.** Một event Kafka không bao giờ nhận (quá lớn, ví dụ) làm mọi lần flush thất bại:
-  các event sau bị kẹt và các event tốt trong cùng lô bị gửi lại mãi. Giờ lô lỗi được thử từng event; event bị từ chối vĩnh viễn
-  chuyển sang `outbox_dead` (có metric và cảnh báo), lỗi tạm thời giữ lại và commit phần đã gửi.
-- **Mất message khi retry topic và DLQ cùng từ chối ghi.** Consumer vẫn commit message đó. Giờ nó giữ partition lại và thử đến khi
-  message nằm an toàn trên một trong hai (hoặc dừng khi tắt máy, để message được giao lại).
-- DLQ và retry topic được tạo với `KAFKA_REPLICATION_FACTOR` (production: 3) thay vì luôn là 1.
+- **`metrics.HTTP` broke WebSocket.** Its response writer hid `http.Hijacker`, so no socket could be opened through the middleware.
+  Found when running Notification Service's tests through the exact production middleware chain. (A seemingly
+  harmless mid-way change would have broken Notification Service completely.)
+- **The outbox relay was blocked by one bad event.** An event Kafka would never accept (for example, one that is too large) made every flush fail:
+  later events got stuck and the good events in the same batch were resent forever. Now a failing batch is tried event by event; an event
+  that is permanently rejected is moved to `outbox_dead` (with a metric and an alert), transient errors are kept and the part already sent is committed.
+- **Message loss when the retry topic and the DLQ both refuse the write.** The consumer still committed that message. Now it holds the partition and keeps trying until
+  the message is safe on one of the two (or stops on shutdown, so the message is redelivered).
+- DLQs and retry topics are created with `KAFKA_REPLICATION_FACTOR` (production: 3) instead of always 1.
 
-Giới hạn đã biết của giai đoạn này:
+Known limitations of this phase:
 
-- **Chưa chạy trên cluster thật.** Manifest đã qua kubeconform (strict, kèm schema CRD của Strimzi, KEDA, Prometheus Operator),
-  kiểm tra chéo với code, và `promtool`. Chưa được áp dụng vào một cluster, nên cách Strimzi/KEDA thật sự hành xử, quyền
-  RBAC, PVC theo zone, và Dockerfile (chưa build vì sandbox không có Docker daemon) đều chưa được kiểm chứng.
-- Ngưỡng cảnh báo là ước lượng theo giả định ở mục 1, chưa được hiệu chỉnh theo lưu lượng thật.
-- Không có dashboard Grafana, chưa có Postgres/Redis/Schema Registry/OpenTelemetry collector trong manifest (đặt qua `config.yaml`).
-- Không có static membership (`group.instance.id`) cho consumer: `kafka-go` v0.4 không hỗ trợ, nên mỗi lần restart pod vẫn gây một rebalance.
-- Mỗi Deployment dùng một ServiceAccount chung và không có egress NetworkPolicy.
-- Matching và Location Gateway vẫn không có outbox (xem runbook).
+- **Not run on a real cluster.** The manifests passed kubeconform (strict, with the CRD schemas for Strimzi, KEDA and Prometheus Operator),
+  cross-checking against the code, and `promtool`. They have not been applied to a cluster, so how Strimzi/KEDA actually behave, the
+  RBAC permissions, zone-aware PVCs, and the Dockerfile (not built because the sandbox has no Docker daemon) are all unverified.
+- Alert thresholds are estimates based on the assumptions in section 1, not calibrated against real traffic.
+- There are no Grafana dashboards, and no Postgres/Redis/Schema Registry/OpenTelemetry collector in the manifests (set through `config.yaml`).
+- There is no static membership (`group.instance.id`) for consumers: `kafka-go` v0.4 does not support it, so every pod restart still causes a rebalance.
+- Every Deployment uses a shared ServiceAccount and there is no egress NetworkPolicy.
+- Matching and Location Gateway still have no outbox (see the runbook).
 
-## 15. Giai đoạn 5 (đã làm một phần)
+## 15. Phase 5 (partly done)
 
-Nguyên tắc của giai đoạn này là **đo trước, tối ưu sau**, nên phần lớn thành quả là công cụ đo và những gì nó tìm ra.
+The principle of this phase is **measure first, optimize after**, so most of the output is the measurement tooling and what it found.
 
-- **Kiểm thử tải** (`deploy/loadtest`, `services/loadtest`, `services/dev-registry`): chạy các service thật không cần Docker; sinh tải mở
-  (đặt đơn + tài xế báo vị trí qua gateway), đọc quantile từ `/metrics`. Tìm ra và sửa: `BatchTimeout` 1 s mặc định của kafka-go (mọi publish
-  đồng bộ ≥ 1 s), commit đồng bộ từng message (`CommitInterval`), consumer tuần tự (`Workers`, một worker mỗi partition vẫn giữ thứ tự),
-  và tối đa 50 round trip Redis mỗi đơn khi tài xế gần đã bận (`ClaimFirstForOrder`, một script). Kết quả và diễn giải trung thực:
-  [docs/performance.md](../../docs/performance.md): 250 đơn/s + 750 vị trí/s sạch trên một máy 4 core; 400 đơn/s thì máy bão hòa.
-- **Redis GEO**: đã đo. Chi phí tìm kiếm tỉ lệ với số ứng viên trong bán kính, không phải tổng tài xế; đã làm tìm theo vòng mở rộng
-  (1 → 3 → bán kính cấu hình). **Shard theo ô có sẵn nhưng tắt** (`GEO_SHARD_DEGREES`, mặc định 0): đã đo, nó không làm mỗi truy vấn
-  rẻ hơn mà chỉ chia tải ra nhiều key, nên chỉ bật khi các key nằm trên nhiều node; chưa dùng được với Redis Cluster (xem docs/performance.md).
-- **Dọn dữ liệu**: CronJob xóa `processed_events` và `rating_events` cũ hơn 30 ngày theo lô (đã thử trên Postgres thật); `outbox` đã tự
-  xóa khi publish, `outbox_dead` để người xử lý.
-- **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, quy trình chuyển vùng),
-  `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
+- **Load testing** (`deploy/loadtest`, `services/loadtest`, `services/dev-registry`): runs the real services without Docker; generates open-loop load
+  (order creation + drivers reporting locations through the gateway), and reads quantiles from `/metrics`. It found and fixed: kafka-go's default 1 s `BatchTimeout` (every synchronous
+  publish took ≥ 1 s), a synchronous commit per message (`CommitInterval`), sequential consumers (`Workers`; one worker per partition still preserves ordering),
+  and up to 50 Redis round trips per order when the nearby drivers are already busy (`ClaimFirstForOrder`, a single script). Results and an honest interpretation:
+  [docs/performance.md](../../docs/performance.md): 250 orders/s + 750 locations/s run cleanly on a single 4-core machine; at 400 orders/s the machine saturates.
+- **Redis GEO**: measured. Search cost is proportional to the number of candidates within the radius, not the total number of drivers; search now uses expanding rings
+  (1 → 3 → configured radius). **Per-cell sharding exists but is off** (`GEO_SHARD_DEGREES`, default 0): measured, it does not make each query
+  cheaper, it only spreads the load across more keys, so enable it only when the keys sit on multiple nodes; it cannot yet be used with Redis Cluster (see docs/performance.md).
+- **Data cleanup**: a CronJob deletes `processed_events` and `rating_events` older than 30 days in batches (tried on a real Postgres); `outbox` rows are already
+  deleted on publish, and `outbox_dead` is left for a human to handle.
+- **Backup and DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (how critical each piece of data is, the region failover procedure),
+  `deploy/k8s/dr/mirrormaker2.yaml` and `s3-archive.yaml` (schema-checked with `deploy/verify.sh`, **not run on a real cluster**).
 
-Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); chưa diễn tập khôi phục/chuyển
-vùng; Redis Cluster chưa hỗ trợ (script dựng key động); Sentinel được client hỗ trợ và đã thử failover thật, nhưng manifest không triển khai Redis; bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
-mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).
+Remaining limitations: no measurements on real infrastructure (the targets of 500 orders/s and 25,000 locations/s are unverified); no restore/region-failover drill yet;
+Redis Cluster is not supported (the script builds keys dynamically); Sentinel is supported by the client and a real failover was tried, but the manifests do not deploy Redis; the `orders`/`trips` tables have no retention policy. Together with the limitations in
+sections 13 and 14 and the small item from phase 2 (a driver→rider mapping cache if measurement shows it is needed).

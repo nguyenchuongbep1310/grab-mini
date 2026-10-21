@@ -1,168 +1,168 @@
 # Runbook
 
-Cái gì hỏng, kiểm tra ở đâu, làm gì. Mỗi mục dưới đây ứng với một cảnh báo trong
-[deploy/monitoring/alerts.rules.yaml](../deploy/monitoring/alerts.rules.yaml): trường `runbook`
-của cảnh báo trỏ tới tiêu đề của mục (đừng đổi tiêu đề mà không đổi cảnh báo).
+What breaks, where to look, what to do. Each section below corresponds to an alert in
+[deploy/monitoring/alerts.rules.yaml](../deploy/monitoring/alerts.rules.yaml): the alert's `runbook`
+field points to the section heading (do not rename a heading without updating the alert).
 
-> **Phạm vi kiểm chứng.** Các công cụ của project (`dlq-redrive`, truy vấn Postgres, khóa Redis,
-> metric, log) đã được thử trên môi trường test cục bộ. Các lệnh `kubectl` và tài nguyên Strimzi/KEDA
-> **chưa được chạy trên một cluster thật**: manifest đã qua kiểm tra schema và kiểm tra chéo
-> (`deploy/verify.sh`) chứ chưa được áp dụng. Lần đầu dùng, hãy thử ở môi trường staging.
+> **Scope of verification.** The project's tools (`dlq-redrive`, Postgres queries, Redis keys,
+> metrics, logs) have been tried in a local test environment. The `kubectl` commands and the Strimzi/KEDA
+> resources have **not been run on a real cluster**: the manifests have passed schema checks and cross-checks
+> (`deploy/verify.sh`) but have not been applied. Try them in staging the first time you use them.
 
-## Cách tìm hiểu một sự cố
+## How to investigate an incident
 
-1. **Cảnh báo nói gì?** Tên cảnh báo cho biết hệ thống nào. `severity: page` nghĩa là rider bị ảnh hưởng
-   hoặc dữ liệu đang gặp rủi ro ngay bây giờ.
-2. **Pod nào không khỏe?** `/readyz` của mỗi service trả JSON nói dependency nào lỗi
-   (cổng admin `9090`, không phải cổng API):
+1. **What does the alert say?** The alert name tells you which system is affected. `severity: page` means riders
+   are affected or data is at risk right now.
+2. **Which pod is unhealthy?** Each service's `/readyz` returns JSON saying which dependency is failing
+   (admin port `9090`, not the API port):
    ```bash
    kubectl -n grab-mini port-forward deploy/trip-service 9090 &
    curl -s localhost:9090/readyz    # {"checks":{"kafka":"ok","postgres":"ok","redis":"connection refused"},"status":"unavailable"}
    ```
-3. **Một đơn cụ thể đi đâu?** Log là JSON, mỗi dòng có `service`; dòng nằm trong một span có thêm
-   `trace_id`. Tìm theo `orderId`, hoặc theo `trace_id` để xem mọi service đã làm gì cho cùng một request
-   (HTTP, outbox, từng hop Kafka, cả các lần retry, đều ở trong một trace).
-4. **Trạng thái consumer:**
+3. **Where did a specific order go?** Logs are JSON, and every line has `service`; lines inside a span also have
+   `trace_id`. Search by `orderId`, or by `trace_id` to see what every service did for the same request
+   (HTTP, outbox, each Kafka hop, and all retries are in one trace).
+4. **Consumer state:**
    ```bash
    kafka-consumer-groups.sh --bootstrap-server $BOOTSTRAP --command-config ops.properties --describe --group matching-service-group
    ```
-   (`ops.properties` là credential của người vận hành, xem `deploy/kafka-secure` và Strimzi `KafkaUser/ops`.)
+   (`ops.properties` holds the operator's credentials; see `deploy/kafka-secure` and the Strimzi `KafkaUser/ops`.)
 
-Các dashboard nên có: lag theo group, `kafka_consumer_messages_total` theo `result`,
-`outbox_oldest_pending_age_seconds`, `matching_latency_seconds`, `http_requests_total` theo route và code.
+Dashboards worth having: lag per group, `kafka_consumer_messages_total` by `result`,
+`outbox_oldest_pending_age_seconds`, `matching_latency_seconds`, `http_requests_total` by route and code.
 
 ---
 
 ## Consumer lag
 
-**Cảnh báo:** `KafkaConsumerLagGrowing`, `KafkaLocationConsumerLagGrowing`.
-**Nghĩa là:** một consumer group xử lý chậm hơn tốc độ message đến. Rider thấy trạng thái chậm hoặc thiếu.
+**Alerts:** `KafkaConsumerLagGrowing`, `KafkaLocationConsumerLagGrowing`.
+**Meaning:** a consumer group is processing slower than messages arrive. Riders see slow or missing status updates.
 
-Group `*.retry.N` có lag là bình thường (message chờ đến hạn), cảnh báo đã loại chúng ra.
+Lag on `*.retry.N` groups is normal (messages waiting until they are due); the alerts exclude them.
 
-**Kiểm tra theo thứ tự:**
+**Check in this order:**
 
-1. Lag có thật sự tăng, hay vừa có một đợt cao điểm? Xem `kafka_consumergroup_lag` theo `partition`:
-   - **Một partition lag, các partition khác không:** một message "nặng" hoặc một key nóng. Tìm trong log
-     `topic`, `partition`, `offset` của message đang xử lý.
-   - **Mọi partition đều lag:** consumer thiếu năng lực hoặc dependency chậm.
-2. Handler có chậm không? `histogram_quantile(0.95, sum by (le, group) (rate(kafka_consumer_handle_duration_seconds_bucket[5m])))`.
-   Tăng đột ngột nghĩa là Postgres hoặc Redis chậm (xem `/readyz`, và mục [Pods not ready](#pods-not-ready)).
-3. Có đang retry hàng loạt không? `rate(kafka_consumer_messages_total{result="retried"}[5m])`. Nếu có, nguyên nhân
-   là một dependency lỗi: xem [Dead letters](#dead-letters).
-4. KEDA có đang scale không? `kubectl -n grab-mini get scaledobject` và `describe` cái liên quan.
-   Số replica **bị chặn bởi số partition** (6 hoặc 12 hoặc 48 tùy topic): thêm replica vượt số partition
-   không giúp gì. Nếu replica đã ở mức tối đa mà vẫn lag, cần tăng số partition (chỉ tăng được, và làm đổi
-   ánh xạ key → partition, nên thứ tự trong lúc chuyển có thể lệch tạm thời) hoặc làm handler nhanh hơn.
-5. Rebalance liên tục? Log có `consumer stopped` / `consumer running` lặp lại, hoặc pod restart: xem
-   `kubectl get pods` (RESTARTS), và `kubectl describe pod` (OOMKilled?).
+1. Is the lag really growing, or was there just a spike? Look at `kafka_consumergroup_lag` by `partition`:
+   - **One partition lagging, the others not:** a "heavy" message or a hot key. Look in the logs for the
+     `topic`, `partition` and `offset` of the message being processed.
+   - **All partitions lagging:** the consumers lack capacity, or a dependency is slow.
+2. Is the handler slow? `histogram_quantile(0.95, sum by (le, group) (rate(kafka_consumer_handle_duration_seconds_bucket[5m])))`.
+   A sudden increase means Postgres or Redis is slow (see `/readyz`, and the [Pods not ready](#pods-not-ready) section).
+3. Is there a retry storm? `rate(kafka_consumer_messages_total{result="retried"}[5m])`. If so, the cause
+   is a failing dependency: see [Dead letters](#dead-letters).
+4. Is KEDA scaling? `kubectl -n grab-mini get scaledobject`, then `describe` the relevant one.
+   The replica count is **capped by the partition count** (6, 12 or 48 depending on the topic): adding replicas beyond the partition count
+   does not help. If replicas are already at the maximum and there is still lag, you need to increase the partition count (it can only be increased, and it changes
+   the key → partition mapping, so ordering may be temporarily off during the change) or make the handler faster.
+5. Constant rebalancing? The log shows repeated `consumer stopped` / `consumer running`, or pods are restarting: check
+   `kubectl get pods` (RESTARTS) and `kubectl describe pod` (OOMKilled?).
 
-**Không nên làm:** reset offset để "bỏ qua" lag. Message bị bỏ qua là event không bao giờ được xử lý
-(đơn không được ghép, rating không được đếm).
+**Do not:** reset offsets to "skip" the lag. A skipped message is an event that is never processed
+(an order that is never matched, a rating that is never counted).
 
 ## Dead letters
 
-**Cảnh báo:** `KafkaMessagesDeadLettered` (page, bất kỳ message nào), `KafkaConsumerFailureRatioHigh`.
-**Nghĩa là:** một message không xử lý được sau mọi lần thử lại, nên đã được cất vào `<topic>.DLQ`. Event đó
-**chưa được xử lý**.
+**Alerts:** `KafkaMessagesDeadLettered` (page, any message), `KafkaConsumerFailureRatioHigh`.
+**Meaning:** a message could not be processed after all retries, so it was parked in `<topic>.DLQ`. That event
+**has not been processed**.
 
-1. **Xem nó là gì.** Mỗi dead letter là JSON: `originalTopic`, `error`, `retries`, `valueText` (nếu là text)
-   và `valueBase64` (bytes gốc). Đọc bằng người vận hành:
+1. **See what it is.** Each dead letter is JSON: `originalTopic`, `error`, `retries`, `valueText` (if it is text)
+   and `valueBase64` (the original bytes). Read it as the operator:
    ```bash
    kafka-console-consumer.sh --bootstrap-server $BOOTSTRAP --consumer.config ops.properties \
      --topic order.created.DLQ --from-beginning --max-messages 5
    ```
-   Hoặc xem trước mà không đổi gì: `dlq-redrive -topic order.created -dry-run`.
-2. **Phân loại theo `error` và `retries`:**
-   | Dấu hiệu | Nguyên nhân thường gặp | Việc cần làm |
+   Or preview without changing anything: `dlq-redrive -topic order.created -dry-run`.
+2. **Classify by `error` and `retries`:**
+   | Sign | Common cause | What to do |
    |---|---|---|
-   | `retries: 0`, lỗi `not a Schema Registry Avro message` hoặc `isn't readable with the ... schema` | Ai đó ghi message sai định dạng, hoặc đổi schema không tương thích | Sửa nguồn ghi. Message hỏng thật thì **không redrive**: nó sẽ rơi lại vào DLQ |
-   | `retries: 3` (đủ các tầng), lỗi kết nối `postgres`/`redis` | Dependency đã lỗi một lúc | Chờ dependency khỏe, rồi redrive |
-   | Lỗi nghiệp vụ lặp lại với cùng một message | Một bug trong handler | Sửa code, deploy, rồi redrive |
-3. **Redrive** sau khi nguyên nhân đã được sửa. Redrive đẩy message về topic gốc với **đúng key và bytes**; consumer
-   xử lý lại (consumer idempotent nên xử lý hai lần là an toàn):
+   | `retries: 0`, error `not a Schema Registry Avro message` or `isn't readable with the ... schema` | Someone wrote a message in the wrong format, or made an incompatible schema change | Fix the writer. For a genuinely corrupt message, **do not redrive**: it will land in the DLQ again |
+   | `retries: 3` (all tiers), `postgres`/`redis` connection error | A dependency was down for a while | Wait for the dependency to recover, then redrive |
+   | Business error repeating for the same message | A bug in the handler | Fix the code, deploy, then redrive |
+3. **Redrive** after the cause has been fixed. Redrive pushes messages back to the original topic with the **exact key and bytes**; the consumer
+   processes them again (consumers are idempotent, so processing twice is safe):
    ```bash
-   # xem sẽ làm gì
+   # see what it would do
    dlq-redrive -topic order.created -dry-run
-   # chỉ một nguyên nhân, tối đa 100 message một lần
+   # a single cause only, at most 100 messages at a time
    dlq-redrive -topic order.created -error "connection refused" -max 100
-   # tất cả
+   # everything
    dlq-redrive -topic order.created
    ```
-   Cần credential của người vận hành (các principal của service **không** đọc được DLQ, có chủ ý), cấu hình bằng
-   các biến `KAFKA_*` như mọi service (`KAFKA_BROKERS`, `KAFKA_SECURITY_PROTOCOL`, `KAFKA_USERNAME`,
-   `KAFKA_PASSWORD_FILE`, `KAFKA_CA_FILE`). Trên Kubernetes, chạy như một Job dùng image `dlq-redrive` với secret của user `ops`.
-   - Chạy lại lần nữa chỉ gửi những gì mới: vị trí được nhớ trong consumer group `dlq-redrive-<topic>`
-     (mỗi bộ lọc `-error` có group riêng, vì một group không thể bỏ qua message).
-   - Message nào lại thất bại sẽ rơi vào DLQ lần nữa như một dead letter mới.
-4. **Kiểm tra sau đó:** `kafka_consumer_messages_total{result="dead_lettered"}` không tăng nữa, lag về 0.
+   It needs the operator's credentials (the services' principals **cannot** read the DLQ, by design), configured with
+   the same `KAFKA_*` variables as every service (`KAFKA_BROKERS`, `KAFKA_SECURITY_PROTOCOL`, `KAFKA_USERNAME`,
+   `KAFKA_PASSWORD_FILE`, `KAFKA_CA_FILE`). On Kubernetes, run it as a Job using the `dlq-redrive` image with the `ops` user's secret.
+   - Running it again sends only what is new: the position is remembered in the consumer group `dlq-redrive-<topic>`
+     (each `-error` filter has its own group, because a group cannot skip messages).
+   - A message that fails again lands in the DLQ once more as a new dead letter.
+4. **Verify afterwards:** `kafka_consumer_messages_total{result="dead_lettered"}` stops increasing and lag returns to 0.
 
-**Riêng `driver.location.updated`:** dead letter ở đây không có cảnh báo page (vị trí cũ vô giá trị).
-Đừng redrive: vị trí mới sẽ đến sau vài giây, và redrive còn bị loại vì `timestamp` cũ.
+**`driver.location.updated` specifically:** dead letters here do not page (a stale location is worthless).
+Do not redrive: a fresh location arrives within seconds, and a redrive would be discarded anyway because of the old `timestamp`.
 
 ## Kafka broker down
 
-**Cảnh báo:** `KafkaBrokersMissing`, `KafkaUnderReplicatedPartitions`, `KafkaPublishErrors`, `KafkaPublishSlow`.
+**Alerts:** `KafkaBrokersMissing`, `KafkaUnderReplicatedPartitions`, `KafkaPublishErrors`, `KafkaPublishSlow`.
 
-Cấu hình: 3 broker, mỗi zone một cái, `replication.factor=3`, `min.insync.replicas=2`
-(topic vị trí: `1`), không bầu leader không đồng bộ.
+Setup: 3 brokers, one per zone, `replication.factor=3`, `min.insync.replicas=2`
+(location topic: `1`), unclean leader election disabled.
 
-- **Mất 1 broker** (hoặc 1 zone): hệ thống **vẫn ghi được** (còn 2 replica đồng bộ), nhưng không còn dư. Mất thêm một
-  nữa là producer bị `NotEnoughReplicas`. Coi đây là sự cố cần xử lý ngay dù người dùng chưa thấy gì.
-- **Mất 2 broker:** các topic nghiệp vụ không ghi được.
-  - Order Service và Trip Service: event nằm trong bảng `outbox` (đã commit cùng thay đổi trạng thái), **không mất**.
-    `outbox_oldest_pending_age_seconds` tăng, xem [Outbox backlog](#outbox-backlog). Khi broker quay lại, relay tự gửi bù.
-  - Matching Service và Location Gateway publish trực tiếp, **không có outbox**. Gateway trả 503 và tài xế gửi lại
-    vị trí sau vài giây. Matching: nếu không publish được `order.matched`, handler trả lỗi và trả tài xế về (`ReleaseMatch`),
-    message đi theo đường retry. Nếu cả retry topic lẫn DLQ cũng không ghi được, consumer **giữ partition lại**
-    (log `cannot put a failed message on a retry or dead-letter topic`, lag tăng) thay vì commit và làm mất message,
-    rồi tiếp tục khi Kafka ghi được trở lại.
+- **Losing 1 broker** (or 1 zone): the system **can still write** (2 in-sync replicas remain), but there is no redundancy left. Losing one
+  more means producers get `NotEnoughReplicas`. Treat this as an incident to handle immediately even if users have not noticed anything.
+- **Losing 2 brokers:** the business topics cannot be written.
+  - Order Service and Trip Service: events sit in the `outbox` table (committed together with the state change) and are **not lost**.
+    `outbox_oldest_pending_age_seconds` grows; see [Outbox backlog](#outbox-backlog). When the brokers return, the relay catches up and sends them.
+  - Matching Service and Location Gateway publish directly, **with no outbox**. The gateway returns 503 and the driver resends the
+    location a few seconds later. Matching: if `order.matched` cannot be published, the handler returns an error and releases the driver (`ReleaseMatch`),
+    and the message goes down the retry path. If neither the retry topic nor the DLQ can be written either, the consumer **holds on to the partition**
+    (log `cannot put a failed message on a retry or dead-letter topic`, lag grows) rather than committing and losing the message,
+    and resumes once Kafka is writable again.
 
-**Kiểm tra:**
+**Check:**
 ```bash
 kubectl -n grab-mini get kafka,kafkanodepool,pods -l strimzi.io/cluster=grab-mini
-kubectl -n grab-mini describe kafka grab-mini           # điều kiện Ready, lý do
-kubectl -n grab-mini logs grab-mini-broker-1            # ví dụ pod broker
+kubectl -n grab-mini describe kafka grab-mini           # Ready condition, reason
+kubectl -n grab-mini logs grab-mini-broker-1            # example broker pod
 ```
-`kafka_topic_partition_under_replicated_partition` cho biết topic và partition nào; `kafka_brokers` cho biết số broker.
+`kafka_topic_partition_under_replicated_partition` tells you which topic and partition; `kafka_brokers` gives the broker count.
 
-**Xử lý:** broker thường tự quay lại (pod restart, chuyển node). Nếu không:
-1. Pod ở trạng thái `Pending`? Thường là thiếu tài nguyên hoặc PVC không gắn được ở zone đó
-   (`kubectl describe pod`): broker phải chạy ở đúng zone có đĩa của nó.
-2. Đĩa đầy? `kubectl exec ... -- df -h /var/lib/kafka`. Giảm `retention.ms` của topic lớn nhất (thường
-   `driver.location.updated`) hoặc nở PVC.
-3. **Đừng** bật `unclean.leader.election.enable` để "cho chạy lại": nó đổi dữ liệu đã được xác nhận lấy tính sẵn sàng.
+**Fix:** brokers usually come back on their own (pod restart, node move). If not:
+1. Is the pod `Pending`? Usually insufficient resources or the PVC cannot attach in that zone
+   (`kubectl describe pod`): a broker must run in the zone where its disk is.
+2. Disk full? `kubectl exec ... -- df -h /var/lib/kafka`. Lower `retention.ms` on the largest topic (usually
+   `driver.location.updated`) or expand the PVC.
+3. **Do not** enable `unclean.leader.election.enable` to "get it running again": it trades acknowledged data for availability.
 
-**Sau khi khỏe lại:** URP về 0, `outbox_oldest_pending_age_seconds` về 0, lag giảm. Không cần redrive: không có
-message nào bị dead-letter chỉ vì broker tạm mất (chúng được retry).
+**After recovery:** URP returns to 0, `outbox_oldest_pending_age_seconds` returns to 0, lag falls. No redrive is needed: no
+message is dead-lettered merely because a broker was briefly down (they are retried).
 
 ## Outbox backlog
 
-**Cảnh báo:** `OutboxBacklog` (event chờ quá 30 giây), `OutboxEventQuarantined`.
-**Nghĩa là:** trạng thái đã được lưu nhưng **chưa được thông báo**: rider và các service khác chưa biết.
+**Alerts:** `OutboxBacklog` (an event waiting more than 30 seconds), `OutboxEventQuarantined`.
+**Meaning:** state has been saved but **not announced**: riders and other services do not know about it yet.
 
-1. **Xem bảng** (Postgres của Order hoặc Trip):
+1. **Look at the table** (the Order or Trip Postgres):
    ```sql
    SELECT source, count(*) AS waiting, min(created_at) AS oldest FROM outbox GROUP BY source;
    SELECT id, source, topic, failed_at, left(error, 120) FROM outbox_dead ORDER BY failed_at DESC LIMIT 20;
    ```
-2. **Relay có chạy không?** Log của order-service/trip-service tìm `[outbox:...] publish failed`: lý do nằm ngay đó.
-   - `connection refused` / `broker not available`: xem [Kafka broker down](#kafka-broker-down).
-   - `Topic Authorization Failed`: ACL của service bị đổi hoặc thiếu (`KafkaUser` của chính nó cần `Write` trên topic).
-     Sửa ACL; relay sẽ tự gửi bù, không cần làm gì thêm.
-   - `Schema Registry`: không liên quan relay (payload đã được mã hóa Avro lúc request); lỗi này gặp ở lúc tạo đơn.
-3. **Relay bị kẹt bởi khóa?** Mỗi source chỉ một relay chạy tại một thời điểm (advisory lock). Nếu một pod treo giữ
-   transaction mở, các pod khác bỏ qua:
+2. **Is the relay running?** In the order-service/trip-service logs, search for `[outbox:...] publish failed`: the reason is right there.
+   - `connection refused` / `broker not available`: see [Kafka broker down](#kafka-broker-down).
+   - `Topic Authorization Failed`: the service's ACL was changed or is missing (its own `KafkaUser` needs `Write` on the topic).
+     Fix the ACL; the relay will catch up and send the events by itself, nothing more to do.
+   - `Schema Registry`: unrelated to the relay (the payload was already Avro-encoded at request time); this error shows up at order creation.
+3. **Is the relay stuck on a lock?** Only one relay runs per source at a time (advisory lock). If a hung pod holds
+   an open transaction, the other pods skip:
    ```sql
    SELECT pid, state, now() - xact_start AS open_for, left(query, 80) FROM pg_stat_activity WHERE state <> 'idle' ORDER BY xact_start;
    ```
-   Giao dịch mở rất lâu của relay: khởi động lại pod đó.
-4. **`outbox_dead`** (cảnh báo `OutboxEventQuarantined`): relay đã **bỏ ra ngoài** một event mà Kafka từ chối vĩnh viễn
-   (thường là quá lớn so với `message.max.bytes`, hoặc topic không hợp lệ), để các event sau không bị chặn.
-   Event đó **sẽ không được gửi**: trạng thái đã lưu nhưng không ai được báo.
-   - Đọc `error`, `topic` và kích thước (`length(payload)`). Payload là Avro nhị phân nên không đọc được dưới dạng text.
-   - Sửa nguyên nhân (thường là một bug sinh payload quá lớn).
-   - Muốn gửi lại sau khi sửa: chép dòng về `outbox` rồi xóa khỏi `outbox_dead`:
+   A relay transaction open for a very long time: restart that pod.
+4. **`outbox_dead`** (alert `OutboxEventQuarantined`): the relay has **set aside** an event that Kafka permanently rejects
+   (usually too large for `message.max.bytes`, or an invalid topic), so that the events behind it are not blocked.
+   That event **will not be sent**: the state is saved but no one is notified.
+   - Read `error`, `topic` and the size (`length(payload)`). The payload is binary Avro, so it cannot be read as text.
+   - Fix the cause (usually a bug that produces an oversized payload).
+   - To resend after the fix: copy the row back into `outbox`, then delete it from `outbox_dead`:
      ```sql
      BEGIN;
      INSERT INTO outbox (source, topic, key, payload, headers, created_at)
@@ -170,135 +170,135 @@ message nào bị dead-letter chỉ vì broker tạm mất (chúng được retr
      DELETE FROM outbox_dead WHERE id = <id>;
      COMMIT;
      ```
-     Chỉ làm vậy khi Kafka sẽ chấp nhận nó lúc này. Nếu không, hãy quyết định nghiệp vụ: bù trạng thái bằng tay.
+     Only do this when Kafka will accept it now. Otherwise, make a business decision: reconcile the state by hand.
 
 ## Slow matching
 
-**Cảnh báo:** `MatchLatencySLOBreach` (p95 trên 3 giây), `NoDriverRatioHigh` (trên 30% đơn không có tài xế).
+**Alerts:** `MatchLatencySLOBreach` (p95 above 3 seconds), `NoDriverRatioHigh` (more than 30% of orders have no driver).
 
-Thời gian ghép = từ lúc `order.created` được tạo đến lúc `order.matched` được publish
-(`matching_latency_seconds`). Khi chưa có tài xế, Matching thử lại `MATCH_RETRIES` (mặc định 3) lần, cách nhau
-`MATCH_RETRY_DELAY_MS` (mặc định 2000 ms): một đơn **không tìm được** tài xế mất khoảng 6 giây trước khi báo
-`order.no_driver_found`, và con số đó tính vào độ trễ. Vì vậy hai cảnh báo thường đi cùng nhau.
+Match time = from when `order.created` is produced to when `order.matched` is published
+(`matching_latency_seconds`). When no driver is available, Matching retries `MATCH_RETRIES` (default 3) times, `MATCH_RETRY_DELAY_MS`
+(default 2000 ms) apart: an order for which **no driver is found** takes about 6 seconds before reporting
+`order.no_driver_found`, and that time counts toward the latency. That is why the two alerts often fire together.
 
-1. **Lag của `matching-service-group`** trên `order.created`: xem [Consumer lag](#consumer-lag). Đơn nằm chờ trong topic.
-2. **Redis chậm hoặc đứt:** `/readyz` của matching-service (cổng admin). Matching phụ thuộc Redis cho `drivers:geo`
-   và trạng thái tài xế.
-3. **Thiếu tài xế thật, hay dữ liệu sai?** `rate(location_updates_total{result="applied"}[5m])` có đều không?
-   Nếu vị trí không được cập nhật, Driver Location Service hoặc Location Gateway hỏng
-   (`location_reports_total` theo `result`: `published`, `stationary`, `too_fast`, `invalid`, `error`).
-4. **Tài xế kẹt trạng thái.** Matching chỉ nhận tài xế `AVAILABLE` (hoặc `ASSIGNED` đã hết lease, mặc định 120 giây).
-   Tài xế `ON_TRIP` mà không còn trip nào đang chạy là kẹt. Kiểm tra bằng cả hai nguồn:
+1. **Lag of `matching-service-group`** on `order.created`: see [Consumer lag](#consumer-lag). Orders are waiting in the topic.
+2. **Redis slow or down:** the matching-service `/readyz` (admin port). Matching depends on Redis for `drivers:geo`
+   and driver state.
+3. **A real driver shortage, or bad data?** Is `rate(location_updates_total{result="applied"}[5m])` steady?
+   If locations are not being updated, Driver Location Service or Location Gateway is broken
+   (`location_reports_total` by `result`: `published`, `stationary`, `too_fast`, `invalid`, `error`).
+4. **Driver stuck in a state.** Matching only accepts drivers that are `AVAILABLE` (or `ASSIGNED` with an expired lease, default 120 seconds).
+   A driver that is `ON_TRIP` with no running trip is stuck. Check both sources:
    ```sql
-   -- Postgres của Trip Service: tài xế có trip đang chạy không?
+   -- Trip Service Postgres: does the driver have a running trip?
    SELECT driver_id, id, status FROM trips WHERE driver_id = 'driver-7' AND status IN ('ASSIGNED','IN_PROGRESS');
    ```
    ```bash
    redis-cli GET driver:driver-7:status      # AVAILABLE | ASSIGNED | ON_TRIP
    redis-cli GET driver:driver-7:assigned_until
    ```
-   Nếu **không có trip đang chạy** nhưng Redis vẫn `ON_TRIP`, consumer `trip-driver-release-group` đã bị trễ hoặc hỏng
-   (lag của nó); sau khi sửa, nó tự giải phóng. Giải phóng bằng tay chỉ khi chắc chắn không còn trip:
-   `redis-cli SET driver:driver-7:status AVAILABLE` rồi `redis-cli DEL driver:driver-7:assigned_until`.
-5. **Vị trí cũ:** `drivers:geo` giữ vị trí mới nhất mỗi tài xế; tài xế ngừng gửi vị trí vẫn nằm trong GEO set với vị trí
-   cũ. Không có TTL: một tài xế offline vẫn có thể bị ghép. (Đây là giới hạn đã biết, xem production-design.)
+   If there is **no running trip** but Redis still says `ON_TRIP`, the `trip-driver-release-group` consumer is behind or broken
+   (its lag); once that is fixed, it releases the driver by itself. Release by hand only when you are sure no trip remains:
+   `redis-cli SET driver:driver-7:status AVAILABLE`, then `redis-cli DEL driver:driver-7:assigned_until`.
+5. **Stale locations:** `drivers:geo` keeps each driver's latest location; a driver who stops sending locations stays in the GEO set with the
+   old location. There is no TTL: an offline driver can still be matched. (This is a known limitation, see production-design.)
 
 ## Booking errors
 
-**Cảnh báo:** `OrderCreationErrorBudgetBurn` (page), `HTTPServerErrorsHigh`.
-Mục tiêu: 99,9% `POST /orders` thành công. Cảnh báo kêu khi ngân sách lỗi đang cháy nhanh gấp 14 lần, trên cả cửa sổ 5 phút lẫn 1 giờ.
+**Alerts:** `OrderCreationErrorBudgetBurn` (page), `HTTPServerErrorsHigh`.
+Target: 99.9% of `POST /orders` succeed. The alert fires when the error budget is burning 14 times too fast, over both the 5-minute and the 1-hour window.
 
-`POST /orders` làm: kiểm tra token, mã hóa Avro (cần **Schema Registry**), ghi Postgres (đơn + outbox trong một transaction).
-Mã 5xx nghĩa là một trong ba thứ đó hỏng. Phân biệt bằng log của order-service (`failed to encode order.created`
-→ Schema Registry; `failed to save order` → Postgres) hoặc `/readyz` (Postgres, Kafka).
+`POST /orders` does: token validation, Avro encoding (needs the **Schema Registry**), a Postgres write (order + outbox in one transaction).
+A 5xx means one of those three is broken. Tell them apart using the order-service logs (`failed to encode order.created`
+→ Schema Registry; `failed to save order` → Postgres) or `/readyz` (Postgres, Kafka).
 
-- **Schema Registry down:** mỗi service nhớ id schema của mình sau lần đăng ký đầu, nên pod **đang chạy** vẫn nhận đơn
-  bình thường. Lỗi 500 xuất hiện ở pod **mới khởi động** (chưa đăng ký được) và ở consumer gặp `schema id` chưa từng
-  thấy (một phiên bản schema mới). Vì vậy sự cố registry thường lộ ra sau một lần deploy hoặc scale-out, không phải ngay
-  lúc registry chết. Khôi phục registry, rồi kiểm tra `/readyz`.
-- **Postgres down:** xem [Pods not ready](#pods-not-ready); failover của Postgres là việc của nhà cung cấp/DBA.
-- **401 tăng đột ngột** (không phải 5xx, nhưng người dùng thấy lỗi): `JWT_SECRET` không đồng nhất giữa các service
-  hoặc token hết hạn hàng loạt. Tất cả service verify và nhà phát hành token phải dùng cùng một secret.
+- **Schema Registry down:** each service remembers its schema ids after the first registration, so **running** pods keep accepting orders
+  normally. The 500 errors show up on **newly started** pods (which could not register) and on consumers that meet a `schema id` they have never
+  seen (a new schema version). So a registry problem usually shows up after a deploy or scale-out, not right
+  when the registry dies. Restore the registry, then check `/readyz`.
+- **Postgres down:** see [Pods not ready](#pods-not-ready); Postgres failover is the provider's/DBA's job.
+- **A sudden rise in 401s** (not 5xx, but users see errors): `JWT_SECRET` differs between services,
+  or tokens expired en masse. All verifying services and the token issuer must use the same secret.
 
 ## Surge pricing
 
-**Cảnh báo:** `SurgePricingFailOpen` (không đọc được hệ số surge, giá rơi về 1.0), `SurgeSamplerStalled` (pricing-service ngừng lấy mẫu cung/cầu).
+**Alerts:** `SurgePricingFailOpen` (the surge multiplier could not be read, price falls back to 1.0), `SurgeSamplerStalled` (pricing-service has stopped sampling supply/demand).
 
-Surge **không bao giờ chặn đặt xe**: mọi lỗi đọc Redis đều cho hệ số 1.0, nên hậu quả của sự cố là *giá không tăng*, không phải đặt xe lỗi.
+Surge **never blocks booking**: any Redis read error yields a multiplier of 1.0, so the consequence of an incident is *prices not going up*, not bookings failing.
 
-1. **Xem hệ số hiện tại của một ô:** ô = `floor(lat/độ):floor(lng/độ)` (độ = `SURGE_CELL_DEGREES`, hoặc `GEO_SHARD_DEGREES`, mặc định 0.05).
+1. **Look at the current multiplier of a cell:** cell = `floor(lat/degrees):floor(lng/degrees)` (degrees = `SURGE_CELL_DEGREES`, or `GEO_SHARD_DEGREES`, default 0.05).
    ```bash
-   redis-cli SMEMBERS surge:cells                      # các ô đang có nhu cầu, dạng CAR|215:2134
-   redis-cli GET surge:mult:CAR:215:2134               # hệ số; không có key = 1.0
-   redis-cli TTL surge:mult:CAR:215:2134               # tối đa 30 giây, được làm mới mỗi 5 giây
-   redis-cli MGET surge:demand:CAR:215:2134:<phút unix/60>
+   redis-cli SMEMBERS surge:cells                      # cells with demand, in the form CAR|215:2134
+   redis-cli GET surge:mult:CAR:215:2134               # the multiplier; no key = 1.0
+   redis-cli TTL surge:mult:CAR:215:2134               # at most 30 seconds, refreshed every 5 seconds
+   redis-cli MGET surge:demand:CAR:215:2134:<unix minute/60>
    ```
-2. **`SurgePricingFailOpen`:** Redis chậm/đứt (timeout đọc 300 ms). Xem [Pods not ready](#pods-not-ready), `/readyz` của pricing-service và order-service.
-3. **`SurgeSamplerStalled`:** `pricing_ticks_total` không tăng. Chỉ một instance giữ khóa `surge:sampler:lock` mỗi chu kỳ; kiểm tra pod
-   pricing-service có chạy không, log `surge sample failed`, và `pricing_sample_errors_total` (lỗi `driverlocation.Search`, ví dụ bán kính vượt `maxCells` khi `GEO_SHARD_DEGREES` quá nhỏ).
-   Consumer `pricing-service-group` trễ làm *cầu* bị đếm thiếu: xem [Consumer lag](#consumer-lag).
-4. **Rider báo 409 khi đặt xe:** đúng thiết kế. Báo giá đã hết hạn và hệ số đã lệch quá `SURGE_QUOTE_TOLERANCE` (0.2); app hiển thị giá mới để xác nhận.
-   Nhiều **400 "quote is invalid"** nghĩa là `QUOTE_SECRET` khác nhau giữa order-service và pricing-service (hoặc có người giả mạo báo giá).
-5. **Giá cao bất thường:** `pricing_surge_multiplier_max` / `pricing_surging_cells`; trần là `SURGE_MAX` (3.0). Muốn tắt surge khẩn cấp:
-   đặt `SURGE_MAX=1` cho pricing-service rồi restart, hoặc `redis-cli DEL` các key `surge:mult:*` (chúng tự tạo lại ở lần lấy mẫu kế tiếp nếu chưa đổi cấu hình).
-6. **Dữ liệu cũ:** đơn tạo trước migration 00006 có `price` NULL, `surge_multiplier` 1.0. Tin `order.created` cũ (schema v2) được đọc với `surgeMultiplier` 1.0.
+2. **`SurgePricingFailOpen`:** Redis is slow/down (300 ms read timeout). See [Pods not ready](#pods-not-ready), and the `/readyz` of pricing-service and order-service.
+3. **`SurgeSamplerStalled`:** `pricing_ticks_total` is not increasing. Only one instance holds the `surge:sampler:lock` lock each cycle; check that the
+   pricing-service pods are running, the `surge sample failed` log, and `pricing_sample_errors_total` (`driverlocation.Search` errors, for example a radius exceeding `maxCells` when `GEO_SHARD_DEGREES` is too small).
+   A lagging `pricing-service-group` consumer makes *demand* undercounted: see [Consumer lag](#consumer-lag).
+4. **Riders report a 409 when booking:** by design. The quote has expired and the multiplier has drifted by more than `SURGE_QUOTE_TOLERANCE` (0.2); the app shows the new price for confirmation.
+   Many **400 "quote is invalid"** errors mean `QUOTE_SECRET` differs between order-service and pricing-service (or someone is forging quotes).
+5. **Abnormally high prices:** `pricing_surge_multiplier_max` / `pricing_surging_cells`; the cap is `SURGE_MAX` (3.0). To turn surge off in an emergency:
+   set `SURGE_MAX=1` for pricing-service and restart, or `redis-cli DEL` the `surge:mult:*` keys (they are recreated at the next sampling if the configuration has not changed).
+6. **Old data:** orders created before migration 00006 have `price` NULL and `surge_multiplier` 1.0. Old `order.created` messages (schema v2) are read with `surgeMultiplier` 1.0.
 
 ## Pods not ready
 
-**Cảnh báo:** `DeploymentReplicasUnavailable`.
+**Alerts:** `DeploymentReplicasUnavailable`.
 
-1. `kubectl -n grab-mini get pods`, rồi `kubectl -n grab-mini describe pod <pod>` (events: `Unhealthy`, `OOMKilled`, `ImagePullBackOff`).
-2. Pod `Running` nhưng `0/1 Ready`: `/readyz` (cổng admin) nói dependency nào lỗi, xem ở đầu tài liệu.
-   Service không sẵn sàng khi **dependency** của nó lỗi, và đó là hành vi đúng: nó rời khỏi vòng phục vụ mà không bị restart.
-   Một pod không bao giờ bị restart vì Postgres down (liveness `/livez` không phụ thuộc gì bên ngoài).
-3. Rollout kẹt sau khi deploy: `kubectl rollout status deploy/<name>`; pod mới không `Ready` thì pod cũ được giữ
-   (`maxUnavailable: 0`), nên người dùng không bị ảnh hưởng. `kubectl rollout undo deploy/<name>` để quay lại, nếu
-   migration đã chạy là tương thích ngược (xem bên dưới).
+1. `kubectl -n grab-mini get pods`, then `kubectl -n grab-mini describe pod <pod>` (events: `Unhealthy`, `OOMKilled`, `ImagePullBackOff`).
+2. Pod `Running` but `0/1 Ready`: `/readyz` (admin port) says which dependency is failing; see the top of this document.
+   A service is not ready when its **dependency** is failing, and that is the correct behavior: it leaves rotation without being restarted.
+   A pod is never restarted because Postgres is down (the `/livez` liveness probe depends on nothing external).
+3. Rollout stuck after a deploy: `kubectl rollout status deploy/<name>`; if the new pods are not `Ready`, the old pods are kept
+   (`maxUnavailable: 0`), so users are not affected. Use `kubectl rollout undo deploy/<name>` to go back, provided the
+   migration that ran is backward compatible (see below).
 
 ---
 
-## Quy trình thường gặp
+## Common procedures
 
 ### Deploy
 
-1. Build và đẩy image; đặt tag: `kustomize edit set image ghcr.io/example/grab-mini/order-service=<registry>/order-service:<tag>` (mỗi service).
-2. **Migration trước**: chạy các Job `*-migrate` và chờ xong (`kubectl wait --for=condition=complete job/order-service-migrate`).
-   Migration chỉ tiến, và phải tương thích với **cả phiên bản cũ lẫn mới** của code (thêm cột có default, không xóa/đổi tên cột
-   khi bản cũ còn chạy), vì rolling update cho hai bản chạy song song.
-3. `kubectl apply -k deploy/k8s/base` (hoặc overlay của môi trường). Theo dõi `kubectl rollout status`.
-4. Đổi **schema Avro**: chỉ thêm trường có default (registry chạy `BACKWARD`). Đăng ký schema trong CI trước khi deploy.
+1. Build and push the images; set the tag: `kustomize edit set image ghcr.io/example/grab-mini/order-service=<registry>/order-service:<tag>` (for each service).
+2. **Migrations first**: run the `*-migrate` Jobs and wait for them to finish (`kubectl wait --for=condition=complete job/order-service-migrate`).
+   Migrations only go forward, and must be compatible with **both the old and the new version** of the code (add columns with a default; do not drop or rename columns
+   while the old version is still running), because a rolling update runs both versions side by side.
+3. `kubectl apply -k deploy/k8s/base` (or the environment's overlay). Watch `kubectl rollout status`.
+4. Changing the **Avro schema**: only add fields with defaults (the registry runs `BACKWARD`). Register the schema in CI before deploying.
 
-### Replay một topic (xử lý lại từ đầu)
+### Replay a topic (reprocess from the beginning)
 
-Chỉ làm được vì mọi consumer idempotent (README: "Replay a topic and see nothing counted twice"). Dừng KEDA trước,
-nếu không nó sẽ scale lại lên:
+This is only possible because every consumer is idempotent (developer guide: "Replay a topic and see nothing counted twice"). Pause KEDA first,
+otherwise it will scale back up:
 ```bash
 kubectl -n grab-mini annotate scaledobject/rating-service autoscaling.keda.sh/paused-replicas=0 --overwrite
 kubectl -n grab-mini scale deploy/rating-service --replicas=0
 kafka-consumer-groups.sh --bootstrap-server $BOOTSTRAP --command-config ops.properties \
   --group rating-service-group --reset-offsets --to-earliest --topic trip.rated --execute
-kubectl -n grab-mini annotate scaledobject/rating-service autoscaling.keda.sh/paused-replicas-   # bỏ tạm dừng
+kubectl -n grab-mini annotate scaledobject/rating-service autoscaling.keda.sh/paused-replicas-   # remove the pause
 ```
-Không replay `driver.location.updated` (vị trí cũ bị loại vì `timestamp`) hay topic có side effect không idempotent.
+Do not replay `driver.location.updated` (old locations are discarded because of `timestamp`) or any topic with non-idempotent side effects.
 
-### Xoay vòng secret
+### Rotate secrets
 
-- **Mật khẩu Kafka của một service:** xóa Secret do Strimzi tạo cho `KafkaUser` đó để nó sinh lại, rồi restart pod của service
-  (mật khẩu chỉ được đọc lúc khởi động). Làm lần lượt từng service.
-- **`JWT_SECRET`:** dùng chung HS256, nên đổi là **mọi token hiện có mất hiệu lực**. Đổi Secret `grab-mini-jwt` rồi restart
-  *tất cả* service cùng lúc (nhà phát hành token và các service verify). App tự lấy token mới khi nhận 401.
-- **Mật khẩu Postgres:** đổi trong Secret `grab-mini-db-<service>` rồi restart; service đọc `DATABASE_URL` lúc khởi động.
+- **A service's Kafka password:** delete the Secret Strimzi created for that `KafkaUser` so it is regenerated, then restart the service's pods
+  (the password is only read at startup). Do one service at a time.
+- **`JWT_SECRET`:** shared HS256, so changing it **invalidates every existing token**. Change the `grab-mini-jwt` Secret, then restart
+  *all* services at the same time (the token issuer and the verifying services). The app fetches a new token by itself when it gets a 401.
+- **Postgres password:** change it in the `grab-mini-db-<service>` Secret, then restart; the service reads `DATABASE_URL` at startup.
 
-### Scale tay
+### Manual scaling
 
-KEDA điều khiển số replica; `kubectl scale` bị KEDA ghi đè. Đổi `minReplicaCount`/`maxReplicaCount` trong `ScaledObject`
-(qua `deploy/k8s/generate.py`), hoặc tạm dừng bằng annotation `autoscaling.keda.sh/paused-replicas` như trên.
-Số replica hữu ích của một consumer không vượt số partition của topic nó đọc.
+KEDA controls the replica count; `kubectl scale` is overwritten by KEDA. Change `minReplicaCount`/`maxReplicaCount` in the `ScaledObject`
+(via `deploy/k8s/generate.py`), or pause it temporarily with the `autoscaling.keda.sh/paused-replicas` annotation as above.
+The useful replica count of a consumer does not exceed the partition count of the topic it reads.
 
-### Điều chưa có (cần biết khi trực)
+### What is missing (to know when on call)
 
-- **Không có outbox cho Matching và Location Gateway**: nếu Kafka hỏng đúng lúc, một lần ghép có thể không được thông báo
-  (đã có lease để tài xế không kẹt, và message `order.created` đi qua retry), còn vị trí tài xế thì tự bù sau vài giây.
-- **Không có TTL cho vị trí trong Redis GEO** (xem Slow matching).
-- **Notification Service best-effort**: tin gửi khi không ai subscribe thì mất; app khôi phục bằng REST sau khi kết nối lại.
-- **Sao lưu và DR**: xem [disaster-recovery.md](disaster-recovery.md); chưa từng được diễn tập, manifest DR chưa chạy trên cluster thật.
+- **No outbox for Matching and Location Gateway**: if Kafka fails at exactly the wrong moment, a match may go unannounced
+  (there is a lease so the driver does not get stuck, and the `order.created` message goes through retry), while driver locations make up for themselves within seconds.
+- **No TTL for locations in the Redis GEO set** (see Slow matching).
+- **Notification Service is best-effort**: a message sent while no one is subscribed is lost; the app recovers via REST after reconnecting.
+- **Backup and DR**: see [disaster-recovery.md](disaster-recovery.md); never rehearsed, and the DR manifests have not been run on a real cluster.

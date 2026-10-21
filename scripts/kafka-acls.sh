@@ -15,7 +15,7 @@
 # KAFKA_PASSWORD_FILE at it (see services/pkg/kafkaconn).
 #
 # What a service needs, and why (this table is the source of truth; the
-# README and production-design.md refer to it):
+# the developer guide and production-design.md refer to it):
 #   - producing to a topic:  Write + Describe on it
 #   - consuming a topic:     Read + Describe on it, and Read on its consumer
 #     groups. The retry-tier groups are named "<group>.retry.<n>", so the group

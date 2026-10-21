@@ -1,61 +1,61 @@
-# Hiệu năng: đã đo gì, tìm ra gì
+# Performance: what was measured, what was found
 
-Số liệu đo bằng `deploy/loadtest` (xem README ở đó) trên **một máy 4 core** chạy chung 9 tiến trình Go, Kafka 1 broker, Postgres, Redis và
-công cụ sinh tải. Load average lúc chạy 8–13. Vì vậy: **số tuyệt đối chỉ nói máy này làm được gì; giá trị của việc đo là những thứ nó tìm ra.**
+The numbers were measured with `deploy/loadtest` (see its [README](../deploy/loadtest/README.md)) on **a single 4-core machine** that was also running 9 Go processes, a single-broker Kafka, Postgres, Redis and
+the load generator. Load average during the runs was 8–13. So: **the absolute numbers only say what this machine did; the value of measuring is what it uncovered.**
 
-## Ba lỗi hiệu năng tìm ra (đã sửa)
+## Four performance bugs found (fixed)
 
-| Triệu chứng | Nguyên nhân | Sửa | Trước → sau |
+| Symptom | Cause | Fix | Before → after |
 |---|---|---|---|
-| Mọi publish đồng bộ mất ≥ 1 s | `kafka.Writer` mặc định `BatchTimeout` = 1 s: gom batch đợi đủ 1 s mới gửi | `kafkaconn.DefaultBatchTimeout` = 2 ms cho mọi writer | 1,001 s → 10,8 ms mỗi publish (acks=all) |
-| Consumer vị trí chỉ ~2.300 msg/s, lag tăng | Commit đồng bộ từng message, tuần tự theo reader | `Config.CommitInterval` (commit nền, gom theo thời gian) | ~2.300 → ~5.000 msg/s, lag ≤ 24 |
-| Matching ~50 đơn/s | Vòng consume xử lý tuần tự một message mỗi lần | `Config.Workers` / `KAFKA_CONSUMER_WORKERS`: một worker mỗi partition, vẫn đúng thứ tự trong partition | ~50 → vài trăm/s, bị giới hạn bởi máy |
-| Matching tốn nhiều lệnh Redis khi tài xế gần đã bận | Mỗi ứng viên một `EVAL` tuần tự (tới 50 round trip/đơn) | `driverstatus.ClaimFirstForOrder`: thử cả danh sách trong **một** script | 1 round trip mỗi đơn |
+| Every synchronous publish took ≥ 1 s | `kafka.Writer` defaults to `BatchTimeout` = 1 s: batching waits the full 1 s before sending | `kafkaconn.DefaultBatchTimeout` = 2 ms for every writer | 1.001 s → 10.8 ms per publish (acks=all) |
+| Location consumer at only ~2,300 msg/s, lag growing | Synchronous commit of every message, sequential per reader | `Config.CommitInterval` (background commit, batched by time) | ~2,300 → ~5,000 msg/s, lag ≤ 24 |
+| Matching ~50 orders/s | The consume loop processed one message at a time, sequentially | `Config.Workers` / `KAFKA_CONSUMER_WORKERS`: one worker per partition, still correctly ordered within a partition | ~50 → a few hundred/s, bounded by the machine |
+| Matching spent many Redis commands when nearby drivers were already busy | One sequential `EVAL` per candidate (up to 50 round trips per order) | `driverstatus.ClaimFirstForOrder`: try the whole list in **one** script | 1 round trip per order |
 
-Hai thay đổi nhỏ kèm theo: `OccurredAt` của event ghi `RFC3339Nano` (metric độ trễ ghép trước đó làm tròn xuống giây), và `Reader.MaxWait`
-đặt 500 ms vì `Reader.Close()` chờ fetch đang dở (mặc định 10 s làm shutdown chậm).
+Two small changes came with these: the event's `OccurredAt` is written as `RFC3339Nano` (the matching-latency metric previously rounded down to the second), and `Reader.MaxWait`
+is set to 500 ms because `Reader.Close()` waits for the in-flight fetch (the default of 10 s made shutdown slow).
 
-## Kết quả cuối (12 partition, 12 worker, 3.000 tài xế báo vị trí mỗi 4 s ≈ 750 báo cáo/s)
+## Final results (12 partitions, 12 workers, 3,000 drivers reporting location every 4 s ≈ 750 reports/s)
 
-| Đơn/s đặt | Ghép được | Độ trễ ghép p99 | Ghi chú |
+| Orders/s placed | Matched | Matching latency p99 | Notes |
 |---|---|---|---|
-| 150 | 100% | 0,1 s | `deploy/loadtest/result-150.json` |
-| 250 | 100% | 0,1 s | backlog vị trí ≤ 3 message |
-| 400 | ~93%, hàng đợi tăng, timeout | 30–48 s | **máy bão hòa**, không phải Matching |
+| 150 | 100% | 0.1 s | `deploy/loadtest/result-150.json` |
+| 250 | 100% | 0.1 s | location backlog ≤ 3 messages |
+| 400 | ~93%, queue growing, timeouts | 30–48 s | **machine saturated**, not Matching |
 
-Ở 400 đơn/s Matching dùng ~0,06 core và handler p95 ~24 ms; Order Service dùng ~0,8 core, handler `order-service-group` p95 160 ms, load
-average 11 trên 4 core. Tăng partition/worker từ 12 lên 24 không đổi kết quả (~190 đơn/s ghép được), tức giới hạn là CPU của máy, không phải
-cấu trúc consumer. **Chưa có số đo trên hạ tầng thật**; mục tiêu 500 đơn/s và 25.000 vị trí/s trong thiết kế chưa được kiểm chứng.
+At 400 orders/s Matching used ~0.06 core and its handler p95 was ~24 ms; Order Service used ~0.8 core, the `order-service-group` handler p95 was 160 ms, and load
+average was 11 on 4 cores. Raising partitions/workers from 12 to 24 did not change the result (~190 orders/s matched), meaning the limit is the machine's CPU, not the
+consumer structure. **There is no measurement on real infrastructure yet**; the design targets of 500 orders/s and 25,000 locations/s have not been verified.
 
-## Redis GEO: có cần shard không?
+## Redis GEO: is sharding needed?
 
-`GEOSEARCH ... ASC COUNT 50` quét **mọi tài xế trong bán kính** rồi mới sắp xếp (COUNT không dừng sớm). Chi phí tỉ lệ với số ứng viên trong
-bán kính, không phải tổng tài xế online. Đo trên Redis 1 luồng, 1 key:
+`GEOSEARCH ... ASC COUNT 50` scans **every driver within the radius** and only then sorts (COUNT does not stop early). The cost is proportional to the number of candidates in the
+radius, not to the total number of online drivers. Measured on single-threaded Redis, 1 key:
 
-| Tài xế (trong hộp ~30 km) | Bán kính | Ứng viên | Truy vấn/s (1 core Redis) |
+| Drivers (in a ~30 km box) | Radius | Candidates | Queries/s (1 Redis core) |
 |---|---|---|---|
-| 100.000 | 1 km | ~100 | 9.300 |
-| 100.000 | 3 km | ~3.300 | 1.350 |
-| 1.000.000 | 1 km | ~1.100 | 820 |
-| 1.000.000 | 3 km | ~31.000 | **~90** |
+| 100,000 | 1 km | ~100 | 9,300 |
+| 100,000 | 3 km | ~3,300 | 1,350 |
+| 1,000,000 | 1 km | ~1,100 | 820 |
+| 1,000,000 | 3 km | ~31,000 | **~90** |
 
-`GEOADD`: ~100.000/s; 1 triệu tài xế chiếm ~100 MB.
+`GEOADD`: ~100,000/s; 1 million drivers take ~100 MB.
 
-Kết luận:
+Conclusions:
 
-1. **Cập nhật vị trí không phải vấn đề** (25.000/s chỉ chiếm ~1/4 một core).
-2. **Tìm kiếm mới là chi phí**, và nó phụ thuộc mật độ × bán kính. Chia key theo shard không giảm chi phí *mỗi truy vấn* trong một thành phố
-   dày đặc; nó chỉ chia tải cho nhiều node.
-3. Đòn bẩy rẻ nhất là **tìm theo vòng mở rộng** (1 km → 3 km → bán kính cấu hình), đã làm trong `matching-service/redis.go`: phần lớn đơn có
-   tài xế trống rất gần nên chỉ trả chi phí của vòng nhỏ. Kết quả vẫn là tài xế gần nhất còn trống trong bán kính.
-4. **Shard theo ô địa lý đã có, mặc định tắt** (`GEO_SHARD_DEGREES`, ví dụ `0.05` ≈ 5,5 km; xem `pkg/driverlocation`). Mỗi ô là một key
-   `drivers:geo:<i>:<j>`; tài xế qua ranh giới thì bị xóa khỏi ô cũ trong cùng script cập nhật; tìm kiếm quét các ô mà hình tròn chạm tới
-   (pipeline) rồi gộp theo khoảng cách. Test xác nhận kết quả **giống hệt** có/không shard, kể cả tài xế sát ranh giới và tài xế vừa qua ô.
-   **Nó không làm mỗi truy vấn rẻ hơn**: đo 1 triệu tài xế chia ô 0,05°, một truy vấn 3 km vào một ô (27.700 tài xế) vẫn ~9 ms (so với ~11 ms
-   ở key đơn), và một truy vấn chạm tới 1–4 ô. Giá trị của nó là **chia tải ra nhiều key**, nên chỉ có ích khi các key đó nằm trên nhiều node
-   (Redis Cluster) hoặc nhiều Redis; trên một Redis duy nhất thì không đáng bật. Ràng buộc:
-   - Matching và Driver Location Service phải cùng giá trị (ConfigMap dùng chung `GEO_SHARD_DEGREES`); đổi giá trị cần dựng lại GEO set
-     (tài xế tự điền lại sau vài giây báo vị trí), vì vị trí đã lưu nằm ở bố cục cũ.
-   - Bán kính phải không quá ~64 ô; vượt thì `Search` trả lỗi thay vì lặng lẽ bỏ sót tài xế (tăng cỡ ô hoặc giảm bán kính).
-   - Trên Redis Cluster, các key ô và script dựng key động cần hash tag; **chưa làm**, nên chưa dùng được với Cluster.
-   - `ClaimFirstForOrder` cũng dựng key `driver:<id>:*` trong script, cùng giới hạn Cluster.
+1. **Location updates are not the problem** (25,000/s takes only ~1/4 of one core).
+2. **Search is the cost**, and it depends on density × radius. Splitting the key into shards does not reduce the cost of *each query* in a
+   dense city; it only spreads the load across multiple nodes.
+3. The cheapest lever is **searching in expanding rings** (1 km → 3 km → the configured radius), done in `matching-service/redis.go`: most orders have
+   a free driver very close by, so they only pay the cost of the small ring. The result is still the nearest free driver within the radius.
+4. **Sharding by geographic cell exists, off by default** (`GEO_SHARD_DEGREES`, e.g. `0.05` ≈ 5.5 km; see `pkg/driverlocation`). Each cell is a key
+   `drivers:geo:<i>:<j>`; a driver who crosses a boundary is removed from the old cell inside the same update script; a search scans the cells the circle touches
+   (pipelined) and then merges by distance. Tests confirm the results are **identical** with and without sharding, including drivers right at a boundary and drivers who just crossed cells.
+   **It does not make each query cheaper**: measured with 1 million drivers split into 0.05° cells, a 3 km query into one cell (27,700 drivers) still takes ~9 ms (versus ~11 ms
+   on a single key), and a query touches 1–4 cells. Its value is **spreading load across many keys**, so it is only useful when those keys live on multiple nodes
+   (Redis Cluster) or multiple Redis instances; on a single Redis it is not worth enabling. Constraints:
+   - Matching and Driver Location Service must use the same value (the ConfigMap shares `GEO_SHARD_DEGREES`); changing the value requires rebuilding the GEO set
+     (drivers refill it themselves within a few seconds of location reports), because the stored locations are in the old layout.
+   - The radius must not exceed ~64 cells; beyond that `Search` returns an error instead of silently missing drivers (increase the cell size or reduce the radius).
+   - On Redis Cluster, the cell keys and the scripts that build keys dynamically need hash tags; **not done yet**, so it cannot be used with Cluster.
+   - `ClaimFirstForOrder` also builds `driver:<id>:*` keys inside the script, with the same Cluster limitation.

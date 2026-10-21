@@ -1,86 +1,86 @@
-# Sao lưu và khôi phục thảm họa
+# Backup and disaster recovery
 
-Phạm vi: mất một vùng (region) hoặc mất dữ liệu. Mất một broker hoặc một zone đã được lo bởi cluster 3 broker 3 zone (xem runbook
-"Kafka broker down"); tài liệu này không lặp lại.
+Scope: loss of a region, or loss of data. Losing a single broker or a single zone is already covered by the 3-broker, 3-zone cluster (see the
+"Kafka broker down" runbook); this document does not repeat that.
 
-## Dữ liệu nào quan trọng đến đâu
+## How much each kind of data matters
 
-| Dữ liệu | Nằm ở | Mất thì sao | Bảo vệ |
+| Data | Lives in | If lost | Protection |
 |---|---|---|---|
-| Đơn, chuyến đi, đánh giá, outbox | Postgres (order, trip, rating) | **Mất thật**: nguồn sự thật | Sao lưu Postgres + PITR (bên dưới) |
-| Event nghiệp vụ (`order.*`, `trip.*`) | Kafka, giữ 7 ngày | Dựng lại được từ Postgres cho phần đã commit; consumer chậm hơn 7 ngày mất event | MirrorMaker 2 sang vùng dự phòng; lưu trữ S3 |
-| Vị trí tài xế, trạng thái tài xế, lease | Redis (một master + replica, Sentinel giám sát) | **Tự hồi phục**: tài xế báo lại mỗi vài giây; lease hết hạn thì tài xế nhận được đơn lại | Không cần sao lưu |
-| Schema Avro | Schema Registry (topic `_schemas` của Kafka) | Producer/consumer mới không giải mã được | Nằm trong Kafka: được MirrorMaker 2 nếu thêm `_schemas` vào `topicsPattern`; hoặc đăng ký lại từ `services/pkg/events/schemas/` (các service tự đăng ký khi khởi động) |
+| Orders, trips, ratings, outbox | Postgres (order, trip, rating) | **Truly lost**: it is the source of truth | Postgres backups + PITR (below) |
+| Business events (`order.*`, `trip.*`) | Kafka, retained 7 days | Committed data can be rebuilt from Postgres; a consumer more than 7 days behind loses events | MirrorMaker 2 to the standby region; S3 archive |
+| Driver location, driver status, leases | Redis (one master + replica, monitored by Sentinel) | **Self-healing**: drivers report again every few seconds; when a lease expires the driver can receive orders again | No backup needed |
+| Avro schemas | Schema Registry (Kafka topic `_schemas`) | New producers/consumers cannot decode messages | Lives in Kafka: replicated by MirrorMaker 2 if `_schemas` is added to `topicsPattern`; or re-register from `services/pkg/events/schemas/` (services register themselves on startup) |
 
-Mục tiêu đề xuất (hãy chỉnh theo hợp đồng thật): **RPO** (mất dữ liệu tối đa) vài giây với Postgres có replica đồng bộ/PITR, vài chục giây với
-Kafka sang vùng dự phòng (MirrorMaker 2 sao chép bất đồng bộ); **RTO** (thời gian khôi phục) vài chục phút, phần lớn là thao tác tay bên dưới.
+Proposed targets (adjust to the real contract): **RPO** (maximum data loss) of a few seconds for Postgres with a synchronous replica/PITR, and tens of seconds for
+Kafka to the standby region (MirrorMaker 2 replicates asynchronously); **RTO** (recovery time) of tens of minutes, most of it the manual steps below.
 
-## 0. Redis: Sentinel (mất một node, không phải mất vùng)
+## 0. Redis: Sentinel (losing a node, not a region)
 
-Redis không cần sao lưu (xem bảng trên) nhưng cần **sẵn sàng**: khi master chết, Matching và Driver Location Service dừng. Mọi service dùng
-`pkg/redisconn`: đặt `REDIS_SENTINEL_ADDRS` (ConfigMap, danh sách Sentinel cách nhau dấu phẩy) và `REDIS_MASTER_NAME` thì client hỏi Sentinel
-master hiện tại và **tự theo failover**, không phải khởi động lại service. Để trống thì dùng `REDIS_ADDR` một node như trước. Mật khẩu qua
-`REDIS_PASSWORD(_FILE)` và `REDIS_SENTINEL_PASSWORD(_FILE)`.
+Redis needs no backup (see the table above) but it does need **availability**: when the master dies, Matching and the Driver Location Service stop. Every service uses
+`pkg/redisconn`: set `REDIS_SENTINEL_ADDRS` (ConfigMap, a comma-separated list of Sentinels) and `REDIS_MASTER_NAME` and the client asks Sentinel for the current
+master and **follows failovers on its own**, with no service restart. Leave them empty and it uses the single-node `REDIS_ADDR` as before. Passwords go through
+`REDIS_PASSWORD(_FILE)` and `REDIS_SENTINEL_PASSWORD(_FILE)`.
 
-Đã kiểm chứng: `TestTheClientFollowsAFailover` (`pkg/redisconn`) chạy trên một master, một replica và một Sentinel thật, yêu cầu
-`SENTINEL FAILOVER`, chờ Sentinel đổi master rồi yêu cầu cùng một client ghi được vào master mới và master cũ từ chối ghi. Chưa kiểm chứng:
-Sentinel có đủ 3 node (quorum 2) và độ trễ failover khi master chết đột ngột (`down-after-milliseconds` + bầu chọn, thường vài giây đến chục giây).
-Manifest **không** triển khai Redis/Sentinel (như Postgres, nên dùng dịch vụ quản lý hoặc operator); chỉ cấu hình phía client có trong repo.
+Verified: `TestTheClientFollowsAFailover` (`pkg/redisconn`) runs against a real master, a real replica and a real Sentinel, requests
+`SENTINEL FAILOVER`, waits for Sentinel to switch masters, then requires the same client to be able to write to the new master while the old master rejects writes. Not verified:
+a Sentinel deployment with all 3 nodes (quorum 2), and the failover latency when the master dies abruptly (`down-after-milliseconds` + election, typically a few seconds to ten-odd seconds).
+The manifests do **not** deploy Redis/Sentinel (as with Postgres, use a managed service or an operator); only the client-side configuration is in the repo.
 
-Sentinel thêm tính sẵn sàng, không thêm dung lượng: vẫn một master. Replica sao chép bất đồng bộ nên lúc failover có thể mất vài giây ghi cuối
-(vị trí tự bù; nhưng một lease hoặc `match:<orderId>` ghi cuối cũng có thể mất, và hệ quả của việc đó, ví dụ một đơn bị ghép hai lần, **chưa được kiểm thử**).
+Sentinel adds availability, not capacity: there is still a single master. Replicas replicate asynchronously, so a failover can lose the last few seconds of writes
+(location heals itself; but a lease or a `match:<orderId>` written last may also be lost, and the consequences of that, for example an order being matched twice, are **untested**).
 
 ## 1. Postgres
 
-Không tự quản bằng CronJob `pg_dump`: dùng dịch vụ quản lý (RDS/Cloud SQL/…) bật **sao lưu tự động + PITR + replica đọc ở vùng khác**, hoặc
-operator (CloudNativePG, Crunchy) với `barman`/`pgBackRest` đẩy WAL lên S3. `pg_dump` hằng ngày chỉ là lớp bảo hiểm thứ hai, không cho PITR.
+Do not self-manage this with a `pg_dump` CronJob: use a managed service (RDS/Cloud SQL/...) with **automated backups + PITR + a read replica in another region** enabled, or
+an operator (CloudNativePG, Crunchy) with `barman`/`pgBackRest` shipping WAL to S3. A daily `pg_dump` is only a second layer of insurance and does not give PITR.
 
-Bắt buộc **diễn tập khôi phục** mỗi quý: dựng DB từ bản sao lưu, chạy `order-service migrate` để chắc schema khớp, kiểm tra số dòng. Sao lưu
-chưa từng được khôi phục thử là chưa có sao lưu.
+**Restore drills** are mandatory every quarter: build a database from a backup, run `order-service migrate` to make sure the schema matches, and check row counts. A backup
+that has never been test-restored is not a backup.
 
-Dọn dữ liệu: `deploy/k8s/base/retention/` có hai CronJob xóa dòng dedupe cũ hơn 30 ngày (`processed_events` của trip, `rating_events` của
-rating) theo lô 10.000 dòng. 30 ngày là giới hạn dưới: Kafka giữ 7 ngày và một DLQ có thể chờ người xử lý; dưới mức đó, một redrive muộn có thể
-bị xử lý hai lần. Bảng `orders`, `trips` không tự xóa: lưu trữ chúng là quyết định về sản phẩm và pháp lý. `outbox` tự xóa khi publish xong;
-`outbox_dead` giữ lại cho người xem (xem runbook), dọn tay sau khi xử lý.
+Data cleanup: `deploy/k8s/base/retention/` has two CronJobs that delete dedupe rows older than 30 days (`processed_events` for trip, `rating_events` for
+rating) in batches of 10,000 rows. 30 days is a lower bound: Kafka retains 7 days and a DLQ may wait on a human; below that, a late redrive could
+be processed twice. The `orders` and `trips` tables are never deleted automatically: archiving them is a product and legal decision. `outbox` rows delete themselves once published;
+`outbox_dead` is kept for a human to inspect (see the runbook) and cleaned up by hand after handling.
 
-## 2. Kafka sang vùng dự phòng (`deploy/k8s/dr/mirrormaker2.yaml`)
+## 2. Kafka to the standby region (`deploy/k8s/dr/mirrormaker2.yaml`)
 
-Áp dụng trong cluster của **vùng dự phòng**. Sao chép `order.*` và `trip.*` (không sao `driver.location.*`: telemetry), giữ nguyên tên topic
-(`IdentityReplicationPolicy`) để consumer không phải đổi cấu hình, và đồng bộ offset của consumer group (`sync.group.offsets`).
+Apply it in the cluster of the **standby region**. It replicates `order.*` and `trip.*` (not `driver.location.*`: telemetry), keeps topic names unchanged
+(`IdentityReplicationPolicy`) so consumers do not have to change configuration, and syncs consumer group offsets (`sync.group.offsets`).
 
-Giới hạn cần biết:
+Limitations to be aware of:
 
-- Bất đồng bộ: vùng chính chết thì những event chưa kịp sao chép sẽ mất (RPO > 0). Postgres là nguồn sự thật để đối chiếu.
-- Offset được dịch **xấp xỉ**, nên consumer có thể xử lý lại vài message ngay trước điểm chuyển. Các consumer đã idempotent (eventId,
-  `match:<orderId>`), đây là lý do chúng cần idempotent.
-- Chưa có số đo độ trễ sao chép, và manifest mới chỉ được kiểm tra schema, **chưa chạy thử trên cluster thật**.
+- Asynchronous: if the primary region dies, events not yet replicated are lost (RPO > 0). Postgres is the source of truth to reconcile against.
+- Offsets are translated **approximately**, so consumers may reprocess a few messages just before the cutover point. The consumers are already idempotent (eventId,
+  `match:<orderId>`); this is exactly why they need to be idempotent.
+- There is no measurement of replication lag yet, and the manifest has only had its schema validated; it has **not yet been run on a real cluster**.
 
-## 3. Lưu trữ lạnh trên S3 (`deploy/k8s/dr/s3-archive.yaml`)
+## 3. Cold archive on S3 (`deploy/k8s/dr/s3-archive.yaml`)
 
-Kafka Connect S3 sink ghi các topic nghiệp vụ ra S3 dạng Avro, chia theo giờ. Độc lập với cả hai cluster Kafka, dùng cho kiểm toán và dựng
-lại read model. Cũng chưa chạy thử trên cluster thật; plugin S3 sink theo giấy phép Confluent Community License.
+The Kafka Connect S3 sink writes the business topics to S3 as Avro, partitioned by hour. It is independent of both Kafka clusters and is meant for auditing and rebuilding
+read models. It has also not yet been run on a real cluster; the S3 sink plugin is under the Confluent Community License.
 
-## 4. Quy trình chuyển vùng (failover)
+## 4. Failover procedure
 
-Chỉ khi vùng chính không phục hồi sớm. Mỗi bước nên được diễn tập trước:
+Only when the primary region will not recover soon. Each step should be rehearsed beforehand:
 
-1. **Quyết định và thông báo.** Chuyển vùng có chi phí (mất một phần event chưa sao chép, offset xấp xỉ): do người có thẩm quyền quyết định.
-2. **Dừng ghi ở vùng chính nếu còn chạm được** (scale về 0), để tránh hai vùng cùng nhận đơn.
-3. **Postgres**: promote replica ở vùng dự phòng (hoặc khôi phục từ PITR tới thời điểm gần nhất). Ghi lại thời điểm.
-4. **Kafka**: kiểm tra MirrorMaker 2 đã bắt kịp tới đâu (`kafka_consumer_lag` của connector, hoặc so offset cuối); dừng MirrorMaker 2.
-5. **Schema Registry**: bảo đảm có đủ schema (topic `_schemas` đã sao, hoặc đăng ký lại).
-6. **Redis**: dựng mới, trống. Tài xế sẽ tự báo lại vị trí; trong vài giây đầu Matching có thể trả `NO_DRIVER`.
-7. **Khởi động service** ở vùng dự phòng (`kubectl apply -k deploy/k8s/base`, thay `DATABASE_URL`, bootstrap Kafka qua ConfigMap). Chạy
-   `migrate` trước.
-8. **Đổi DNS/gateway** sang vùng dự phòng.
-9. **Sau khi ổn**: đối chiếu đơn trong Postgres với event Kafka; đơn `PENDING` quá cũ cần xử lý tay (hủy hoặc ghép lại). `dlq-redrive`
-   nếu có dead letter phát sinh.
+1. **Decide and announce.** Failing over has a cost (some unreplicated events are lost, offsets are approximate): it is decided by someone with the authority to do so.
+2. **Stop writes in the primary region if it is still reachable** (scale to 0), to avoid both regions accepting orders.
+3. **Postgres**: promote the replica in the standby region (or restore from PITR to the most recent point). Record the timestamp.
+4. **Kafka**: check how far MirrorMaker 2 has caught up (the connector's `kafka_consumer_lag`, or compare end offsets); stop MirrorMaker 2.
+5. **Schema Registry**: make sure all schemas are present (the `_schemas` topic was replicated, or re-register them).
+6. **Redis**: bring up a fresh, empty instance. Drivers will report their locations again on their own; for the first few seconds Matching may return `NO_DRIVER`.
+7. **Start the services** in the standby region (`kubectl apply -k deploy/k8s/base`, replace `DATABASE_URL`, set the Kafka bootstrap through the ConfigMap). Run
+   `migrate` first.
+8. **Switch DNS/gateway** to the standby region.
+9. **Once stable**: reconcile the orders in Postgres against the Kafka events; `PENDING` orders that are too old need handling by hand (cancel or re-match). Run `dlq-redrive`
+   if any dead letters appeared.
 
-Quay lại vùng chính (failback) là một lần chuyển vùng ngược, làm khi bình tĩnh, theo chiều ngược của các bước trên và cần đảm bảo dữ liệu hai
-bên không rẽ nhánh.
+Returning to the primary region (failback) is a failover in the opposite direction: do it calmly, follow the steps above in reverse, and make sure the data in the two
+regions has not diverged.
 
-## Chưa làm
+## Not done yet
 
-- Chưa có diễn tập chuyển vùng hay khôi phục nào; mọi RPO/RTO ở trên là mục tiêu, không phải số đo.
-- Redis không có sao lưu (cố ý) và manifest không triển khai Redis/Sentinel; Redis Cluster không dùng được (xem docs/performance.md).
-- Active-active nhiều vùng: không làm. Hai vùng cùng ghi Postgres và cùng ghép tài xế cần thiết kế riêng về xung đột.
+- No failover or restore drill has been run; every RPO/RTO above is a target, not a measurement.
+- Redis has no backup (deliberately) and the manifests do not deploy Redis/Sentinel; Redis Cluster cannot be used (see docs/performance.md).
+- Multi-region active-active: not done. Two regions both writing to Postgres and both matching drivers would need a separate design for conflicts.
