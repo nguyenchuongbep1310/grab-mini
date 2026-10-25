@@ -126,7 +126,10 @@ func (s *quoteServer) handleQuote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *quoteServer) routes(verifier *auth.Verifier) *http.ServeMux {
+	// A quote is a surge lookup and a price calculation; the app asks when the
+	// pins move, which is not many times a second.
+	quotes := auth.LimiterFromEnv(5, 20)
 	mux := http.NewServeMux()
-	mux.Handle("GET /quotes", verifier.Require(http.HandlerFunc(s.handleQuote), auth.Rider))
+	mux.Handle("GET /quotes", verifier.Require(quotes.Wrap(http.HandlerFunc(s.handleQuote)), auth.Rider))
 	return mux
 }

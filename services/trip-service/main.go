@@ -420,16 +420,20 @@ func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, pa
 func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
 	anyone := func(h http.HandlerFunc) http.Handler { return verifier.Require(h, auth.Rider, auth.Driver) }
 	only := func(role auth.Role, h http.HandlerFunc) http.Handler { return verifier.Require(h, role) }
+	// The calls that change a trip (and the rating), not the reads the apps
+	// poll with.
+	writes := auth.LimiterFromEnv(2, 10)
+	limited := func(h http.HandlerFunc) http.HandlerFunc { return writes.Wrap(h).ServeHTTP }
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.Handle("GET /trips/{id}", anyone(s.handleGetTrip))
 	mux.Handle("GET /trips/by-order/{orderId}", anyone(s.handleGetTripByOrder))
 	mux.Handle("GET /drivers/{id}/active-trip", only(auth.Driver, s.handleGetActiveTrip))
-	mux.Handle("POST /trips/{id}/pickup", only(auth.Driver, s.handlePickup))
-	mux.Handle("POST /trips/{id}/complete", only(auth.Driver, s.handleComplete))
-	mux.Handle("POST /trips/{id}/cancel", anyone(s.handleCancel))
-	mux.Handle("POST /trips/{id}/rating", only(auth.Rider, s.handleRateTrip))
+	mux.Handle("POST /trips/{id}/pickup", only(auth.Driver, limited(s.handlePickup)))
+	mux.Handle("POST /trips/{id}/complete", only(auth.Driver, limited(s.handleComplete)))
+	mux.Handle("POST /trips/{id}/cancel", anyone(limited(s.handleCancel)))
+	mux.Handle("POST /trips/{id}/rating", only(auth.Rider, limited(s.handleRateTrip)))
 	return mux
 }
 

@@ -39,7 +39,7 @@ func runOutcomeConsumer(ctx context.Context, env Env, db *pgxpool.Pool, codec *e
 			if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
 				return err
 			}
-			return setOutcome(ctx, db, evt.OrderID, "MATCHED")
+			return setMatched(ctx, db, evt.OrderID, evt.DriverID)
 		case events.TopicOrderNoDriverFound:
 			var evt events.OrderNoDriverFound
 			if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
@@ -63,10 +63,20 @@ func runOutcomeConsumer(ctx context.Context, env Env, db *pgxpool.Pool, codec *e
 // setOutcome moves a PENDING order to its outcome. Only PENDING orders move,
 // so a redelivered or out-of-order event is a harmless no-op.
 func setOutcome(ctx context.Context, db *pgxpool.Pool, orderID, status string) error {
+	return setOutcomeFor(ctx, db, orderID, status, "")
+}
+
+// setMatched is setOutcome for MATCHED, and records which driver the order
+// went to: that driver is the only one who may read it.
+func setMatched(ctx context.Context, db *pgxpool.Pool, orderID, driverID string) error {
+	return setOutcomeFor(ctx, db, orderID, "MATCHED", driverID)
+}
+
+func setOutcomeFor(ctx context.Context, db *pgxpool.Pool, orderID, status, driverID string) error {
 	if _, err := uuid.Parse(orderID); err != nil {
 		return &badOutcome{"order id " + orderID + " is not a UUID"}
 	}
-	tag, err := db.Exec(ctx, `UPDATE orders SET status = $2 WHERE id = $1 AND status = 'PENDING'`, orderID, status)
+	tag, err := db.Exec(ctx, `UPDATE orders SET status = $2, driver_id = $3 WHERE id = $1 AND status = 'PENDING'`, orderID, status, driverID)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ import {
   rateTrip,
   tripAction,
   useNotificationSocket,
+  waitForOrder,
   waitForTripByOrder,
 } from "./index";
 
@@ -116,6 +117,19 @@ describe("auth & api client", () => {
 
     const trip = await waitForTripByOrder("o-1", 4, 5);
     expect(trip.id).toBe("t-1");
+  });
+
+  it("retries 404 in waitForOrder until the match is recorded, but not other errors", async () => {
+    signIn("driver", "driver-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-d1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "order not found" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "o-1", status: "MATCHED" }), { status: 200 }));
+    expect((await waitForOrder("o-1", 4, 5)).id).toBe("o-1");
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "boom" }), { status: 500 }));
+    await expect(waitForOrder("o-1", 4, 5)).rejects.toMatchObject({ status: 500 });
   });
 
   it("returns null on 404 for getActiveTrip and getLatestOrder, and calls other endpoints", async () => {

@@ -42,6 +42,8 @@ type conn struct {
 func (c *conn) writeText(b []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A client that stops reading must not stall the hub's delivery loop.
+	c.ws.SetWriteDeadline(time.Now().Add(currentLimits().writeWait))
 	return c.ws.WriteMessage(websocket.TextMessage, b)
 }
 
@@ -142,11 +144,18 @@ func (h *hub) deliver(channel string, payload []byte) {
 func (h *hub) register(ctx context.Context, kind, id string, ws *websocket.Conn) *conn {
 	c := &conn{ws: ws}
 	h.mu.Lock()
-	if _, replaced := h.connsFor(kind)[id]; !replaced {
+	old, replaced := h.connsFor(kind)[id]
+	if !replaced {
 		socketsOpen.WithLabelValues(kind).Inc()
 	}
 	h.connsFor(kind)[id] = c
 	h.mu.Unlock()
+	// One socket per person: a reconnect replaces the old one, which would
+	// otherwise stay open (and read) until its client chose to go. Without
+	// this a client could pile up sockets by reconnecting.
+	if replaced {
+		old.ws.Close()
+	}
 	if err := h.sub.Subscribe(ctx, channelFor(kind, id)); err != nil {
 		log.Printf("failed to subscribe to %s=%s: %v", kind, id, err)
 	}

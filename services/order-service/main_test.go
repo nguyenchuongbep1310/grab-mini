@@ -191,7 +191,7 @@ func TestOrderAccessIsLimitedToTheOwnerAndDrivers(t *testing.T) {
 		{"no token", "GET", "/orders/" + id, "", "", 401},
 		{"the owner reads their order", "GET", "/orders/" + id, auth.Rider, "rider-1", 200},
 		{"another rider can't see it (it doesn't exist for them)", "GET", "/orders/" + id, auth.Rider, "rider-2", 404},
-		{"a driver can read it", "GET", "/orders/" + id, auth.Driver, "driver-1", 200},
+		{"a driver can't read an order that isn't theirs", "GET", "/orders/" + id, auth.Driver, "driver-1", 404},
 		{"the owner's latest order", "GET", "/riders/rider-1/latest-order", auth.Rider, "rider-1", 200},
 		{"someone else's latest order", "GET", "/riders/rider-1/latest-order", auth.Rider, "rider-2", 403},
 		{"a driver has no latest order", "GET", "/riders/rider-1/latest-order", auth.Driver, "rider-1", 403},
@@ -202,5 +202,16 @@ func TestOrderAccessIsLimitedToTheOwnerAndDrivers(t *testing.T) {
 		if got := do(c.method, c.path, c.role, c.subject); got != c.wantCode {
 			t.Errorf("%s: status %d, want %d", c.name, got, c.wantCode)
 		}
+	}
+
+	// Once matched, that driver (and only that driver) can read it.
+	if err := setMatched(ctx, db, id, "driver-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := do("GET", "/orders/"+id, auth.Driver, "driver-1"); got != 200 {
+		t.Errorf("the matched driver: status %d, want 200", got)
+	}
+	if got := do("GET", "/orders/"+id, auth.Driver, "driver-2"); got != 404 {
+		t.Errorf("another driver after the match: status %d, want 404", got)
 	}
 }

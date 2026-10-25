@@ -300,3 +300,37 @@ func TestQuoteRequiresARider(t *testing.T) {
 		t.Errorf("status %d, want 401", rec.Code)
 	}
 }
+
+func TestQuotesAreRateLimitedPerRider(t *testing.T) {
+	t.Setenv(auth.RateLimitScaleEnv, "")
+	_, rdb := newRedis(t)
+	s := quoteServerWith(t, rdb)
+	secret := "0123456789abcdef0123456789abcdef"
+	verifier, _ := auth.NewVerifier(secret)
+	issuer, _ := auth.NewIssuer(secret, time.Hour)
+	mux := s.routes(verifier)
+
+	call := func(rider string) *httptest.ResponseRecorder {
+		tok, _, _ := issuer.Issue(auth.Rider, rider)
+		req := httptest.NewRequest(http.MethodGet, "/quotes?"+trip, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	var limited *httptest.ResponseRecorder
+	for i := 0; i < 100 && limited == nil; i++ { // far past the burst, far faster than the refill
+		if rec := call("spammer"); rec.Code == http.StatusTooManyRequests {
+			limited = rec
+		}
+	}
+	if limited == nil {
+		t.Fatal("100 quotes in a burst were never limited")
+	}
+	if limited.Header().Get("Retry-After") == "" {
+		t.Error("a 429 came without Retry-After")
+	}
+	if rec := call("someone-else"); rec.Code != http.StatusOK {
+		t.Errorf("another rider got %d while the first was limited", rec.Code)
+	}
+}

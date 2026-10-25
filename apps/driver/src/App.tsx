@@ -16,7 +16,7 @@ import {
 import {
   getActiveTrip,
   getDriverRating,
-  getOrder,
+  waitForOrder,
   signIn,
   tripAction,
   useNotificationSocket,
@@ -114,7 +114,7 @@ export function App() {
         .catch(() => !stale && toast.show("Couldn't load the trip", "error"));
     }
     if (!order) {
-      getOrder(orderId)
+      waitForOrder(orderId)
         .then((o) => !stale && dispatch({ type: "orderLoaded", order: o }))
         .catch(() => !stale && toast.show("Couldn't load the route", "error"));
     }

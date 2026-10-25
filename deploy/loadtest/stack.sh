@@ -23,6 +23,9 @@ mkdir -p "$DIR/bin" "$DIR/logs"
 export KAFKA_BROKERS REDIS_ADDR DATABASE_URL
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 export LOG_LEVEL=${LOG_LEVEL:-warn}
+# The load generator is a few simulated users acting far faster than people; the
+# per-caller rate limits would throttle it rather than the system under test.
+export RATE_LIMIT_SCALE=${RATE_LIMIT_SCALE:-0}
 
 # name  port-env  metrics-port-for-workers
 SERVICES="dev-registry auth-service order-service matching-service trip-service driver-location-service notification-service rating-service location-gateway"

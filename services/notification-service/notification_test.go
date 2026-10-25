@@ -336,3 +336,18 @@ func TestTheOpenSocketGaugeFollowsConnectsAndDisconnects(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestReconnectingClosesTheOlderSocket(t *testing.T) {
+	ctx, addr := setup(t)
+	a := newInstance(t, ctx, addr)
+	first := a.connect(t, kindRider, "rider-1")
+	second := a.connect(t, kindRider, "rider-1")
+	defer second.Close()
+
+	first.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := first.ReadMessage(); err == nil {
+		t.Fatal("the replaced socket delivered a message instead of being closed")
+	} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+		t.Fatal("the replaced socket was left open")
+	}
+}

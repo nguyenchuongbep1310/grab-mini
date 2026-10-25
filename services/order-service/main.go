@@ -224,14 +224,17 @@ type orderView struct {
 	// null on orders booked before surge pricing existed.
 	SurgeMultiplier float64  `json:"surgeMultiplier"`
 	Price           *float64 `json:"price"`
+
+	// The driver it was matched to; never sent, only used to decide who may read it.
+	driverID string
 }
 
-const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, cancelled_at, cancelled_by, cancel_reason`
+const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, cancelled_at, cancelled_by, cancel_reason, driver_id`
 
 func queryOrder(ctx context.Context, db *pgxpool.Pool, where string, arg string) (*orderView, error) {
 	var o orderView
 	err := db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE `+where+` ORDER BY created_at DESC LIMIT 1`, arg).
-		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.SurgeMultiplier, &o.Price, &o.CancelledAt, &o.CancelledBy, &o.CancelReason)
+		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.SurgeMultiplier, &o.Price, &o.CancelledAt, &o.CancelledBy, &o.CancelReason, &o.driverID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +255,22 @@ func respondWithOrder(w http.ResponseWriter, o *orderView, err error) {
 	json.NewEncoder(w).Encode(o)
 }
 
+// mayReadOrder says who can see an order: its rider, and the driver it was
+// matched to (who learns its id from order.matched and needs the pickup and
+// dropoff). No other driver: an order holds a rider's id and where they are
+// going, and knowing its UUID is not a reason to hand that over. Order
+// Service learns the match from the same event the driver is told by, so the
+// driver app retries a 404 for a moment.
+func mayReadOrder(c auth.Identity, o *orderView) bool {
+	switch c.Role {
+	case auth.Rider:
+		return o.RiderID == c.Subject
+	case auth.Driver:
+		return o.driverID != "" && o.driverID == c.Subject
+	}
+	return false
+}
+
 // handleGetOrder lets a client that only knows the orderId (e.g. the Driver
 // App after an order.matched push) find where the trip starts and ends.
 func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
@@ -267,10 +286,8 @@ func (s *server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	o, err := queryOrder(r.Context(), s.db, "id = $1", r.PathValue("id"))
-	// A rider sees only their own orders; to anyone else it doesn't exist.
-	// Any driver can read one (they learn an order id from order.matched and
-	// need its pickup and dropoff); the id is an unguessable UUID.
-	if err == nil && caller.Role == auth.Rider && o.RiderID != caller.Subject {
+	// To anyone who may not read it, an order doesn't exist.
+	if err == nil && !mayReadOrder(caller, o) {
 		err = pgx.ErrNoRows
 	}
 	respondWithOrder(w, o, err)
@@ -291,11 +308,15 @@ func (s *server) handleGetLatestOrder(w http.ResponseWriter, r *http.Request) {
 // which roles may call it; the handlers then check the caller owns what they
 // touch.
 func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
+	// Placing and cancelling orders is what a person does a few times; a
+	// script that does it faster is abusing the pricing, matching and database
+	// behind it.
+	writes := auth.LimiterFromEnv(1, 10)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.Handle("POST /orders", verifier.Require(http.HandlerFunc(s.handleCreateOrder), auth.Rider))
+	mux.Handle("POST /orders", verifier.Require(writes.Wrap(http.HandlerFunc(s.handleCreateOrder)), auth.Rider))
 	mux.Handle("GET /orders/{id}", verifier.Require(http.HandlerFunc(s.handleGetOrder), auth.Rider, auth.Driver))
-	mux.Handle("POST /orders/{id}/cancel", verifier.Require(http.HandlerFunc(s.handleCancelOrder), auth.Rider))
+	mux.Handle("POST /orders/{id}/cancel", verifier.Require(writes.Wrap(http.HandlerFunc(s.handleCancelOrder)), auth.Rider))
 	mux.Handle("GET /riders/{id}/latest-order", verifier.Require(http.HandlerFunc(s.handleGetLatestOrder), auth.Rider))
 	return mux
 }

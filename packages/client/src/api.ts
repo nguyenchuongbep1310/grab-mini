@@ -149,6 +149,23 @@ export function getOrder(orderId: string): Promise<Order> {
   return request(`${ORDER_API}/orders/${orderId}`);
 }
 
+/**
+ * A driver may read an order only once Order Service has recorded the match,
+ * which it learns from the same order.matched event the driver was just told
+ * about, so the order can briefly be a 404. Retry that.
+ */
+export async function waitForOrder(orderId: string, attempts = 8, delayMs = 400): Promise<Order> {
+  for (let i = 0; ; i++) {
+    try {
+      return await getOrder(orderId);
+    } catch (err) {
+      const notYet = err instanceof ApiError && err.status === 404;
+      if (!notYet || i >= attempts - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 export function getTripByOrder(orderId: string): Promise<Trip> {
   return request(`${TRIP_API}/trips/by-order/${orderId}`);
 }

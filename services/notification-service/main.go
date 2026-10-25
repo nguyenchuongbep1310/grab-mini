@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -44,6 +45,29 @@ func newUpgrader(allowedOrigins []string) *websocket.Upgrader {
 	}
 }
 
+// socketLimits bound a socket. The apps never send anything over it (the
+// server only pushes), so a frame bigger than readLimit is a misbehaving
+// client. A client that stops answering pings is gone, whether or not its TCP
+// connection says so, and must not keep a socket and a Redis subscription
+// forever.
+type socketLimits struct {
+	readLimit int64
+	pongWait  time.Duration // how long a socket may be silent, pings included
+	pingEvery time.Duration
+	writeWait time.Duration
+}
+
+var (
+	limitsMu sync.RWMutex
+	limits   = socketLimits{readLimit: 512, pongWait: 60 * time.Second, pingEvery: 25 * time.Second, writeWait: 10 * time.Second}
+)
+
+func currentLimits() socketLimits {
+	limitsMu.RLock()
+	defer limitsMu.RUnlock()
+	return limits
+}
+
 // serveWS implements task 4.1: upgrade to a WebSocket, register the
 // connection under the given id, and keep reading until the client
 // disconnects (a WS reader is required to process control frames and
@@ -54,10 +78,34 @@ func serveWS(upgrader *websocket.Upgrader, w http.ResponseWriter, r *http.Reques
 		log.Printf("websocket upgrade failed: %v", err)
 		return
 	}
+	lim := currentLimits()
+	ws.SetReadLimit(lim.readLimit)
+	ws.SetReadDeadline(time.Now().Add(lim.pongWait))
+	ws.SetPongHandler(func(string) error { return ws.SetReadDeadline(time.Now().Add(lim.pongWait)) })
+
 	c := register(ws)
+	stop := make(chan struct{})
 	defer func() {
+		close(stop)
 		unregister(c)
 		ws.Close()
+	}()
+
+	go func() {
+		t := time.NewTicker(lim.pingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				// WriteControl may run alongside the hub's writes.
+				if ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(lim.writeWait)) != nil {
+					ws.Close()
+					return
+				}
+			}
+		}
 	}()
 
 	for {
