@@ -23,6 +23,12 @@ import (
 // Production reports whether APP_ENV=production.
 func Production() bool { return strings.EqualFold(os.Getenv("APP_ENV"), "production") }
 
+// Development reports whether APP_ENV=development: the one setting under
+// which GetOrDev falls back to a development default. Unset is not
+// development, so a deployment that forgets APP_ENV fails instead of running
+// with a secret that is in this repository.
+func Development() bool { return strings.EqualFold(os.Getenv("APP_ENV"), "development") }
+
 // ErrMissing is returned when a secret is not set and no default is allowed.
 var ErrMissing = errors.New("secret not set")
 
@@ -58,4 +64,22 @@ func GetOr(name, devDefault string) (string, error) {
 		return "", fmt.Errorf("%w (set it, or %s_FILE; development defaults are not used when APP_ENV=production)", err, name)
 	}
 	return devDefault, nil
+}
+
+// GetOrDev returns the secret NAME, or devDefault only when APP_ENV is
+// "development". Use it for secrets whose default is public and lets anyone
+// forge tokens or prices (the signing keys): unlike GetOr, which also falls
+// back to the default when APP_ENV is unset, an unset APP_ENV is an error.
+func GetOrDev(name, devDefault string) (string, error) {
+	v, err := Get(name)
+	if err == nil {
+		return v, nil
+	}
+	if !errors.Is(err, ErrMissing) {
+		return "", err
+	}
+	if Development() {
+		return devDefault, nil
+	}
+	return "", fmt.Errorf("%w (set it, or %s_FILE; the development default is used only with APP_ENV=development)", err, name)
 }

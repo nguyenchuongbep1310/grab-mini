@@ -193,3 +193,37 @@ func TestRefusalsLookTheSame(t *testing.T) {
 		t.Errorf("Deny wrote %q (%s)", rec.Body.String(), rec.Header().Get("Content-Type"))
 	}
 }
+
+func TestSecretFromEnvFailsClosed(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("JWT_SECRET_FILE", "")
+	for _, env := range []string{"", "production", "staging"} {
+		t.Setenv("APP_ENV", env)
+		if _, err := SecretFromEnv(); err == nil {
+			t.Errorf("APP_ENV=%q without JWT_SECRET fell back to the public secret", env)
+		}
+		if _, err := VerifierFromEnv(); err == nil {
+			t.Errorf("APP_ENV=%q: VerifierFromEnv succeeded without a secret", env)
+		}
+	}
+
+	t.Setenv("APP_ENV", "development")
+	if s, err := SecretFromEnv(); err != nil || s != DevSecret {
+		t.Errorf("development: SecretFromEnv = %q, %v; want the dev secret", s, err)
+	}
+
+	// Naming the public secret does not make it safe.
+	t.Setenv("JWT_SECRET", DevSecret)
+	for _, env := range []string{"", "production"} {
+		t.Setenv("APP_ENV", env)
+		if _, err := SecretFromEnv(); err == nil {
+			t.Errorf("APP_ENV=%q accepted the public development secret", env)
+		}
+	}
+
+	t.Setenv("JWT_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("APP_ENV", "production")
+	if s, err := SecretFromEnv(); err != nil || s != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("production with a real secret: %q, %v", s, err)
+	}
+}

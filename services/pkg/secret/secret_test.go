@@ -56,3 +56,33 @@ func TestProductionRefusesToUseADefault(t *testing.T) {
 		t.Errorf("GetOr in production with the secret set = %q, %v", v, err)
 	}
 }
+
+func TestGetOrDevFallsBackOnlyInDevelopment(t *testing.T) {
+	t.Setenv("SIGNING_KEY", "")
+	t.Setenv("SIGNING_KEY_FILE", "")
+	for _, env := range []string{"", "production", "staging", "dev"} {
+		t.Setenv("APP_ENV", env)
+		if v, err := GetOrDev("SIGNING_KEY", "public-default"); !errors.Is(err, ErrMissing) || v != "" {
+			t.Errorf("APP_ENV=%q: GetOrDev = %q, %v; want ErrMissing and no value", env, v, err)
+		}
+	}
+	for _, env := range []string{"development", "Development"} {
+		t.Setenv("APP_ENV", env)
+		if v, err := GetOrDev("SIGNING_KEY", "public-default"); err != nil || v != "public-default" {
+			t.Errorf("APP_ENV=%q: GetOrDev = %q, %v; want the default", env, v, err)
+		}
+	}
+}
+
+func TestGetOrDevPrefersTheRealSecretAndFileErrors(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	t.Setenv("SIGNING_KEY", "real")
+	if v, err := GetOrDev("SIGNING_KEY", "public-default"); err != nil || v != "real" {
+		t.Errorf("GetOrDev = %q, %v; want the set secret", v, err)
+	}
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("SIGNING_KEY_FILE", filepath.Join(t.TempDir(), "missing"))
+	if _, err := GetOrDev("SIGNING_KEY", "public-default"); err == nil {
+		t.Error("an unreadable _FILE fell back to the default, even in development")
+	}
+}

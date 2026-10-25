@@ -61,7 +61,9 @@ type body struct {
 // id itself holds the price, its expiry and the trip it is for.
 type Signer struct{ key []byte }
 
-// DevQuoteSecret is used only when APP_ENV is not "production".
+// DevQuoteSecret is used when QUOTE_SECRET isn't set and APP_ENV=development.
+// It is public, so SignerFromEnv refuses it in every other environment, even
+// when it is set explicitly: whoever holds the key can price a ride at anything.
 const DevQuoteSecret = "dev-quote-secret-change-me"
 
 // NewSigner returns a Signer over key.
@@ -73,11 +75,15 @@ func NewSigner(key string) (*Signer, error) {
 }
 
 // SignerFromEnv reads QUOTE_SECRET (or QUOTE_SECRET_FILE) via package secret.
-// Pricing Service and Order Service must share it.
+// Pricing Service and Order Service must share it. Without it the development
+// secret is used only when APP_ENV=development; otherwise it is an error.
 func SignerFromEnv() (*Signer, error) {
-	k, err := secret.GetOr("QUOTE_SECRET", DevQuoteSecret)
+	k, err := secret.GetOrDev("QUOTE_SECRET", DevQuoteSecret)
 	if err != nil {
 		return nil, err
+	}
+	if k == DevQuoteSecret && !secret.Development() {
+		return nil, errors.New("QUOTE_SECRET is the public development secret; it is accepted only with APP_ENV=development")
 	}
 	return NewSigner(k)
 }

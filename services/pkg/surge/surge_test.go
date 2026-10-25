@@ -230,17 +230,34 @@ func TestSignerNeedsKey(t *testing.T) {
 	}
 }
 
-func TestSignerFromEnvRefusesDevDefaultInProduction(t *testing.T) {
+func TestSignerFromEnvUsesTheDevDefaultOnlyInDevelopment(t *testing.T) {
 	t.Setenv("QUOTE_SECRET", "")
 	t.Setenv("QUOTE_SECRET_FILE", "")
-	t.Setenv("APP_ENV", "production")
-	if _, err := SignerFromEnv(); err == nil {
-		t.Error("production without QUOTE_SECRET must fail")
+	for _, env := range []string{"production", "", "staging"} {
+		t.Setenv("APP_ENV", env)
+		if _, err := SignerFromEnv(); err == nil {
+			t.Errorf("APP_ENV=%q without QUOTE_SECRET must fail", env)
+		}
 	}
-	t.Setenv("APP_ENV", "")
+	t.Setenv("APP_ENV", "development")
 	if _, err := SignerFromEnv(); err != nil {
 		t.Errorf("development default expected: %v", err)
 	}
+	t.Setenv("APP_ENV", "DEVELOPMENT")
+	if _, err := SignerFromEnv(); err != nil {
+		t.Errorf("APP_ENV is case-insensitive: %v", err)
+	}
+	// The public key must not be usable by naming it.
+	t.Setenv("QUOTE_SECRET", DevQuoteSecret)
+	t.Setenv("APP_ENV", "production")
+	if _, err := SignerFromEnv(); err == nil {
+		t.Error("the public development secret was accepted in production")
+	}
+	t.Setenv("APP_ENV", "")
+	if _, err := SignerFromEnv(); err == nil {
+		t.Error("the public development secret was accepted with APP_ENV unset")
+	}
+	t.Setenv("QUOTE_SECRET", "")
 	t.Setenv("QUOTE_SECRET", "abc")
 	t.Setenv("APP_ENV", "production")
 	if _, err := SignerFromEnv(); err != nil {

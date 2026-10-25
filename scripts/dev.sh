@@ -98,6 +98,10 @@ echo "Seeding drivers..."
 # Emit JSON logs by default so Promtail/Loki can index level, service and trace_id.
 export LOG_FORMAT="${LOG_FORMAT:-json}"
 
+# The signing keys (JWT_SECRET, QUOTE_SECRET) fall back to public development
+# values only when this is set; without it the services refuse to start.
+export APP_ENV="${APP_ENV:-development}"
+
 for svc in $SERVICES; do
   case "$svc" in
     matching-service)

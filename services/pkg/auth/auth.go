@@ -35,14 +35,25 @@ const (
 // Valid reports whether r is a role this system issues tokens for.
 func (r Role) Valid() bool { return r == Rider || r == Driver }
 
-// DevSecret signs tokens when JWT_SECRET isn't set. It is public (it is in
-// this repository), so SecretFromEnv refuses it in production.
+// DevSecret signs tokens when JWT_SECRET isn't set and APP_ENV=development.
+// It is public (it is in this repository), so SecretFromEnv refuses it in
+// every other environment, even when it is set explicitly.
 const DevSecret = "grab-mini-dev-secret-not-for-production!"
 
 // SecretFromEnv is the signing secret: JWT_SECRET, or JWT_SECRET_FILE, or
-// DevSecret outside production. Every service that issues or verifies tokens
-// must use the same one.
-func SecretFromEnv() (string, error) { return secret.GetOr("JWT_SECRET", DevSecret) }
+// DevSecret when APP_ENV=development. With APP_ENV unset or anything else it
+// is an error, not a quiet fall back to a public key. Every service that
+// issues or verifies tokens must use the same one.
+func SecretFromEnv() (string, error) {
+	s, err := secret.GetOrDev("JWT_SECRET", DevSecret)
+	if err != nil {
+		return "", err
+	}
+	if s == DevSecret && !secret.Development() {
+		return "", errors.New("JWT_SECRET is the public development secret; it is accepted only with APP_ENV=development")
+	}
+	return s, nil
+}
 
 // VerifierFromEnv is a Verifier using SecretFromEnv.
 func VerifierFromEnv() (*Verifier, error) {

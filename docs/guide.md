@@ -89,7 +89,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 
 - **Scale a consumer group.** Start a second matching service in another terminal and watch Kafka split the 3 partitions between the two instances, with no order matched twice:
   ```bash
-  cd services/matching-service && INSTANCE_ID=matching-B go run .
+  cd services/matching-service && APP_ENV=development INSTANCE_ID=matching-B go run .
   ```
   The **Consumers** tab in Kafka UI shows the partition assignment change.
 - **Send a message that isn't Avro** and watch it land in a dead-letter topic. A hand-published JSON message has no Schema Registry header, so the Driver Location Service can't decode it. Decoding errors are permanent, so it skips the retries and publishes straight to `driver.location.updated.DLQ`, with the original bytes (`valueBase64`, plus a readable `valueText`) and the error attached. (Transient failures, like Redis being down, are retried 3 times, 2s apart, before dead-lettering.)
@@ -109,7 +109,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
   pkill -f .dev/bin/rating-service   # then wait a few seconds for the group to go idle
   docker exec grab-mini-kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
     --group rating-service-group --reset-offsets --to-earliest --topic trip.rated --execute
-  cd services/rating-service && go run .
+  cd services/rating-service && APP_ENV=development go run .
   ```
 - **Replay an old location** (US-3.1). Publish a `driver.location.updated` with a `timestamp` in the past. The Driver Location Service logs `discarded as out-of-order` and the driver's position doesn't move.
 - **Make every driver busy** and book a ride, to see `order.no_driver_found`:
@@ -144,7 +144,7 @@ Every API call and every WebSocket carries a JWT, and the services trust the tok
 
 Drivers' phones never talk to Kafka. [Location Gateway](../services/location-gateway) authenticates the driver, validates the position, limits each driver to one report a second, skips a parked driver's reports, and publishes in batches.
 
-Credentials come from `NAME_FILE` (a mounted secret) or `NAME`, and with `APP_ENV=production` a missing one is an error rather than a development default: `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. For Kafka, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD_FILE` and `KAFKA_CA_FILE` (see [pkg/kafkaconn](../services/pkg/kafkaconn)); production refuses a plaintext connection. Each service has its own principal and `scripts/kafka-acls.sh` grants it only what it does (the table in that script is the source of truth). To try a Kafka with TLS, SASL/SCRAM and ACLs without Docker:
+Credentials come from `NAME_FILE` (a mounted secret) or `NAME`, and with `APP_ENV=production` a missing one is an error rather than a development default: `DATABASE_URL`, `JWT_SECRET`, `KAFKA_PASSWORD`. The two signing keys, `JWT_SECRET` and `QUOTE_SECRET`, are stricter: their public development values are used only with `APP_ENV=development` (so a deployment that forgets `APP_ENV` fails instead of running with them), and are refused anywhere else even when set explicitly. For Kafka, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL`, `KAFKA_USERNAME`, `KAFKA_PASSWORD_FILE` and `KAFKA_CA_FILE` (see [pkg/kafkaconn](../services/pkg/kafkaconn)); production refuses a plaintext connection. Each service has its own principal and `scripts/kafka-acls.sh` grants it only what it does (the table in that script is the source of truth). To try a Kafka with TLS, SASL/SCRAM and ACLs without Docker:
 
 ```bash
 KAFKA_HOME=/path/to/kafka_2.13-3.8.0 deploy/kafka-secure/start-local.sh   # prints the environment to give a service
@@ -161,9 +161,12 @@ Every consumer runs through [services/pkg/kafkaconsumer](../services/pkg/kafkaco
 To run a single piece by hand instead of `pnpm dev:all` (with `docker compose up -d` already running):
 
 ```bash
+export APP_ENV=development                              # lets the services use the public development signing keys
 cd services/matching-service && go run . seed-drivers   # once, to seed drivers
 cd services/order-service && go run .                   # likewise for each service
 ```
+
+Without `APP_ENV=development` (or real `JWT_SECRET` and `QUOTE_SECRET` values), the services that sign or check tokens and quotes refuse to start: the development keys are in this repository, so they are never used by accident.
 
 ### HTTP API
 
@@ -270,7 +273,7 @@ make help
 The local stack includes a full observability suite running via Docker Compose:
 
 1. **Grafana (http://localhost:3000)**:
-   - Log in automatically as Admin (anonymous authentication enabled).
+   - Log in as `admin` (password `admin`, or `GRAFANA_ADMIN_PASSWORD` if set when starting Compose). Anonymous access is off.
    - Pre-configured dashboard: **`grab-mini — Observability (Metrics & Logs)`**, featuring:
      - **Service Health & HTTP Traffic**: Up/Down status, HTTP request rates by route & code, p50/p95 latency.
      - **Business Metrics**: Order creation rate, matching outcomes, matching latency vs 3s SLO, trip transitions, ratings, open WebSockets.

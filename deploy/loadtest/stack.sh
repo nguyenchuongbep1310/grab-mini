@@ -22,6 +22,8 @@ mkdir -p "$DIR/bin" "$DIR/logs"
 : "${DATABASE_URL:?set DATABASE_URL (the database must exist)}"
 export KAFKA_BROKERS REDIS_ADDR DATABASE_URL
 export SCHEMA_REGISTRY_URL=http://localhost:8081
+# The signing keys fall back to public development values only with this set.
+export APP_ENV=${APP_ENV:-development}
 export LOG_LEVEL=${LOG_LEVEL:-warn}
 # The load generator is a few simulated users acting far faster than people; the
 # per-caller rate limits would throttle it rather than the system under test.
