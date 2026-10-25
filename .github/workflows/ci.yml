@@ -135,6 +135,34 @@ jobs:
           echo "$line"
           echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
 
+  # Known vulnerabilities in the Go standard library and dependencies, reported only where the
+  # module's code can reach them. Fails on any finding not in .govulncheck-allow (advisories
+  # with no fix yet): fix by upgrading the toolchain (go.work, deploy/docker/Dockerfile) or the
+  # dependency. The tool is pinned like any other.
+  govulncheck:
+    name: govulncheck (${{ matrix.module }})
+    needs: go-modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.go-modules.outputs.modules) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            **/go.sum
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - run: ${{ github.workspace }}/scripts/govulncheck.sh
+
   # Same checks as `go`, but with a real Kafka broker, for the modules whose tests need one
   # (they skip themselves in the plain `go` job).
   go-kafka:

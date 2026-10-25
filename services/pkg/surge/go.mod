@@ -1,3 +1,3 @@
 module grab-mini/pkg/surge
 
-go 1.26.4
+go 1.26.10

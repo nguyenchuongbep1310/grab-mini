@@ -1,3 +1,3 @@
 module grab-mini/driver-app-sim
 
-go 1.26.4
+go 1.26.10

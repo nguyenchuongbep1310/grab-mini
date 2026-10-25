@@ -1,6 +1,6 @@
 module grab-mini/pkg/driverstatus
 
-go 1.26.4
+go 1.26.10
 
 require (
 	github.com/alicebob/miniredis/v2 v2.39.0
@@ -11,5 +11,5 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )

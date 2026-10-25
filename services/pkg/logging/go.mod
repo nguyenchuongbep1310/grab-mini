@@ -1,6 +1,6 @@
 module grab-mini/pkg/logging
 
-go 1.26.4
+go 1.26.10
 
 require go.opentelemetry.io/otel/trace v1.47.0
 

@@ -1,0 +1,10 @@
+# Advisories govulncheck may report without failing CI, one per line: ID, then why.
+# Only list one that has no fixed version yet; delete the line when a fix ships.
+# Anything not listed here fails scripts/govulncheck.sh.
+
+# github.com/hamba/avro/v2 v2.31.0 (the latest release): Avro decoder DoS and overflow.
+# Needs write access to a Kafka topic or the Schema Registry to exploit; see
+# F-20 in the security review. Used through pkg/eventcodec.
+GO-2026-5046
+GO-2026-5047
+GO-2026-5048
