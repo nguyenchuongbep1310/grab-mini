@@ -114,6 +114,7 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
 		events.TopicOrderCancelled:       &events.OrderCancelled{OrderID: "o", RiderID: "r", CancelledBy: "RIDER", Reason: "x"},
 		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
+		events.TopicPaymentRecorded:      &events.PaymentRecorded{PaymentID: "p", TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Kind: events.PaymentKindFare, Status: events.PaymentStatusCaptured, Amount: 50000, DriverAmount: 40000, PlatformAmount: 10000, Currency: "VND", LedgerTransactionID: "x"},
 	}
 	for topic, in := range cases {
 		data, err := c.Encode(ctx, topic, in)

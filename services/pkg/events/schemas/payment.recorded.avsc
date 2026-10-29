@@ -1,0 +1,21 @@
+{
+  "type": "record",
+  "name": "PaymentRecorded",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "paymentId", "type": "string"},
+    {"name": "tripId", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string"},
+    {"name": "driverId", "type": "string"},
+    {"name": "kind", "type": "string"},
+    {"name": "status", "type": "string"},
+    {"name": "amount", "type": "long"},
+    {"name": "driverAmount", "type": "long", "default": 0},
+    {"name": "platformAmount", "type": "long", "default": 0},
+    {"name": "currency", "type": "string", "default": "VND"},
+    {"name": "ledgerTransactionId", "type": "string", "default": ""}
+  ]
+}
