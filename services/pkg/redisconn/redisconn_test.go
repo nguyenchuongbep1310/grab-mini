@@ -71,7 +71,7 @@ func TestTheClientFollowsAFailover(t *testing.T) {
 		t.Fatalf("write before the failover: %v", err)
 	}
 
-	sentinel := redis.NewClient(&redis.Options{Addr: strings.Split(addrs, ",")[0]})
+	sentinel := redis.NewClient(&redis.Options{Addr: strings.Split(addrs, ",")[0], Password: os.Getenv("REDIS_SENTINEL_PASSWORD")})
 	defer sentinel.Close()
 	masterAddr := func() string {
 		a, err := sentinel.Do(ctx, "SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster").StringSlice()
@@ -112,7 +112,7 @@ func TestTheClientFollowsAFailover(t *testing.T) {
 
 	// Sentinel demotes the old master a moment after promoting the new one;
 	// until then it could accept writes that would be lost.
-	old := redis.NewClient(&redis.Options{Addr: oldMaster})
+	old := redis.NewClient(&redis.Options{Addr: oldMaster, Password: os.Getenv("REDIS_PASSWORD")})
 	defer old.Close()
 	deadline = time.Now().Add(15 * time.Second)
 	for old.Set(ctx, "failover-test", "split-brain", 0).Err() == nil {
