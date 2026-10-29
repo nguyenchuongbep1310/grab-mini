@@ -17,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/outbox"
 )
@@ -199,9 +200,7 @@ func newAPI(t *testing.T) *api {
 	db := testDB(t)
 	p, _ := claimingPricer(t, 1.0)
 	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: fakeRegistryCodec(t), pricer: p}
-	secret := "0123456789abcdef0123456789abcdef"
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	return &api{t: t, db: db, pricer: p, mux: s.routes(verifier), issuer: issuer}
 }
 

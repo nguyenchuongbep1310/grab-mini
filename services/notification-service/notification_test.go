@@ -16,6 +16,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/tracing"
@@ -32,8 +33,6 @@ func (jsonDecoder) Decode(_ context.Context, _ string, data []byte, v any) error
 	return json.Unmarshal(data, v)
 }
 
-const testSecret = "0123456789abcdef0123456789abcdef"
-
 type instance struct {
 	h      *hub
 	server *httptest.Server
@@ -45,8 +44,7 @@ func newInstance(t *testing.T, ctx context.Context, addr string) *instance {
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
 	h := newHub(ctx, rdb)
 	go h.run(ctx)
-	verifier, _ := auth.NewVerifier(testSecret)
-	issuer, _ := auth.NewIssuer(testSecret, time.Hour)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	// Wrapped as main wraps it: the WebSocket upgrade must survive both middlewares.
 	srv := httptest.NewServer(tracing.HTTP("notification-service", metrics.HTTP(newMux(ctx, h, verifier, []string{"http://app.example"}))))
 	t.Cleanup(func() { srv.Close(); rdb.Close() })
@@ -259,9 +257,9 @@ func TestOnlyTheRightPersonCanOpenASocket(t *testing.T) {
 	a := newInstance(t, ctx, addr)
 	riderTok, _, _ := a.issuer.Issue(auth.Rider, "rider-1")
 	driverTok, _, _ := a.issuer.Issue(auth.Driver, "driver-1")
-	other, _ := auth.NewIssuer("another-secret-another-secret-123", time.Hour)
+	other := authtest.Stranger(t, time.Hour)
 	forged, _, _ := other.Issue(auth.Rider, "rider-1")
-	expired, _ := auth.NewIssuer(testSecret, -time.Hour)
+	expired := a.issuer.WithTTL(-time.Hour)
 	stale, _, _ := expired.Issue(auth.Rider, "rider-1")
 
 	cases := []struct {
@@ -272,7 +270,7 @@ func TestOnlyTheRightPersonCanOpenASocket(t *testing.T) {
 	}{
 		{"no token", kindRider, "rider-1", nil, 401},
 		{"garbage token", kindRider, "rider-1", []string{"bearer", "junk"}, 401},
-		{"signed with another secret", kindRider, "rider-1", []string{"bearer", forged}, 401},
+		{"signed with another key", kindRider, "rider-1", []string{"bearer", forged}, 401},
 		{"expired", kindRider, "rider-1", []string{"bearer", stale}, 401},
 		{"someone else's id", kindRider, "rider-2", []string{"bearer", riderTok}, 403},
 		{"a driver token on a rider socket", kindRider, "rider-1", []string{"bearer", driverTok}, 403},

@@ -16,10 +16,9 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/events"
 )
-
-const testSecret = "0123456789abcdef0123456789abcdef"
 
 type fakePub struct {
 	sent []kafka.Message
@@ -54,8 +53,7 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	issuer, _ := auth.NewIssuer(testSecret, time.Hour)
-	verifier, _ := auth.NewVerifier(testSecret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	r := &rig{pub: &fakePub{}, clock: time.Now().UTC().Truncate(time.Second)}
 	r.g = &gateway{
 		tracker: newTracker(time.Second, 5, 30*time.Second),

@@ -15,6 +15,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
 )
@@ -165,9 +166,7 @@ func TestOrderAccessIsLimitedToTheOwnerAndDrivers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	secret := "0123456789abcdef0123456789abcdef"
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	mux := s.routes(verifier)
 	do := func(method, path string, role auth.Role, subject string) int {
 		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))

@@ -16,23 +16,34 @@ package eventcodec
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/hamba/avro/v2"
 
 	"grab-mini/pkg/events"
+	"grab-mini/pkg/secret"
 )
 
 const (
 	magicByte   = 0
 	contentType = "application/vnd.schemaregistry.v1+json"
+
+	// MaxResponseBytes bounds what is read from the registry. A schema is a
+	// few KB; a larger body is a misbehaving (or impersonated) registry, and
+	// reading it unbounded would let it exhaust this process's memory.
+	MaxResponseBytes = 1 << 20
 )
 
 // DecodeError means a message can never be decoded by this consumer (not
@@ -49,6 +60,9 @@ func (e *DecodeError) Permanent() bool { return true }
 type Codec struct {
 	baseURL   string
 	client    *http.Client
+	user      string
+	password  string
+	configErr error // a bad registry setting: returned by every call, never hidden
 	schemaFor func(topic string) (string, error)
 
 	mu       sync.Mutex
@@ -71,6 +85,27 @@ func WithSchemaSource(f func(topic string) (string, error)) Option {
 	return func(c *Codec) { c.schemaFor = f }
 }
 
+// WithBasicAuth sends HTTP basic credentials with every registry request.
+func WithBasicAuth(user, password string) Option {
+	return func(c *Codec) { c.user, c.password = user, password }
+}
+
+// WithHTTPClient replaces the HTTP client (for example to trust a private CA).
+func WithHTTPClient(h *http.Client) Option {
+	return func(c *Codec) { c.client = h }
+}
+
+// New returns a Codec for the registry at registryURL. Unless options say
+// otherwise it is configured from the environment:
+//
+//	SCHEMA_REGISTRY_USER, SCHEMA_REGISTRY_PASSWORD   basic auth (each also
+//	    readable from NAME_FILE); both unset means no authentication, which is
+//	    what the local development registry wants
+//	SCHEMA_REGISTRY_CA_FILE   PEM CA bundle to trust for an https registry
+//
+// A bad setting (unreadable file, password without user, credentials over
+// plain http when APP_ENV=production) is reported by the first call that
+// would use the registry, never silently ignored.
 func New(registryURL string, opts ...Option) *Codec {
 	c := &Codec{
 		baseURL:   registryURL,
@@ -81,10 +116,56 @@ func New(registryURL string, opts ...Option) *Codec {
 		remote:    map[int]avro.Schema{},
 		resolved:  map[resolveKey]avro.Schema{},
 	}
+	c.configErr = c.fromEnv()
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.configErr == nil && (c.user != "" || c.password != "") && secret.Production() {
+		if u, err := url.Parse(c.baseURL); err != nil || u.Scheme != "https" {
+			c.configErr = errors.New("refusing to send schema registry credentials over plain http when APP_ENV=production (use an https SCHEMA_REGISTRY_URL)")
+		}
+	}
 	return c
+}
+
+func (c *Codec) fromEnv() error {
+	user, err := optionalSecret("SCHEMA_REGISTRY_USER")
+	if err != nil {
+		return err
+	}
+	password, err := optionalSecret("SCHEMA_REGISTRY_PASSWORD")
+	if err != nil {
+		return err
+	}
+	if (user == "") != (password == "") {
+		return errors.New("SCHEMA_REGISTRY_USER and SCHEMA_REGISTRY_PASSWORD must be set together")
+	}
+	c.user, c.password = user, password
+
+	if path := os.Getenv("SCHEMA_REGISTRY_CA_FILE"); path != "" {
+		pem, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("SCHEMA_REGISTRY_CA_FILE: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("SCHEMA_REGISTRY_CA_FILE (%s) holds no PEM certificate", path)
+		}
+		c.client.Transport = &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		}
+	}
+	return nil
+}
+
+// optionalSecret is secret.Get where "not set" is an empty string, not an error.
+func optionalSecret(name string) (string, error) {
+	v, err := secret.Get(name)
+	if err != nil && !errors.Is(err, secret.ErrMissing) {
+		return "", err
+	}
+	return strings.TrimSpace(v), nil
 }
 
 // Encode serializes v with the topic's schema, registering the schema first
@@ -227,19 +308,31 @@ func (c *Codec) writerSchema(ctx context.Context, id int) (avro.Schema, error) {
 }
 
 func (c *Codec) call(ctx context.Context, method, path string, body []byte, out any) error {
+	if c.configErr != nil {
+		return c.configErr
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", contentType)
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.password)
+	}
 
 	res, err := c.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	raw, _ := io.ReadAll(res.Body)
+	raw, err := io.ReadAll(io.LimitReader(res.Body, MaxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read schema registry response: %w", err)
+	}
+	if len(raw) > MaxResponseBytes {
+		return fmt.Errorf("schema registry response (status %d) is larger than %d bytes", res.StatusCode, MaxResponseBytes)
+	}
 
 	if res.StatusCode >= 300 {
 		var apiErr struct {

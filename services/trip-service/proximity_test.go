@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/driverlocation"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
@@ -115,9 +116,8 @@ func newProxFixture(t *testing.T) *proxFixture {
 	f := &proxFixture{t: t, db: db, rdb: rdb, s: s, trip: tr, now: time.Now()}
 	s.now = func() time.Time { return f.now }
 
-	secret := "0123456789abcdef0123456789abcdef"
-	f.issuer, _ = auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
+	f.issuer = issuer
 	f.mux = s.routes(verifier)
 	return f
 }

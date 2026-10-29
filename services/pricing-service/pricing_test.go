@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/surge"
 )
@@ -305,9 +306,7 @@ func TestQuotesAreRateLimitedPerRider(t *testing.T) {
 	t.Setenv(auth.RateLimitScaleEnv, "")
 	_, rdb := newRedis(t)
 	s := quoteServerWith(t, rdb)
-	secret := "0123456789abcdef0123456789abcdef"
-	verifier, _ := auth.NewVerifier(secret)
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	mux := s.routes(verifier)
 
 	call := func(rider string) *httptest.ResponseRecorder {

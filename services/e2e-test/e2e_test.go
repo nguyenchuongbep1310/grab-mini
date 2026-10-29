@@ -207,7 +207,8 @@ func startStack(t *testing.T) *stack {
 		"DATABASE_URL="+dbURL,
 		"REDIS_ADDR="+redisAddr,
 		"SCHEMA_REGISTRY_URL="+st.registryURL,
-		"JWT_SECRET=0123456789abcdef0123456789abcdef",
+		// The services verify tokens with the published development public key.
+		"APP_ENV=development",
 		"QUOTE_SECRET=fedcba9876543210fedcba9876543210",
 		"MATCH_RETRIES=2",
 		"MATCH_RETRY_DELAY_MS=200",

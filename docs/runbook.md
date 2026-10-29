@@ -217,8 +217,9 @@ A 5xx means one of those three is broken. Tell them apart using the order-servic
   seen (a new schema version). So a registry problem usually shows up after a deploy or scale-out, not right
   when the registry dies. Restore the registry, then check `/readyz`.
 - **Postgres down:** see [Pods not ready](#pods-not-ready); Postgres failover is the provider's/DBA's job.
-- **A sudden rise in 401s** (not 5xx, but users see errors): `JWT_SECRET` differs between services,
-  or tokens expired en masse. All verifying services and the token issuer must use the same secret.
+- **A sudden rise in 401s** (not 5xx, but users see errors): `JWT_JWKS_URL` is unreachable (look for `auth: refreshing signing keys`
+  in the logs, and check the egress NetworkPolicy allows the issuer), the issuer just rotated its key (services fetch the new key when they
+  meet an unknown `kid`, at most once every 15 seconds), or tokens expired en masse. See [security.md](security.md).
 
 ## Surge pricing
 
@@ -285,8 +286,10 @@ Do not replay `driver.location.updated` (old locations are discarded because of 
 
 - **A service's Kafka password:** delete the Secret Strimzi created for that `KafkaUser` so it is regenerated, then restart the service's pods
   (the password is only read at startup). Do one service at a time.
-- **`JWT_SECRET`:** shared HS256, so changing it **invalidates every existing token**. Change the `grab-mini-jwt` Secret, then restart
-  *all* services at the same time (the token issuer and the verifying services). The app fetches a new token by itself when it gets a 401.
+- **Token signing key (Ed25519):** only the issuer holds the private key. Rotating it does not break live tokens: give the issuer the new
+  key and keep the old public key in `JWT_PREVIOUS_PUBLIC_KEYS` until the last token signed with it expires (`TOKEN_TTL` + 10 minutes of cache).
+  Services that use JWKS need no restart. Details in [security.md](security.md).
+- **Schema Registry password:** change the `grab-mini-schema-registry` Secret, then restart (it is read at startup).
 - **Postgres password:** change it in the `grab-mini-db-<service>` Secret, then restart; the service reads `DATABASE_URL` at startup.
 
 ### Manual scaling

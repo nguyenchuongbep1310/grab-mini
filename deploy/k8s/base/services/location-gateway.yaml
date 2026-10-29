@@ -73,8 +73,12 @@ spec:
           value: 'false'
         - name: PORT
           value: '3006'
-        - name: JWT_SECRET_FILE
-          value: /etc/secrets/jwt/secret
+        - name: SCHEMA_REGISTRY_USER_FILE
+          value: /etc/secrets/schema-registry/username
+        - name: SCHEMA_REGISTRY_PASSWORD_FILE
+          value: /etc/secrets/schema-registry/password
+        - name: SCHEMA_REGISTRY_CA_FILE
+          value: /etc/secrets/schema-registry/ca.crt
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user
@@ -82,8 +86,8 @@ spec:
         - name: kafka-ca
           mountPath: /etc/kafka/ca
           readOnly: true
-        - name: jwt
-          mountPath: /etc/secrets/jwt
+        - name: schema-registry
+          mountPath: /etc/secrets/schema-registry
           readOnly: true
         startupProbe:
           httpGet:
@@ -134,12 +138,16 @@ spec:
           items:
           - key: ca.crt
             path: ca.crt
-      - name: jwt
+      - name: schema-registry
         secret:
-          secretName: grab-mini-jwt
+          secretName: grab-mini-schema-registry
           items:
-          - key: secret
-            path: secret
+          - key: username
+            path: username
+          - key: password
+            path: password
+          - key: ca.crt
+            path: ca.crt
 ---
 apiVersion: v1
 kind: Service

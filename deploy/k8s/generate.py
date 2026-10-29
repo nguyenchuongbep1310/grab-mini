@@ -130,10 +130,19 @@ def deployment(name, spec):
         volumes.append({"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{name}", "items": [{"key": "url", "path": "url"}]}})
         mounts.append({"name": "db", "mountPath": "/etc/secrets/db", "readOnly": True})
         env.append({"name": "DATABASE_URL_FILE", "value": "/etc/secrets/db/url"})
-    if api:  # these verify tokens
-        volumes.append({"name": "jwt", "secret": {"secretName": f"{CLUSTER}-jwt", "items": [{"key": "secret", "path": "secret"}]}})
-        mounts.append({"name": "jwt", "mountPath": "/etc/secrets/jwt", "readOnly": True})
-        env.append({"name": "JWT_SECRET_FILE", "value": "/etc/secrets/jwt/secret"})
+    # The API services verify tokens with the issuer's public keys (JWT_JWKS_URL
+    # in the ConfigMap): no key material, and no way to mint a token, is mounted.
+    # The signing key belongs to the issuer only; see deploy/README.md.
+    # Every service talks to the Schema Registry, which wants credentials and
+    # (since they travel in a header) https.
+    volumes.append({"name": "schema-registry", "secret": {"secretName": f"{CLUSTER}-schema-registry", "items": [
+        {"key": "username", "path": "username"}, {"key": "password", "path": "password"}, {"key": "ca.crt", "path": "ca.crt"}]}})
+    mounts.append({"name": "schema-registry", "mountPath": "/etc/secrets/schema-registry", "readOnly": True})
+    env += [
+        {"name": "SCHEMA_REGISTRY_USER_FILE", "value": "/etc/secrets/schema-registry/username"},
+        {"name": "SCHEMA_REGISTRY_PASSWORD_FILE", "value": "/etc/secrets/schema-registry/password"},
+        {"name": "SCHEMA_REGISTRY_CA_FILE", "value": "/etc/secrets/schema-registry/ca.crt"},
+    ]
     if spec.get("quote"):  # signs (pricing) or checks (order) surge quotes: the same secret
         volumes.append({"name": "quote", "secret": {"secretName": f"{CLUSTER}-quote", "items": [{"key": "secret", "path": "secret"}]}})
         mounts.append({"name": "quote", "mountPath": "/etc/secrets/quote", "readOnly": True})
@@ -470,20 +479,90 @@ def kafka_user(name, acls):
 
 
 # ------------------------------------------------- network and monitoring ----
+# Where each dependency is reached. None of Postgres, Redis, the Schema Registry or
+# the identity provider is deployed by this base, so each is allowed as either an
+# in-namespace pod labelled app.kubernetes.io/name=<name> or an address in the
+# private ranges on that port only. Narrow PRIVATE_CIDRS (a kustomize patch) to
+# the real endpoints of a managed service to tighten this further.
+PRIVATE_CIDRS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+POSTGRES_PORTS = [5432]
+REDIS_PORTS = [6379, 26379]  # 26379: Sentinel
+REGISTRY_PORTS = [8081]
+OTLP_PORTS = [4317, 4318]
+AUTH_SERVICE_PORT = 3005
+
+
+def policy(name, pod_selector, egress=None, ingress=None):
+    types = (["Ingress"] if ingress is not None else []) + (["Egress"] if egress is not None else [])
+    spec = {"podSelector": pod_selector, "policyTypes": types}
+    if ingress:
+        spec["ingress"] = ingress
+    if egress:
+        spec["egress"] = egress
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(name, "network"), "spec": spec}
+
+
+def tcp(numbers):
+    return [{"port": p, "protocol": "TCP"} for p in numbers]
+
+
+def in_namespace(name):
+    return {"podSelector": {"matchLabels": {"app.kubernetes.io/name": name}}}
+
+
+def private_ranges():
+    return [{"ipBlock": {"cidr": c}} for c in PRIVATE_CIDRS]
+
+
+def names_in(names):
+    return {"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "In", "values": sorted(names)}]}
+
+
 def network_policies():
+    part_of = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini"}}
+    services = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini", "app.kubernetes.io/component": "service"}}
+    jobs = {"matchExpressions": [{"key": "app.kubernetes.io/part-of", "operator": "In", "values": ["grab-mini"]},
+                                 {"key": "app.kubernetes.io/component", "operator": "In", "values": ["migration", "retention"]}]}
+    with_db = [n for n, sp in SERVICES.items() if sp.get("db")]
+    with_redis = [n for n, sp in SERVICES.items() if sp.get("redis")]
+    verifiers = [n for n, sp in SERVICES.items() if sp["kind"] == "api"]  # these check tokens, so they fetch the JWKS
+
     return [
-        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("default-deny-ingress", "network"),
-         "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini"}}, "policyTypes": ["Ingress"]}},
-        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("allow-ingress-to-public-apis", "network"),
-         "spec": {"podSelector": {"matchLabels": {"grab-mini/public": "true"}}, "policyTypes": ["Ingress"],
-                  "ingress": [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}}}],
-                               "ports": [{"port": "http", "protocol": "TCP"}]}]}},
+        policy("default-deny-ingress", part_of, ingress=[]),
+        policy("allow-ingress-to-public-apis", {"matchLabels": {"grab-mini/public": "true"}},
+               ingress=[{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "ingress-nginx"}}}],
+                         "ports": [{"port": "http", "protocol": "TCP"}]}]),
         # Only the admin port (probes and /metrics), only from monitoring. The
         # kubelet's probes come from the node and are not subject to this.
-        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("allow-prometheus-scrape", "network"),
-         "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini"}}, "policyTypes": ["Ingress"],
-                  "ingress": [{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}],
-                               "ports": [{"port": ADMIN_PORT, "protocol": "TCP"}]}]}},
+        policy("allow-prometheus-scrape", part_of,
+               ingress=[{"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}],
+                         "ports": [{"port": ADMIN_PORT, "protocol": "TCP"}]}]),
+
+        # Egress: nothing leaves a pod unless a policy below says so (policies add up).
+        policy("default-deny-egress", part_of, egress=[]),
+        policy("allow-egress-dns", part_of, egress=[{
+            "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+            "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}]),
+        policy("allow-egress-kafka", services, egress=[{
+            "to": [{"podSelector": {"matchLabels": {"strimzi.io/cluster": CLUSTER, "strimzi.io/kind": "Kafka"}}}],
+            "ports": tcp([9093])}]),
+        policy("allow-egress-schema-registry", services, egress=[{
+            "to": [in_namespace("schema-registry")] + private_ranges(), "ports": tcp(REGISTRY_PORTS)}]),
+        policy("allow-egress-otlp", services, egress=[{
+            "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}], "ports": tcp(OTLP_PORTS)}]),
+        policy("allow-egress-redis", names_in(with_redis), egress=[{
+            "to": [in_namespace("redis")] + private_ranges(), "ports": tcp(REDIS_PORTS)}]),
+        policy("allow-egress-postgres", names_in(with_db), egress=[{
+            "to": [in_namespace("postgres")] + private_ranges(), "ports": tcp(POSTGRES_PORTS)}]),
+        # Migration Jobs and retention CronJobs reach only Postgres (and DNS).
+        policy("allow-egress-postgres-jobs", jobs, egress=[{
+            "to": [in_namespace("postgres")] + private_ranges(), "ports": tcp(POSTGRES_PORTS)}]),
+        # The JWKS: an Auth Service in this namespace, or an identity provider outside the
+        # cluster over https (anywhere but the private ranges and the metadata address).
+        policy("allow-egress-jwks", names_in(verifiers), egress=[
+            {"to": [in_namespace("auth-service")], "ports": tcp([AUTH_SERVICE_PORT])},
+            {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": PRIVATE_CIDRS + ["169.254.0.0/16"]}}], "ports": tcp([443])}]),
     ]
 
 
@@ -515,7 +594,10 @@ def config_map():
                 "KAFKA_REPLICATION_FACTOR": "3",
                 "KAFKA_TOPIC_PARTITIONS": "6",
                 # These point at things this repository doesn't deploy; set them per environment.
-                "SCHEMA_REGISTRY_URL": "http://schema-registry:8081",
+                "SCHEMA_REGISTRY_URL": "https://schema-registry:8081",
+                # Where the services fetch the public keys that verify tokens: the identity provider's
+                # JWKS (Auth Service serves it at /.well-known/jwks.json). No service holds a signing key.
+                "JWT_JWKS_URL": "https://auth.example.com/.well-known/jwks.json",
                 "REDIS_ADDR": "redis:6379",
                 # With a Sentinel-managed Redis, list the Sentinels and the services follow failovers
                 # on their own (REDIS_ADDR is then ignored). Empty = the single node above.
