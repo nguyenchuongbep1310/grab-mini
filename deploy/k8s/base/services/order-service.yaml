@@ -75,8 +75,12 @@ spec:
           value: '3001'
         - name: DATABASE_URL_FILE
           value: /etc/secrets/db/url
-        - name: JWT_SECRET_FILE
-          value: /etc/secrets/jwt/secret
+        - name: SCHEMA_REGISTRY_USER_FILE
+          value: /etc/secrets/schema-registry/username
+        - name: SCHEMA_REGISTRY_PASSWORD_FILE
+          value: /etc/secrets/schema-registry/password
+        - name: SCHEMA_REGISTRY_CA_FILE
+          value: /etc/secrets/schema-registry/ca.crt
         - name: QUOTE_SECRET_FILE
           value: /etc/secrets/quote/secret
         volumeMounts:
@@ -89,8 +93,8 @@ spec:
         - name: db
           mountPath: /etc/secrets/db
           readOnly: true
-        - name: jwt
-          mountPath: /etc/secrets/jwt
+        - name: schema-registry
+          mountPath: /etc/secrets/schema-registry
           readOnly: true
         - name: quote
           mountPath: /etc/secrets/quote
@@ -150,12 +154,16 @@ spec:
           items:
           - key: url
             path: url
-      - name: jwt
+      - name: schema-registry
         secret:
-          secretName: grab-mini-jwt
+          secretName: grab-mini-schema-registry
           items:
-          - key: secret
-            path: secret
+          - key: username
+            path: username
+          - key: password
+            path: password
+          - key: ca.crt
+            path: ca.crt
       - name: quote
         secret:
           secretName: grab-mini-quote

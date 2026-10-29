@@ -147,6 +147,79 @@ for t in of("KafkaTopic"):
     if t["spec"]["replicas"] < 3 or c["min.insync.replicas"] > t["spec"]["replicas"]:
         err(f"KafkaTopic {name(t)}: replicas/min.insync.replicas can't survive a broker loss")
 
+# ------------------------------------------------------------------ network ----
+def selects(selector, labels):
+    for k, v in selector.get("matchLabels", {}).items():
+        if labels.get(k) != v:
+            return False
+    for e in selector.get("matchExpressions", []):
+        have = labels.get(e["key"])
+        if e["operator"] == "In" and have not in e["values"]:
+            return False
+        if e["operator"] == "NotIn" and have in e["values"]:
+            return False
+    return True
+
+
+def pods():
+    """Labels of every kind of pod the base runs, by a readable name."""
+    out = {}
+    for d in of("Deployment"):
+        out[name(d)] = d["spec"]["template"]["metadata"]["labels"]
+    for j in of("Job"):
+        out[name(j)] = j["spec"]["template"]["metadata"]["labels"]
+    for j in of("CronJob"):
+        out[name(j)] = j["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
+    return out
+
+
+def egress_ports(pol):
+    return {(p["port"], p.get("protocol", "TCP")) for r in pol["spec"].get("egress", []) for p in r.get("ports", [])}
+
+
+policies = {name(p): p for p in of("NetworkPolicy")}
+egress_policies = [p for p in policies.values() if "Egress" in p["spec"].get("policyTypes", [])]
+deny = policies.get("default-deny-egress")
+if not deny or deny["spec"].get("egress"):
+    err("default-deny-egress must exist and allow nothing itself")
+for pod_name, labels in pods().items():
+    if deny and not selects(deny["spec"]["podSelector"], labels):
+        err(f"{pod_name}: not covered by default-deny-egress")
+
+    def may(port, proto="TCP", pod_name=pod_name, labels=labels):
+        return any(selects(p["spec"]["podSelector"], labels) and (port, proto) in egress_ports(p) for p in egress_policies)
+
+    if not may(53, "UDP") or not may(53, "TCP"):
+        err(f"{pod_name}: no egress to DNS")
+    if pod_name in deployments:
+        if not may(9093):
+            err(f"{pod_name}: no egress to Kafka")
+        for port, why in ((4318, "the OTLP collector"), (8081, "the Schema Registry")):
+            if not may(port):
+                err(f"{pod_name}: no egress to {why}")
+        volumes = {v["name"] for v in deployments[pod_name]["spec"]["template"]["spec"]["volumes"]}
+        if "db" in volumes and not may(5432):
+            err(f"{pod_name}: has a database but no egress to Postgres")
+        if labels.get("grab-mini/public") == "true" and not may(443):
+            err(f"{pod_name}: verifies tokens but has no egress to the JWKS")
+    elif pod_name.endswith("-migrate") or pod_name.startswith("retention-"):
+        if not may(5432):
+            err(f"{pod_name}: no egress to Postgres")
+        if may(9093):
+            err(f"{pod_name}: a job should not reach Kafka")
+
+# Nothing may mount a token-signing key except the issuer, which this base doesn't deploy.
+for dep_name, dep in deployments.items():
+    for v in dep["spec"]["template"]["spec"].get("volumes", []):
+        sec = v.get("secret", {}).get("secretName", "")
+        if "jwt" in sec:
+            err(f"{dep_name}: mounts {sec!r}: services verify with the JWKS and must hold no token key")
+    for e in dep["spec"]["template"]["spec"]["containers"][0].get("env", []):
+        if e["name"] in ("JWT_SECRET", "JWT_SECRET_FILE", "JWT_PRIVATE_KEY", "JWT_PRIVATE_KEY_FILE"):
+            err(f"{dep_name}: sets {e['name']}: only the token issuer may hold signing key material")
+if "JWT_JWKS_URL" not in config:
+    err("the ConfigMap has no JWT_JWKS_URL: the API services couldn't verify tokens")
+
 if errors:
     print("\n".join(f"  - {e}" for e in errors))
     sys.exit(f"{len(errors)} problem(s)")

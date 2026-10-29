@@ -21,7 +21,7 @@ docs/runbook.md             what to do when an alert fires
 | Scaling | KEDA scales consumers on **Kafka lag** (replicas capped at the partition count) and APIs on CPU; the location gateway scales on CPU only |
 | Migrations | one Job per database-owning service (`<service> migrate`); the Deployments run with `RUN_MIGRATIONS=false` |
 | Kafka | a Strimzi cluster: 3 KRaft controllers and 3 brokers across zones, replication factor 3, `min.insync.replicas` 2 (1 for locations), no unclean leader election, no topic auto-creation; the six topics; a `KafkaUser` per service whose ACLs are read from `scripts/kafka-acls.sh`, so the two cannot disagree |
-| Network | ingress denied by default; the ingress controller may reach the APIs' public port; Prometheus may reach the admin port |
+| Network | ingress **and egress** denied by default; the ingress controller may reach the APIs' public port; Prometheus may reach the admin port; each workload may reach only DNS, Kafka, and the Postgres, Redis, Schema Registry, OTLP collector and JWKS endpoints it uses (see [docs/security.md](../docs/security.md)) |
 | Monitoring | PodMonitors and a PrometheusRule made from `monitoring/alerts.rules.yaml` |
 
 ## Needs in the cluster
@@ -30,15 +30,19 @@ docs/runbook.md             what to do when an alert fires
 Prometheus Operator (PodMonitor, PrometheusRule) with kube-state-metrics, and an ingress controller in the
 `ingress-nginx` namespace. Prometheus is expected in the `monitoring` namespace. Not included, and set per
 environment in `k8s/base/config.yaml`: **Postgres**, **Redis**, **Schema Registry**, an OpenTelemetry collector,
-and the ingress routes (route only the APIs' public paths, never `/metrics`).
+the identity provider that serves the JWKS, and the ingress routes (route only the APIs' public paths, never `/metrics`).
 
 ## Secrets you create
 
 | Secret | Keys | Used by |
 |---|---|---|
-| `grab-mini-jwt` | `secret` (at least 32 bytes) | every API service |
+| `grab-mini-schema-registry` | `username`, `password`, `ca.crt` (the CA that signed the registry's certificate) | every service |
 | `grab-mini-db-order-service`, `-trip-service`, `-rating-service` | `url` (a Postgres URL) | that service and its migration Job |
 | `keda-kafka-auth` | `username` (`keda`), `password`, `ca.crt` | the KEDA Kafka scaler |
+
+No service holds token key material: they verify with the public keys at `JWT_JWKS_URL` (ConfigMap `grab-mini-config`;
+point it at your identity provider). The private signing key (`JWT_PRIVATE_KEY_FILE`, an Ed25519 PEM) belongs to the
+issuer's own deployment only, which this base does not contain; `check.py` fails if a service in this base mounts one.
 
 Strimzi creates the rest: each service's Kafka password (a Secret named after its `KafkaUser`) and the cluster CA
 (`grab-mini-cluster-ca-cert`). Services read every secret from a mounted file (`*_FILE`), and start only if it

@@ -68,12 +68,21 @@ spec:
               fieldPath: metadata.name
         - name: RUN_MIGRATIONS
           value: 'false'
+        - name: SCHEMA_REGISTRY_USER_FILE
+          value: /etc/secrets/schema-registry/username
+        - name: SCHEMA_REGISTRY_PASSWORD_FILE
+          value: /etc/secrets/schema-registry/password
+        - name: SCHEMA_REGISTRY_CA_FILE
+          value: /etc/secrets/schema-registry/ca.crt
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user
           readOnly: true
         - name: kafka-ca
           mountPath: /etc/kafka/ca
+          readOnly: true
+        - name: schema-registry
+          mountPath: /etc/secrets/schema-registry
           readOnly: true
         startupProbe:
           httpGet:
@@ -122,6 +131,16 @@ spec:
         secret:
           secretName: grab-mini-cluster-ca-cert
           items:
+          - key: ca.crt
+            path: ca.crt
+      - name: schema-registry
+        secret:
+          secretName: grab-mini-schema-registry
+          items:
+          - key: username
+            path: username
+          - key: password
+            path: password
           - key: ca.crt
             path: ca.crt
 ---
