@@ -246,102 +246,102 @@ Surge **never blocks booking**: any Redis read error yields a multiplier of 1.0,
 
 ## Redis failover
 
-**Cảnh báo:** `RedisNotExactlyOneMaster` (0 master quá 1 phút: failover không xong; 2 master: split brain), `RedisMemoryNearLimit`.
+**Alerts:** `RedisNotExactlyOneMaster` (0 masters for more than 1 minute: failover did not complete; 2 masters: split brain), `RedisMemoryNearLimit`.
 
-Redis chạy như StatefulSet `redis` (3 pod, mỗi pod: `redis` + `sentinel` + `exporter`, xem [disaster-recovery.md](disaster-recovery.md#0-redis-sentinel-mất-một-node-không-phải-mất-vùng)).
-Service tìm master qua Sentinel (`REDIS_SENTINEL_ADDRS`), nên failover **không cần** restart service; chỉ có vài giây lỗi mà consumer retry.
+Redis runs as the `redis` StatefulSet (3 pods, each pod: `redis` + `sentinel` + `exporter`; see [disaster-recovery.md](disaster-recovery.md#0-redis-sentinel-losing-a-node-not-a-region)).
+Services find the master through Sentinel (`REDIS_SENTINEL_ADDRS`), so a failover **does not require** restarting services; there are only a few seconds of errors, which consumers retry.
 
-1. **Ai là master?** (mật khẩu ở Secret `grab-mini-redis`, key `password`)
+1. **Who is the master?** (the password is in the `grab-mini-redis` Secret, key `password`)
    ```bash
    P=$(kubectl -n grab-mini get secret grab-mini-redis -o jsonpath='{.data.password}' | base64 -d)
    for i in 0 1 2; do echo -n "redis-$i: "; kubectl -n grab-mini exec redis-$i -c redis -- env REDISCLI_AUTH="$P" redis-cli role | head -1; done
    kubectl -n grab-mini exec redis-0 -c sentinel -- env REDISCLI_AUTH="$P" redis-cli -p 26379 sentinel get-master-addr-by-name mymaster
    kubectl -n grab-mini exec redis-0 -c sentinel -- env REDISCLI_AUTH="$P" redis-cli -p 26379 sentinel ckquorum mymaster
    ```
-   `ckquorum` phải trả `OK`. Nếu không, đa số Sentinel đang mất: xem pod nào `NotReady` (`kubectl get pods -l app.kubernetes.io/name=redis -o wide`),
-   và pod có nằm trên cùng một node/zone không (anti-affinity bắt buộc khác node, topologySpread bắt buộc khác zone).
-2. **0 master:** Sentinel cần `down-after-milliseconds` (5 s) rồi bầu chọn. Quá một phút: `kubectl logs redis-0 -c sentinel` (`+sdown`, `+odown`, `-failover-abort-*`).
-   Thường là mất quorum (2/3 Sentinel). Khôi phục pod bị mất; **không** tự `SLAVEOF NO ONE` trên một node trừ khi chắc chắn cả ba Sentinel đã mất.
-3. **2 master (split brain):** dữ liệu ghi vào master cũ **sẽ mất** khi nó bị hạ xuống. Tìm master mà Sentinel công nhận (bước 1), `kubectl delete pod` node còn lại:
-   khi khởi động lại, `redis-start.sh` hỏi Sentinel và vào làm replica. Vị trí tài xế tự bù sau vài giây; lease/`match:<orderId>` ghi trong cửa sổ split brain có thể mất.
-4. **Failover có kế hoạch:** `kubectl drain` hoặc rollout chạy `preStop` (`redis-prestop.sh`): master xin Sentinel chuyển vai trò rồi mới tắt (đo được ~12 s). PDB `redis` chỉ cho mất 1 pod một lúc.
-5. **Bộ nhớ gần đầy:** `maxmemory` 400 MB, chính sách `noeviction`: đầy thì **ghi lỗi** (không âm thầm xóa lease). Nguyên nhân thường gặp: key không TTL
-   (xem Slow matching, "Không có TTL cho vị trí"). `redis-cli --bigkeys`, `INFO memory`. Tăng `maxmemory` và `limits.memory` trong `deploy/k8s/generate.py` (giữ `limits` ≥ 1.8x `maxmemory` cho AOF rewrite).
-6. **Pod Redis không lên sau khi mất PVC / hỏng AOF:** dữ liệu Redis không quan trọng (tự hồi phục): xóa PVC của pod đó
-   (`kubectl delete pvc data-redis-N` rồi xóa pod) để nó đồng bộ lại từ master. **Không** làm vậy với master hiện tại.
-7. **Xoay vòng mật khẩu Redis:** đổi Secret `grab-mini-redis`, rồi restart StatefulSet (từng pod, `kubectl rollout restart sts/redis`) **và** mọi service dùng Redis
-   (mật khẩu chỉ được đọc lúc khởi động). Có một khoảng service không kết nối được; làm trong giờ thấp điểm.
+   `ckquorum` must return `OK`. If not, a majority of Sentinels is down: see which pods are `NotReady` (`kubectl get pods -l app.kubernetes.io/name=redis -o wide`),
+   and whether the pods are on the same node/zone (anti-affinity requires different nodes, topologySpread requires different zones).
+2. **0 masters:** Sentinel needs `down-after-milliseconds` (5 s) and then an election. Longer than a minute: `kubectl logs redis-0 -c sentinel` (`+sdown`, `+odown`, `-failover-abort-*`).
+   Usually quorum is lost (2/3 Sentinels). Restore the lost pods; **do not** run `SLAVEOF NO ONE` on a node by hand unless you are sure all three Sentinels are gone.
+3. **2 masters (split brain):** data written to the old master **will be lost** when it is demoted. Find the master Sentinel recognizes (step 1), and `kubectl delete pod` the other one:
+   on restart, `redis-start.sh` asks Sentinel and joins as a replica. Driver locations heal themselves within a few seconds; leases/`match:<orderId>` written during the split-brain window may be lost.
+4. **Planned failover:** `kubectl drain` or a rollout runs `preStop` (`redis-prestop.sh`): the master asks Sentinel to hand over the role before shutting down (measured at ~12 s). The `redis` PDB allows only 1 pod to be down at a time.
+5. **Memory nearly full:** `maxmemory` 400 MB, policy `noeviction`: when full, **writes fail** (leases are not silently evicted). Common cause: keys with no TTL
+   (see Slow matching, and "No TTL for locations" below). `redis-cli --bigkeys`, `INFO memory`. Increase `maxmemory` and `limits.memory` in `deploy/k8s/generate.py` (keep `limits` ≥ 1.8x `maxmemory` for AOF rewrite).
+6. **A Redis pod does not come up after losing its PVC / a corrupt AOF:** Redis data is not critical (it heals itself): delete that pod's PVC
+   (`kubectl delete pvc data-redis-N`, then delete the pod) so it resyncs from the master. **Do not** do this to the current master.
+7. **Rotating the Redis password:** change the `grab-mini-redis` Secret, then restart the StatefulSet (one pod at a time, `kubectl rollout restart sts/redis`) **and** every service that uses Redis
+   (the password is only read at startup). There is a window in which services cannot connect; do it during off-peak hours.
 
-Dev (`docker-compose.yml`) vẫn là một Redis không mật khẩu, `REDIS_SENTINEL_ADDRS` trống.
+Dev (`docker-compose.yml`) is still a single Redis with no password, and `REDIS_SENTINEL_ADDRS` is empty.
 
 ## Backup and restore
 
-**Cảnh báo:** `PostgresBackupStale` (không có bản sao lưu thành công 24 giờ; job chạy mỗi 6 giờ), `DataOpsJobFailed` (job `backup-*` hoặc `retention-*` lỗi).
+**Alerts:** `PostgresBackupStale` (no successful backup for 24 hours; the job runs every 6 hours), `DataOpsJobFailed` (a `backup-*` or `retention-*` job failed).
 
-Bối cảnh: CronJob `backup-<service>` (6 giờ một lần) chạy `pg_dump -Fc` rồi đẩy lên `BACKUP_TARGET` (ConfigMap `grab-mini-data-ops`);
-`retention-order-orders`, `retention-trip-trips` (hằng ngày 03:43) xóa đơn/chuyến đã kết thúc quá `RETENTION_DAYS` (180). Số liệu RPO/RTO: [disaster-recovery.md](disaster-recovery.md#1-postgres).
+Context: the `backup-<service>` CronJobs (every 6 hours) run `pg_dump -Fc` and push the result to `BACKUP_TARGET` (ConfigMap `grab-mini-data-ops`);
+`retention-order-orders` and `retention-trip-trips` (daily at 03:43) delete finished orders/trips older than `RETENTION_DAYS` (180). RPO/RTO figures: [disaster-recovery.md](disaster-recovery.md#1-postgres).
 
-1. **Job lỗi:** `kubectl -n grab-mini get jobs | grep -E 'backup|retention'`, `kubectl -n grab-mini logs job/<name> -c dump` (hoặc `-c upload`, `-c retention`).
-   - `dump` lỗi: không kết nối được DB (Secret `grab-mini-db-<service>`), hoặc `pg_dump` phiên bản thấp hơn server (image `postgres:16-alpine` trong `generate.py`; tăng cùng server).
-   - `upload` lỗi: Secret `grab-mini-backup` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), `BACKUP_TARGET` còn là `s3://CHANGE-ME-...`, quyền ghi bucket, hoặc NetworkPolicy chặn egress tới S3.
-   - Chạy lại ngay: `kubectl -n grab-mini create job --from=cronjob/backup-order-service backup-order-manual-$(date +%s)`.
-2. **Diễn tập khôi phục (mỗi quý, và sau mỗi thay đổi job sao lưu).** Cần một Postgres *scratch* (không phải production) và `psql`, `pg_restore` (phiên bản ≥ server), AWS CLI:
+1. **A job failed:** `kubectl -n grab-mini get jobs | grep -E 'backup|retention'`, `kubectl -n grab-mini logs job/<name> -c dump` (or `-c upload`, `-c retention`).
+   - `dump` failed: cannot connect to the DB (Secret `grab-mini-db-<service>`), or `pg_dump` is an older version than the server (image `postgres:16-alpine` in `generate.py`; upgrade it along with the server).
+   - `upload` failed: the `grab-mini-backup` Secret (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), `BACKUP_TARGET` still set to `s3://CHANGE-ME-...`, write permission on the bucket, or a NetworkPolicy blocking egress to S3.
+   - Run it again now: `kubectl -n grab-mini create job --from=cronjob/backup-order-service backup-order-manual-$(date +%s)`.
+2. **Restore drill (every quarter, and after every change to the backup job).** You need a *scratch* Postgres (not production) and `psql`, `pg_restore` (version ≥ server), and the AWS CLI:
    ```bash
-   export BACKUP_TARGET=s3://<bucket>/postgres   # như ConfigMap grab-mini-data-ops
+   export BACKUP_TARGET=s3://<bucket>/postgres   # as in ConfigMap grab-mini-data-ops
    export SCRATCH_URL=postgres://admin:...@scratch-host:5432/postgres
    for s in order-service trip-service rating-service; do
      BACKUP_NAME=$s scripts/pg-restore-drill.sh || echo "DRILL FAILED: $s"
    done
    ```
-   Script lấy bản mới nhất, khôi phục vào DB `restore_drill_*` (tự xóa), kiểm tra: archive đọc được, `pg_restore` không lỗi, `schema_migrations_<service>` ở đúng phiên bản
-   mới nhất của code, các bảng của service đều có, bảng chính có ≥ `MIN_ROWS` dòng; in số dòng và thời gian. Đặt `SOURCE_URL` để in số dòng của DB sống bên cạnh.
-   **Ghi lại thời gian và kích thước vào ticket diễn tập**: đó là số RTO thật duy nhất bạn có.
-3. **Khôi phục thật** (mất dữ liệu): (a) dừng ghi: scale service về 0 (hoặc tạm dừng KEDA); (b) tạo DB mới, `pg_restore --no-owner --dbname=<url> <file>` từ bản sao lưu mới nhất
-   (hoặc PITR của dịch vụ managed, ưu tiên hơn vì mất ít dữ liệu hơn); (c) nếu bản sao lưu cũ hơn migration hiện tại, chạy Job `<service>-migrate`;
-   (d) đổi Secret `grab-mini-db-<service>` trỏ DB mới, bật lại service; (e) đối chiếu như bước 9 của quy trình chuyển vùng.
-   Dữ liệu từ lúc dump tới lúc hỏng **mất** (trừ những gì còn trong Kafka 7 ngày và replay được: xem "Replay một topic", nhưng consumer idempotent chỉ giúp với event đã commit vào outbox rồi).
-4. **Xem trước retention / xóa nhầm:** CronJob không có chế độ dry-run; từ máy có `psql`, chạy
-   `DRY_RUN=1 DATABASE_URL=... sh scripts/pg-retention.sh orders` (hoặc `trips`) để đếm số dòng sẽ bị xóa. Dòng đã xóa chỉ lấy lại được từ bản sao lưu
-   (khôi phục vào DB scratch như bước 2 rồi `COPY` ra). Muốn giữ lâu hơn: tăng `HISTORY_RETENTION_DAYS` trong `deploy/k8s/generate.py` (không dưới 30; script từ chối).
-5. **Dọn bản sao lưu cũ** là lifecycle rule của bucket (ví dụ 35 ngày), không phải của job. Cấp cho credential của job quyền ghi mà không có quyền xóa:
-   job bị xâm phạm thì không xóa được các bản sao lưu.
+   The script fetches the latest backup, restores it into a `restore_drill_*` DB (dropped automatically), and checks: the archive is readable, `pg_restore` reports no errors, `schema_migrations_<service>` is at the latest
+   version in the code, all of the service's tables exist, the main table has ≥ `MIN_ROWS` rows; it prints row counts and timings. Set `SOURCE_URL` to print the live DB's row counts alongside.
+   **Record the timing and size in the drill ticket**: that is the only real RTO figure you have.
+3. **Real restore** (data loss): (a) stop writes: scale the service to 0 (or pause KEDA); (b) create a new DB, `pg_restore --no-owner --dbname=<url> <file>` from the latest backup
+   (or the managed service's PITR, which is preferable because it loses less data); (c) if the backup is older than the current migration, run the `<service>-migrate` Job;
+   (d) point the `grab-mini-db-<service>` Secret at the new DB and bring the service back; (e) reconcile as in step 9 of the failover procedure.
+   Data from the time of the dump to the time of the failure **is lost** (except what is still in Kafka's 7 days and can be replayed: see "Replay a topic"; but idempotent consumers only help with events that had already been committed to the outbox).
+4. **Previewing retention / accidental deletion:** the CronJob has no dry-run mode; from a machine with `psql`, run
+   `DRY_RUN=1 DATABASE_URL=... sh scripts/pg-retention.sh orders` (or `trips`) to count the rows that would be deleted. Deleted rows can only be recovered from a backup
+   (restore into a scratch DB as in step 2, then `COPY` them out). To keep data longer: increase `HISTORY_RETENTION_DAYS` in `deploy/k8s/generate.py` (not below 30; the script refuses).
+5. **Removing old backups** is the bucket's lifecycle rule (for example 35 days), not the job's. Give the job's credential write permission without delete permission:
+   a compromised job then cannot delete the backups.
 
 ## Payments
 
-**Cảnh báo:** `PaymentConsumerLagHigh` (ticket), `PaymentDeadLettered` (page), `LedgerUnbalancedTransactionRejected` (page).
-**Nghĩa là:** Payment Service không xử lý kịp, hoặc không xử lý được, một event `order.created` / `trip.status.changed` /
-`trip.rated`. Hậu quả: một chuyến **chưa được tính tiền** (cước, tip hoặc phí huỷ), hoặc tài xế chưa được ghi có.
-Không có tiền nào bị tính sai: mỗi khoản là một dòng `payments` duy nhất theo `(trip_id, kind)` và một giao dịch sổ cái
-cân bằng, nên xử lý lại luôn an toàn.
+**Alerts:** `PaymentConsumerLagHigh` (ticket), `PaymentDeadLettered` (page), `LedgerUnbalancedTransactionRejected` (page).
+**Meaning:** Payment Service is not keeping up with, or cannot process, an `order.created` / `trip.status.changed` /
+`trip.rated` event. Consequence: a trip **has not been charged yet** (fare, tip or cancellation fee), or the driver has not been credited yet.
+No money is charged incorrectly: each charge is a single `payments` row per `(trip_id, kind)` and one balanced ledger
+transaction, so reprocessing is always safe.
 
-**Kiểm tra theo thứ tự:**
+**Check in this order:**
 
-1. **Lag:** mục [Consumer lag](#consumer-lag), group `payment-service-group` (một group đọc cả ba topic). Số replica bị chặn
-   bởi số partition.
-2. **Dead letter:** `PaymentDeadLettered` có nhãn `topic`. Xem nội dung bằng `dlq-redrive -topic <topic> -dry-run`.
-   Hai nguyên nhân hay gặp:
-   - `no price recorded yet for order ...`: `trip.status.changed` đến mà `order.created` chưa được ghi (hai topic khác nhau
-     nên không có thứ tự). Consumer đã thử lại qua các tầng retry (5s, 1 phút, 10 phút). Nếu vẫn lỗi thì `order.created`
-     thật sự thiếu (đã dead-letter, hoặc đơn tạo trước khi có Payment Service): xem `order.created.DLQ`, redrive nó
-     **trước**, rồi redrive `trip.status.changed`.
-   - `invalid payment event` / `invalid amount`: event không bao giờ tính được (thiếu driver, tip âm, tiền tệ khác VND).
-     Redrive vô ích; sửa nguồn gửi.
-3. **Nhà cung cấp thanh toán** lỗi hoặc timeout: `payment_provider_errors_total` tăng, event đi theo đường retry. Khóa
-   idempotency (`fare:<tripId>`, `tip:<tripId>`, `cancellation_fee:<tripId>`) làm việc thử lại không tính hai lần.
-   Redrive sau khi nhà cung cấp khỏe lại.
-4. **`LedgerUnbalancedTransactionRejected`:** code dựng một giao dịch không cộng về 0, và bị từ chối **trước khi ghi**.
-   Đó là bug, không phải sự cố dữ liệu. Event liên quan nằm trong DLQ; sửa code, deploy rồi redrive.
-5. **Kiểm tra sổ cái bằng SQL** (phải trả về 0 dòng và tổng 0):
+1. **Lag:** see [Consumer lag](#consumer-lag), group `payment-service-group` (one group reads all three topics). The replica count is capped
+   by the partition count.
+2. **Dead letters:** `PaymentDeadLettered` has a `topic` label. Inspect the contents with `dlq-redrive -topic <topic> -dry-run`.
+   Two common causes:
+   - `no price recorded yet for order ...`: `trip.status.changed` arrived before `order.created` was recorded (they are two different topics,
+     so there is no ordering). The consumer has already retried through the retry tiers (5s, 1 minute, 10 minutes). If it still fails, `order.created`
+     really is missing (it was dead-lettered, or the order was created before Payment Service existed): look at `order.created.DLQ`, redrive it
+     **first**, then redrive `trip.status.changed`.
+   - `invalid payment event` / `invalid amount`: the event can never be charged (missing driver, negative tip, a currency other than VND).
+     Redriving is pointless; fix the sender.
+3. **Payment provider** errors or timeouts: `payment_provider_errors_total` increases and the event goes down the retry path. The idempotency
+   keys (`fare:<tripId>`, `tip:<tripId>`, `cancellation_fee:<tripId>`) make sure a retry does not charge twice.
+   Redrive once the provider is healthy again.
+4. **`LedgerUnbalancedTransactionRejected`:** the code built a transaction that does not sum to 0, and it was rejected **before being written**.
+   That is a bug, not a data incident. The event involved is in the DLQ; fix the code, deploy, then redrive.
+5. **Check the ledger with SQL** (must return 0 rows and a total of 0):
    ```sql
    SELECT txn_id, SUM(amount) FROM ledger_entries GROUP BY txn_id HAVING SUM(amount) <> 0;
    SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;
    ```
-6. **Một chuyến không có thanh toán?** `SELECT * FROM payments WHERE trip_id = '...'`. Không có dòng nào và không có DLQ:
-   kiểm tra `payments_skipped_total{reason}` (đơn không có giá, chuyến miễn phí, tài xế huỷ, `CANCELLATION_FEE_VND=0`).
-   Một dòng `DECLINED` nghĩa là nhà cung cấp từ chối thẻ của rider; dòng đó không có bút toán sổ cái và hệ thống **không
-   tự thử lại** (xử lý nợ là việc của người vận hành).
+6. **A trip with no payment?** `SELECT * FROM payments WHERE trip_id = '...'`. No rows and nothing in the DLQ:
+   check `payments_skipped_total{reason}` (order with no price, free trip, cancelled by the driver, `CANCELLATION_FEE_VND=0`).
+   A `DECLINED` row means the provider declined the rider's card; that row has no ledger entries and the system **does not
+   retry it automatically** (collecting the debt is the operator's job).
 
-**Không nên làm:** sửa hoặc xoá `ledger_*` (có trigger chặn; sổ cái chỉ thêm). Muốn sửa sai, thêm một giao dịch đảo.
+**Do not:** edit or delete `ledger_*` (a trigger blocks it; the ledger is append-only). To correct a mistake, add a reversing transaction.
 
 ## Pods not ready
 
@@ -401,10 +401,10 @@ The useful replica count of a consumer does not exceed the partition count of th
 
 ### What is missing (to know when on call)
 
-- **Không có outbox cho Matching và Location Gateway**: nếu Kafka hỏng đúng lúc, một lần ghép có thể không được thông báo
-  (đã có lease để tài xế không kẹt, và message `order.created` đi qua retry), còn vị trí tài xế thì tự bù sau vài giây.
-- **Không có TTL cho vị trí trong Redis GEO** (xem Slow matching).
-- **Notification Service best-effort**: tin gửi khi không ai subscribe thì mất; app khôi phục bằng REST sau khi kết nối lại.
-- **Sao lưu và DR**: xem [disaster-recovery.md](disaster-recovery.md). Sao lưu Postgres và diễn tập khôi phục đã chạy trên Postgres thật ở máy dev
-  (`scripts/test-data-ops.sh`), nhưng **chưa trên cluster thật**: CronJob chưa được chạy bởi một kubelet, chưa có bản sao lưu nào lên S3 thật, chưa có diễn tập nào với dữ liệu cỡ production.
-  Manifest chuyển vùng (MirrorMaker 2, S3 archive) vẫn chưa chạy thử.
+- **No outbox for Matching and Location Gateway**: if Kafka fails at exactly the wrong moment, a match may not be announced
+  (there is already a lease so the driver does not get stuck, and the `order.created` message goes through retry), while driver locations heal themselves within a few seconds.
+- **No TTL for locations in Redis GEO** (see Slow matching).
+- **Notification Service is best-effort**: a message sent while nobody is subscribed is lost; the app recovers over REST after reconnecting.
+- **Backup and DR**: see [disaster-recovery.md](disaster-recovery.md). Postgres backup and the restore drill have been run against a real Postgres on a dev machine
+  (`scripts/test-data-ops.sh`), but **not on a real cluster**: the CronJob has not been run by a kubelet, no backup has gone to a real S3, and there has been no drill with production-sized data.
+  The failover manifests (MirrorMaker 2, S3 archive) have still not been tried.

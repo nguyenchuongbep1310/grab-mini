@@ -55,7 +55,7 @@ This starts the infrastructure, seeds five drivers, runs every service and opens
 
 ## Honest limits
 
-It is a learning and portfolio project, not a product. Authentication is a development token service. There are no payments (a tip is a recorded number). Kubernetes manifests, Sentinel and ACL configuration are tested in pieces (client behaviour against real Redis/Kafka in CI) but the full stack has not been run on a real cluster. Single region only.
+It is a learning and portfolio project, not a product. Tokens are Ed25519 JWTs verified through a JWKS, but the issuer is a development token service, not a real identity provider. Rides are settled through a double-entry ledger against a sandbox payment provider: no real card processor, payouts, refunds or reconciliation. Kubernetes manifests (including Redis/Sentinel, backups, retention and network policies), Sentinel and ACL configuration are tested in pieces (scripts and client behaviour against real Redis/Postgres/Kafka, manifests schema-checked) but the full stack has not been run on a real cluster. Single region only.
 
 ## License
 

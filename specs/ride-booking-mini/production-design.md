@@ -367,69 +367,69 @@ Known limitations of this phase:
 
 The principle of this phase is **measure first, optimize after**, so most of the output is the measurement tooling and what it found.
 
-- **Kiểm thử tải** (`deploy/loadtest`, `services/loadtest`, `services/dev-registry`): chạy các service thật không cần Docker; sinh tải mở
-  (đặt đơn + tài xế báo vị trí qua gateway), đọc quantile từ `/metrics`. Tìm ra và sửa: `BatchTimeout` 1 s mặc định của kafka-go (mọi publish
-  đồng bộ ≥ 1 s), commit đồng bộ từng message (`CommitInterval`), consumer tuần tự (`Workers`, một worker mỗi partition vẫn giữ thứ tự),
-  và tối đa 50 round trip Redis mỗi đơn khi tài xế gần đã bận (`ClaimFirstForOrder`, một script). Kết quả và diễn giải trung thực:
-  [docs/performance.md](../../docs/performance.md): 250 đơn/s + 750 vị trí/s sạch trên một máy 4 core; 400 đơn/s thì máy bão hòa.
-- **Redis GEO**: đã đo. Chi phí tìm kiếm tỉ lệ với số ứng viên trong bán kính, không phải tổng tài xế; đã làm tìm theo vòng mở rộng
-  (1 → 3 → bán kính cấu hình). **Shard theo ô có sẵn nhưng tắt** (`GEO_SHARD_DEGREES`, mặc định 0): đã đo, nó không làm mỗi truy vấn
-  rẻ hơn mà chỉ chia tải ra nhiều key, nên chỉ bật khi các key nằm trên nhiều node; chưa dùng được với Redis Cluster (xem docs/performance.md).
-- **Dọn dữ liệu**: CronJob xóa `processed_events` và `rating_events` cũ hơn 30 ngày theo lô (đã thử trên Postgres thật); `outbox` đã tự
-  xóa khi publish, `outbox_dead` để người xử lý.
-- **Lưu trữ đơn và chuyến đi**: `retention-order-orders` và `retention-trip-trips` (CronJob hằng ngày, `scripts/pg-retention.sh`) xóa theo lô 5.000 đơn
-  `CANCELLED`/`NO_DRIVER`, chuyến `COMPLETED`/`CANCELLED` và marker `cancelled_orders` cũ hơn 180 ngày (cấu hình được, tối thiểu 30); đơn `MATCHED` (trạng thái cuối order-service biết) sau 365 ngày;
-  không bao giờ đụng `PENDING`, chuyến đang chạy, `outbox`, `outbox_dead`, `driver_reviews`. Đã chạy trên Postgres thật với migration thật
-  (`scripts/test-data-ops.sh`: 12.009 đơn và 8 chuyến đủ trạng thái/độ tuổi, kiểm từng dòng còn lại). Xóa là mất dữ liệu ở DB sống; kho lưu trữ dài hạn là bản sao lưu.
-- **Redis trong manifest**: `deploy/k8s/base/redis/`, StatefulSet 3 pod (redis + sentinel + exporter), AOF, PVC, PDB, anti-affinity theo node và zone, mật khẩu từ Secret, PodMonitor, cảnh báo;
-  service trỏ vào Sentinel qua ConfigMap. `scripts/test-redis-ha.sh` chạy đúng các script đó trên Redis/Sentinel thật: dựng cụm, kill master (failover 4 đến 5 s, không mất key), pod cũ vào lại làm replica,
-  `preStop` chuyển master, và `TestTheClientFollowsAFailover` pass trên bộ 3 Sentinel.
-- **Sao lưu và diễn tập khôi phục Postgres**: CronJob `backup-<service>` (6 giờ một lần, `pg_dump -Fc` lên S3 tương thích, credential từ Secret) và `scripts/pg-restore-drill.sh`
-  (khôi phục bản mới nhất vào DB scratch, kiểm tra phiên bản schema, bảng, số dòng). Đã chạy trọn vẹn trên Postgres thật, kể cả đường S3 và các trường hợp drill phải fail.
-- **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, RPO/RTO đã đo và chưa đo, quy trình chuyển vùng),
-  `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
+- **Load testing** (`deploy/loadtest`, `services/loadtest`, `services/dev-registry`): runs the real services without Docker; generates open-model load
+  (placing orders + drivers reporting locations through the gateway) and reads quantiles from `/metrics`. Found and fixed: kafka-go's default 1 s `BatchTimeout` (every synchronous
+  publish took ≥ 1 s), a synchronous commit per message (`CommitInterval`), sequential consumers (`Workers`; one worker per partition still preserves ordering),
+  and up to 50 Redis round trips per order when nearby drivers were already busy (`ClaimFirstForOrder`, a single script). Results and an honest interpretation:
+  [docs/performance.md](../../docs/performance.md): 250 orders/s + 750 locations/s clean on one 4-core machine; at 400 orders/s the machine saturates.
+- **Redis GEO**: measured. Search cost is proportional to the number of candidates within the radius, not the total number of drivers; search now uses expanding rings
+  (1 → 3 → the configured radius). **Sharding by cell exists but is off** (`GEO_SHARD_DEGREES`, default 0): measured, it does not make each query
+  cheaper, it only spreads the load over more keys, so only turn it on when the keys live on several nodes; it does not work with Redis Cluster yet (see docs/performance.md).
+- **Data cleanup**: CronJobs delete `processed_events` and `rating_events` older than 30 days in batches (tried on a real Postgres); `outbox` already
+  cleans itself up on publish, and `outbox_dead` is left for a human.
+- **Order and trip retention**: `retention-order-orders` and `retention-trip-trips` (daily CronJobs, `scripts/pg-retention.sh`) delete, in batches of 5,000, `CANCELLED`/`NO_DRIVER`
+  orders, `COMPLETED`/`CANCELLED` trips and `cancelled_orders` markers older than 180 days (configurable, minimum 30); `MATCHED` orders (the last state order-service knows) after 365 days;
+  they never touch `PENDING`, running trips, `outbox`, `outbox_dead` or `driver_reviews`. Run against a real Postgres with the real migrations
+  (`scripts/test-data-ops.sh`: 12,009 orders and 8 trips covering every state/age, checking each remaining row). Deletion is data loss in the live DB; the long-term record is the backup.
+- **Redis in the manifests**: `deploy/k8s/base/redis/`, a 3-pod StatefulSet (redis + sentinel + exporter), AOF, PVC, PDB, anti-affinity by node and zone, password from a Secret, PodMonitor, alerts;
+  services point at Sentinel through the ConfigMap. `scripts/test-redis-ha.sh` runs exactly those scripts against real Redis/Sentinel: brings the cluster up, kills the master (failover in 4 to 5 s, no keys lost), the old pod rejoins as a replica,
+  `preStop` hands the master role over, and `TestTheClientFollowsAFailover` passes against the set of 3 Sentinels.
+- **Postgres backup and restore drill**: `backup-<service>` CronJobs (every 6 hours, `pg_dump -Fc` to S3-compatible storage, credentials from a Secret) and `scripts/pg-restore-drill.sh`
+  (restores the latest backup into a scratch DB, checks the schema version, tables, row counts). Run end to end against a real Postgres, including the S3 path and the cases where the drill must fail.
+- **Backup and DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (which data matters how much, measured and unmeasured RPO/RTO, the region failover procedure),
+  `deploy/k8s/dr/mirrormaker2.yaml` and `s3-archive.yaml` (schema-checked by `deploy/verify.sh`, **not run on a real cluster**).
 
-Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); **chưa diễn tập chuyển vùng**; manifest Redis, sao lưu và retention
-mới được kiểm tra schema + kiểm tra chéo và chạy các script của chúng trên Docker, **chưa chạy bởi kubelet trên cluster thật** (lập lịch theo zone, PVC, NetworkPolicy cho Redis/egress, S3 thật);
-RTO khôi phục Postgres chưa đo ở kích thước production (drill cục bộ chỉ ~8 KB); sao lưu Postgres là dump 6 giờ một lần, không PITR (cần Postgres managed); Redis Cluster chưa hỗ trợ
-(script dựng key động); Redis vẫn một master (Sentinel cho sẵn sàng chứ không cho dung lượng), và hệ quả của việc mất vài giây ghi cuối khi failover (lease, `match:<orderId>`) chưa được kiểm thử.
-Cùng với các giới hạn ở mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).
+Remaining limitations: no measurements on real infrastructure (the 500 orders/s and 25,000 locations/s targets are unverified); **no region failover drill**; the Redis, backup and retention manifests
+have only been schema-checked + cross-checked and had their scripts run on Docker, **not run by a kubelet on a real cluster** (zone-aware scheduling, PVCs, real S3; the NetworkPolicies for Redis and for backup egress are in place in `deploy/k8s` but untested on a real CNI);
+the Postgres restore RTO has not been measured at production size (the local drill was only ~8 KB); Postgres backup is a dump every 6 hours, with no PITR (that needs managed Postgres); Redis Cluster is not supported yet
+(the scripts build keys dynamically); Redis is still a single master (Sentinel provides availability, not capacity), and the consequences of losing the last few seconds of writes on failover (leases, `match:<orderId>`) are untested.
+Plus the limitations in sections 13 and 14, and a small item left from phase 2 (caching the driver→rider mapping if measurements show it is needed).
 
-## 16. Thanh toán: Payment Service (đã làm)
+## 16. Payments: Payment Service (done)
 
-Chuyến đi giờ được tính tiền. Không có cổng thanh toán thật: `PaymentProvider` là một interface (`services/payment-service/provider.go`)
-và chỉ có bản `fake` (sandbox, rider có id bắt đầu bằng `decline-` bị từ chối). Service **không bao giờ** nhận số thẻ: `ChargeRequest`
-chỉ có `RiderID`, phương thức thanh toán nằm ở phía nhà cung cấp.
+Trips are now charged. There is no real payment gateway: `PaymentProvider` is an interface (`services/payment-service/provider.go`)
+with only a `fake` implementation (sandbox; riders whose id starts with `decline-` are declined). The service **never** receives card numbers: `ChargeRequest`
+has only `RiderID`; the payment method lives on the provider's side.
 
-**Giá đến Payment Service bằng cách nào.** Đã chọn: tiêu thụ `order.created` và giữ bản sao cục bộ `order_prices(order_id, rider_id, price)`
-(giá đã khóa lúc đặt, v3 của schema). Phương án còn lại là thêm trường `price` (có default) vào `trip.status.changed`, nhưng Trip Service
-không biết giá: phải mở rộng cả `order.matched` (Matching) và Trip Service, tức sửa ba service và ba schema chỉ để chở một số mà
-Order Service đã công bố. Chọn bản sao cục bộ thì **không đổi schema nào**, không đổi service nào khác, và Payment Service không phụ thuộc
-một lời gọi đồng bộ sang Order Service. Cái giá: hai topic khác nhau nên không có thứ tự, `trip.status.changed` có thể đến trước
-`order.created`. Khi đó handler trả lỗi tạm thời và event đi qua các tầng retry (5s, 1 phút, 10 phút); chỉ khi `order.created` thật sự
-không bao giờ đến thì nó vào DLQ và cảnh báo `PaymentDeadLettered` page. Đơn tạo trước khi có giá (`price` null) không bị tính tiền
-(`payments_skipped_total{reason="no_price"}`). Chỉ schema mới `payment.recorded` được thêm; mọi trường sau eventId/occurredAt/định danh
-đều có default, nên tiến hóa về sau vẫn BACKWARD compatible.
+**How the price reaches Payment Service.** Chosen: consume `order.created` and keep a local copy, `order_prices(order_id, rider_id, price)`
+(the price locked at booking, v3 of the schema). The alternative was adding a `price` field (with a default) to `trip.status.changed`, but Trip Service
+does not know the price: both `order.matched` (Matching) and Trip Service would have to be extended, i.e. changing three services and three schemas just to carry a number that
+Order Service has already published. Choosing the local copy means **no schema changes**, no changes to any other service, and Payment Service does not depend on
+a synchronous call to Order Service. The cost: they are two different topics, so there is no ordering, and `trip.status.changed` can arrive before
+`order.created`. In that case the handler returns a transient error and the event goes through the retry tiers (5s, 1 minute, 10 minutes); only if `order.created` really
+never arrives does it go to the DLQ, and the `PaymentDeadLettered` alert pages. Orders created before prices existed (`price` null) are not charged
+(`payments_skipped_total{reason="no_price"}`). Only the new `payment.recorded` schema was added; every field after eventId/occurredAt/the identifiers
+has a default, so future evolution stays BACKWARD compatible.
 
-**Quy tắc tiền.**
-- Cước: đúng giá đã khóa, tính khi `trip.status.changed` = COMPLETED.
-- Tip: `trip.rated.tipAmount`, một khoản tính riêng (`TIP`), tài xế nhận đủ, không chiết khấu.
-- Huỷ: huỷ khi đơn còn PENDING thì không có chuyến và không có event nào Payment Service đọc (nó không đọc `order.cancelled`), nên không
-  bao giờ bị tính. Rider huỷ **sau khi** có tài xế (`trip.status.changed` CANCELLED, `cancelledBy=RIDER`) chịu phí `CANCELLATION_FEE_VND`,
-  **mặc định 0** để giữ nguyên hành vi hiện tại (huỷ vẫn miễn phí; bật bằng cấu hình), tối đa bằng giá chuyến. Tài xế huỷ, hoặc
-  `cancelledBy` rỗng (event cũ), thì không tính.
-- Chiết khấu nền tảng: `PLATFORM_COMMISSION_BPS`, mặc định 2000 (20%) cho cước và phí huỷ; làm tròn xuống, tài xế nhận phần còn lại, nên
-  không một đồng nào sinh ra hay mất đi.
+**Money rules.**
+- Fare: exactly the locked price, charged when `trip.status.changed` = COMPLETED.
+- Tip: `trip.rated.tipAmount`, a separate charge (`TIP`); the driver receives all of it, no commission.
+- Cancellation: a cancellation while the order is still PENDING has no trip and no event that Payment Service reads (it does not read `order.cancelled`), so it is never
+  charged. A rider who cancels **after** a driver is assigned (`trip.status.changed` CANCELLED, `cancelledBy=RIDER`) pays the `CANCELLATION_FEE_VND` fee,
+  **default 0** to keep the current behaviour (cancelling is still free; enable it through configuration), capped at the trip price. A driver cancellation, or
+  an empty `cancelledBy` (old events), is not charged.
+- Platform commission: `PLATFORM_COMMISSION_BPS`, default 2000 (20%) on fares and cancellation fees; rounded down, the driver receives the remainder, so
+  not a single dong is created or lost.
 
-**Sổ cái.** Bút toán kép trong Postgres: tài khoản `RIDER`, `DRIVER_PAYABLE`, `PLATFORM_REVENUE`; mỗi giao dịch là các bút toán có dấu
-(âm = trừ khỏi tài khoản) cộng đúng bằng 0. Tiền là `BIGINT` đơn vị nhỏ nhất (VND không có đơn vị nhỏ hơn đồng), không có float nào sau
-chỗ đổi `price` (float64 của event) sang số nguyên. Cân bằng được kiểm **hai lần**: trong code (`Txn.Validate`, trước khi gọi nhà cung cấp
-và trước khi ghi; vi phạm đếm vào `ledger_unbalanced_rejected_total`) và trong DB (constraint trigger hoãn đến lúc commit); sổ cái chỉ
-được thêm (trigger chặn UPDATE/DELETE). Số dư là tổng bút toán, không lưu riêng. Mỗi khoản duy nhất theo `(trip_id, kind)`;
-event dedupe theo `eventId` trong **cùng transaction** với `payments`, bút toán và dòng outbox của `payment.recorded`. Gọi nhà cung cấp
-nằm ngoài transaction và idempotent theo khóa (`fare:<tripId>`), nên sập giữa chừng rồi thử lại không tính hai lần.
-Từ chối thẻ (`DECLINED`) được ghi và công bố, không có bút toán, không tự thử lại.
+**Ledger.** Double-entry bookkeeping in Postgres: accounts `RIDER`, `DRIVER_PAYABLE`, `PLATFORM_REVENUE`; each transaction is a set of signed entries
+(negative = debited from the account) summing to exactly 0. Money is `BIGINT` in the smallest unit (VND has no unit smaller than the dong); there is no float anywhere after
+the conversion of `price` (the event's float64) to an integer. Balance is checked **twice**: in code (`Txn.Validate`, before calling the provider
+and before writing; violations are counted in `ledger_unbalanced_rejected_total`) and in the DB (a constraint trigger deferred to commit time); the ledger is
+append-only (a trigger blocks UPDATE/DELETE). Balances are the sum of entries, not stored separately. Each charge is unique per `(trip_id, kind)`;
+events are deduplicated by `eventId` in the **same transaction** as `payments`, the ledger entries and the `payment.recorded` outbox row. The provider call
+is outside the transaction and idempotent by key (`fare:<tripId>`), so crashing midway and retrying does not charge twice.
+Card declines (`DECLINED`) are recorded and published, with no ledger entries and no automatic retry.
 
-**Giới hạn đã biết:** nhà cung cấp là giả; chưa có chi trả thật cho tài xế (số dư `DRIVER_PAYABLE` chỉ ghi nhận), chưa hoàn tiền/đảo bút toán,
-chưa xử lý nợ khi thẻ bị từ chối, chưa đối soát với báo cáo của nhà cung cấp. Egress cần cho Payment Service: Postgres, Kafka, Schema
-Registry, OTLP collector (không cần Redis); khi có nhà cung cấp thật thì thêm HTTPS tới nhà cung cấp đó.
+**Known limitations:** the provider is fake; there are no real payouts to drivers yet (the `DRIVER_PAYABLE` balance is only recorded), no refunds/reversing entries yet,
+no debt collection when a card is declined, and no reconciliation against the provider's reports. Egress Payment Service needs: Postgres, Kafka, Schema
+Registry, the OTLP collector (no Redis); with a real provider, add HTTPS to that provider.
