@@ -377,9 +377,20 @@ Nguyên tắc của giai đoạn này là **đo trước, tối ưu sau**, nên 
   rẻ hơn mà chỉ chia tải ra nhiều key, nên chỉ bật khi các key nằm trên nhiều node; chưa dùng được với Redis Cluster (xem docs/performance.md).
 - **Dọn dữ liệu**: CronJob xóa `processed_events` và `rating_events` cũ hơn 30 ngày theo lô (đã thử trên Postgres thật); `outbox` đã tự
   xóa khi publish, `outbox_dead` để người xử lý.
-- **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, quy trình chuyển vùng),
+- **Lưu trữ đơn và chuyến đi**: `retention-order-orders` và `retention-trip-trips` (CronJob hằng ngày, `scripts/pg-retention.sh`) xóa theo lô 5.000 đơn
+  `CANCELLED`/`NO_DRIVER`, chuyến `COMPLETED`/`CANCELLED` và marker `cancelled_orders` cũ hơn 180 ngày (cấu hình được, tối thiểu 30); đơn `MATCHED` (trạng thái cuối order-service biết) sau 365 ngày;
+  không bao giờ đụng `PENDING`, chuyến đang chạy, `outbox`, `outbox_dead`, `driver_reviews`. Đã chạy trên Postgres thật với migration thật
+  (`scripts/test-data-ops.sh`: 12.009 đơn và 8 chuyến đủ trạng thái/độ tuổi, kiểm từng dòng còn lại). Xóa là mất dữ liệu ở DB sống; kho lưu trữ dài hạn là bản sao lưu.
+- **Redis trong manifest**: `deploy/k8s/base/redis/`, StatefulSet 3 pod (redis + sentinel + exporter), AOF, PVC, PDB, anti-affinity theo node và zone, mật khẩu từ Secret, PodMonitor, cảnh báo;
+  service trỏ vào Sentinel qua ConfigMap. `scripts/test-redis-ha.sh` chạy đúng các script đó trên Redis/Sentinel thật: dựng cụm, kill master (failover 4 đến 5 s, không mất key), pod cũ vào lại làm replica,
+  `preStop` chuyển master, và `TestTheClientFollowsAFailover` pass trên bộ 3 Sentinel.
+- **Sao lưu và diễn tập khôi phục Postgres**: CronJob `backup-<service>` (6 giờ một lần, `pg_dump -Fc` lên S3 tương thích, credential từ Secret) và `scripts/pg-restore-drill.sh`
+  (khôi phục bản mới nhất vào DB scratch, kiểm tra phiên bản schema, bảng, số dòng). Đã chạy trọn vẹn trên Postgres thật, kể cả đường S3 và các trường hợp drill phải fail.
+- **Sao lưu và DR**: [docs/disaster-recovery.md](../../docs/disaster-recovery.md) (dữ liệu nào quan trọng đến đâu, RPO/RTO đã đo và chưa đo, quy trình chuyển vùng),
   `deploy/k8s/dr/mirrormaker2.yaml` và `s3-archive.yaml` (kiểm tra schema bằng `deploy/verify.sh`, **chưa chạy trên cluster thật**).
 
-Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); chưa diễn tập khôi phục/chuyển
-vùng; Redis Cluster chưa hỗ trợ (script dựng key động); Sentinel được client hỗ trợ và đã thử failover thật, nhưng manifest không triển khai Redis; bảng `orders`/`trips` chưa có chính sách lưu trữ. Cùng với các giới hạn ở
-mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).
+Giới hạn còn lại: chưa có số đo trên hạ tầng thật (mục tiêu 500 đơn/s và 25.000 vị trí/s chưa kiểm chứng); **chưa diễn tập chuyển vùng**; manifest Redis, sao lưu và retention
+mới được kiểm tra schema + kiểm tra chéo và chạy các script của chúng trên Docker, **chưa chạy bởi kubelet trên cluster thật** (lập lịch theo zone, PVC, NetworkPolicy cho Redis/egress, S3 thật);
+RTO khôi phục Postgres chưa đo ở kích thước production (drill cục bộ chỉ ~8 KB); sao lưu Postgres là dump 6 giờ một lần, không PITR (cần Postgres managed); Redis Cluster chưa hỗ trợ
+(script dựng key động); Redis vẫn một master (Sentinel cho sẵn sàng chứ không cho dung lượng), và hệ quả của việc mất vài giây ghi cuối khi failover (lease, `match:<orderId>`) chưa được kiểm thử.
+Cùng với các giới hạn ở mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).

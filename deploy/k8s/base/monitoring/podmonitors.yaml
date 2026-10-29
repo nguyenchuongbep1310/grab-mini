@@ -33,3 +33,21 @@ spec:
   - port: tcp-prometheus
     path: /metrics
     interval: 30s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: grab-mini-redis
+  labels:
+    app.kubernetes.io/name: grab-mini-redis
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: grab-mini
+      app.kubernetes.io/component: redis
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 15s

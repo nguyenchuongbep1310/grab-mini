@@ -68,12 +68,19 @@ spec:
               fieldPath: metadata.name
         - name: RUN_MIGRATIONS
           value: 'false'
+        - name: REDIS_PASSWORD_FILE
+          value: /etc/secrets/redis/password
+        - name: REDIS_SENTINEL_PASSWORD_FILE
+          value: /etc/secrets/redis/password
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user
           readOnly: true
         - name: kafka-ca
           mountPath: /etc/kafka/ca
+          readOnly: true
+        - name: redis
+          mountPath: /etc/secrets/redis
           readOnly: true
         startupProbe:
           httpGet:
@@ -124,6 +131,12 @@ spec:
           items:
           - key: ca.crt
             path: ca.crt
+      - name: redis
+        secret:
+          secretName: grab-mini-redis
+          items:
+          - key: password
+            path: password
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget

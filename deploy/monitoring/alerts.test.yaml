@@ -394,3 +394,90 @@ tests:
               summary: "trip-service has 1 replica(s) not ready"
               description: "Check /readyz: a dependency (Postgres, Redis, Kafka) is probably down."
               runbook: "docs/runbook.md#pods-not-ready"
+
+  - name: redis with no master for a minute pages, one master is quiet
+    interval: 1m
+    input_series:
+      # Healthy for 5 minutes, then every node reports itself a replica: no failover finishing.
+      - series: 'redis_instance_info{namespace="grab-mini", pod="redis-0", role="master"}'
+        values: '1x4 _x20'
+      - series: 'redis_instance_info{namespace="grab-mini", pod="redis-0", role="slave"}'
+        values: '_x5 1x19'
+      - series: 'redis_instance_info{namespace="grab-mini", pod="redis-1", role="slave"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RedisNotExactlyOneMaster
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RedisNotExactlyOneMaster
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Redis has 0 masters instead of 1"
+              runbook: "docs/runbook.md#redis-failover"
+
+  - name: two redis masters is a split brain
+    interval: 1m
+    input_series:
+      - series: 'redis_instance_info{namespace="grab-mini", pod="redis-0", role="master"}'
+        values: '1x10'
+      - series: 'redis_instance_info{namespace="grab-mini", pod="redis-1", role="master"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RedisNotExactlyOneMaster
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Redis has 2 masters instead of 1"
+              runbook: "docs/runbook.md#redis-failover"
+
+  - name: redis memory near maxmemory is a ticket after ten minutes
+    interval: 1m
+    input_series:
+      - series: 'redis_memory_used_bytes{namespace="grab-mini", pod="redis-0"}'
+        values: '900x20'
+      - series: 'redis_memory_max_bytes{namespace="grab-mini", pod="redis-0"}'
+        values: '1000x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RedisMemoryNearLimit
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Redis memory is at 90% of maxmemory"
+              runbook: "docs/runbook.md#redis-failover"
+
+  - name: a backup that has not succeeded for 24 hours pages, a recent one does not
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="grab-mini", cronjob="backup-order-service"}'
+        values: '0x1600'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="grab-mini", cronjob="backup-trip-service"}'
+        values: '85000x1600'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: PostgresBackupStale
+        exp_alerts:
+          - exp_labels: {severity: page, namespace: grab-mini, cronjob: backup-order-service}
+            exp_annotations:
+              summary: "No successful backup-order-service for more than 24 hours (it runs every 6)"
+              description: "The backup RPO is being exceeded."
+              runbook: "docs/runbook.md#backup-and-restore"
+
+  - name: a failed backup or retention job is a ticket
+    interval: 1m
+    input_series:
+      - series: 'kube_job_status_failed{namespace="grab-mini", job_name="backup-order-service-29100000"}'
+        values: '1x20'
+      - series: 'kube_job_status_failed{namespace="grab-mini", job_name="something-else-1"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: DataOpsJobFailed
+        exp_alerts:
+          - exp_labels: {severity: ticket, namespace: grab-mini, job_name: backup-order-service-29100000}
+            exp_annotations:
+              summary: "Job backup-order-service-29100000 failed"
+              runbook: "docs/runbook.md#backup-and-restore"

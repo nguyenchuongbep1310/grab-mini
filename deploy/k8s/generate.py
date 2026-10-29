@@ -67,6 +67,29 @@ RETENTION = {
     "rating-rating-events": ("rating-service", "rating_events", "processed_at"),
 }
 POSTGRES_IMAGE = "postgres:16-alpine"
+REDIS_IMAGE = "redis:7.4.12-alpine"
+REDIS_EXPORTER_IMAGE = "oliver006/redis_exporter:v1.66.0-alpine"
+AWS_CLI_IMAGE = "amazon/aws-cli:2.17.40"
+
+# Orders and trips are history after a while. Finished rows older than this go
+# (scripts/pg-retention.sh, which also refuses less than 30). Backups are the archive.
+HISTORY_RETENTION_DAYS = 180
+MATCHED_ORDER_DAYS = 365  # see the header of scripts/pg-retention.sh: MATCHED is the last state order-service sees
+HISTORY_RETENTION = {  # CronJob suffix: (service, argument of pg-retention.sh)
+    "order-orders": ("order-service", "orders"),
+    "trip-trips": ("trip-service", "trips"),
+}
+
+# One pg_dump CronJob per service database (they may be one Postgres or three).
+# Every 6 hours is the RPO of this layer; managed-Postgres PITR is the better one.
+BACKUP_SCHEDULE = "7 */6 * * *"
+BACKUP_SCRATCH_SIZE = "10Gi"  # the dump is staged on an emptyDir before the upload
+
+# Redis: 3 pods, each a redis + a sentinel (+ exporter); quorum 2 of 3.
+REDIS_REPLICAS = 3
+REDIS_STORAGE = "5Gi"
+REDIS_PORT, SENTINEL_PORT, EXPORTER_PORT = 6379, 26379, 9121
+REDIS_MASTER_NAME = "mymaster"
 
 
 def parse_acl_table():
@@ -130,6 +153,11 @@ def deployment(name, spec):
         volumes.append({"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{name}", "items": [{"key": "url", "path": "url"}]}})
         mounts.append({"name": "db", "mountPath": "/etc/secrets/db", "readOnly": True})
         env.append({"name": "DATABASE_URL_FILE", "value": "/etc/secrets/db/url"})
+    if spec.get("redis"):  # one password for Redis and its Sentinels (see redis_stateful_set)
+        volumes.append({"name": "redis", "secret": {"secretName": f"{CLUSTER}-redis", "items": [{"key": "password", "path": "password"}]}})
+        mounts.append({"name": "redis", "mountPath": "/etc/secrets/redis", "readOnly": True})
+        env.append({"name": "REDIS_PASSWORD_FILE", "value": "/etc/secrets/redis/password"})
+        env.append({"name": "REDIS_SENTINEL_PASSWORD_FILE", "value": "/etc/secrets/redis/password"})
     if api:  # these verify tokens
         volumes.append({"name": "jwt", "secret": {"secretName": f"{CLUSTER}-jwt", "items": [{"key": "secret", "path": "secret"}]}})
         mounts.append({"name": "jwt", "mountPath": "/etc/secrets/jwt", "readOnly": True})
@@ -307,6 +335,257 @@ def retention_cronjob(name, service, table, column):
             }},
         },
     }
+
+
+# ------------------------------------------------------------- data ops ----
+SECURE = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "runAsNonRoot": True, "capabilities": {"drop": ["ALL"]}}
+
+
+def script_config_map(name, component, paths):
+    """The shell scripts of this repository, as a ConfigMap: the Jobs run the very files the tests ran."""
+    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(name, component),
+            "data": {Path(p).name: Literal((ROOT / p).read_text()) for p in paths}}
+
+
+def data_ops_config():
+    return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("grab-mini-data-ops", "config"),
+            "data": {
+                "RETENTION_DAYS": str(HISTORY_RETENTION_DAYS),
+                "MATCHED_ORDER_DAYS": str(MATCHED_ORDER_DAYS),
+                "BATCH_SIZE": "5000",
+                # Per environment. s3://bucket/prefix; a lifecycle rule on the bucket expires old dumps.
+                "BACKUP_TARGET": "s3://CHANGE-ME-grab-mini-backups/postgres",
+                "BACKUP_S3_ENDPOINT": "",  # set for S3-compatible storage that is not AWS
+                "AWS_DEFAULT_REGION": "us-east-1",
+            }}
+
+
+def history_retention_cronjob(suffix, service, arg):
+    name = f"retention-{suffix}"
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": meta(name, "retention"),
+        "spec": {
+            "schedule": "43 3 * * *",
+            "concurrencyPolicy": "Forbid",
+            "successfulJobsHistoryLimit": 1,
+            "failedJobsHistoryLimit": 3,
+            "jobTemplate": {"spec": {
+                "backoffLimit": 1,
+                "activeDeadlineSeconds": 3600,
+                "template": {
+                    "metadata": {"labels": labels(name, "retention")},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": "grab-mini",
+                        "automountServiceAccountToken": False,
+                        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [{
+                            "name": "retention",
+                            "image": POSTGRES_IMAGE,
+                            "command": ["sh", "/scripts/pg-retention.sh", arg],
+                            "envFrom": [{"configMapRef": {"name": "grab-mini-data-ops"}}],
+                            "env": [{"name": "DATABASE_URL_FILE", "value": "/etc/secrets/db/url"}],
+                            "volumeMounts": [{"name": "db", "mountPath": "/etc/secrets/db", "readOnly": True},
+                                             {"name": "scripts", "mountPath": "/scripts", "readOnly": True}],
+                            "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": "128Mi"}},
+                            "securityContext": dict(SECURE, runAsUser=70),
+                        }],
+                        "volumes": [
+                            {"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{service}", "items": [{"key": "url", "path": "url"}]}},
+                            {"name": "scripts", "configMap": {"name": "grab-mini-data-ops-scripts"}},
+                        ],
+                    },
+                },
+            }},
+        },
+    }
+
+
+def backup_cronjob(service):
+    """pg_dump in one container, upload in another: no image has both pg_dump and the AWS CLI."""
+    name = f"backup-{service}"
+    common_env = [{"name": "BACKUP_NAME", "value": service}, {"name": "BACKUP_DIR", "value": "/backup"}]
+    mounts = [{"name": "scripts", "mountPath": "/scripts", "readOnly": True}, {"name": "backup", "mountPath": "/backup"}]
+    cfg = [{"configMapRef": {"name": "grab-mini-data-ops"}}]
+    secret_env = lambda key: {"name": key, "valueFrom": {"secretKeyRef": {"name": f"{CLUSTER}-backup", "key": key}}}
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": meta(name, "backup"),
+        "spec": {
+            "schedule": BACKUP_SCHEDULE,
+            "concurrencyPolicy": "Forbid",
+            "successfulJobsHistoryLimit": 1,
+            "failedJobsHistoryLimit": 3,
+            "jobTemplate": {"spec": {
+                "backoffLimit": 1,
+                "activeDeadlineSeconds": 3600,
+                "template": {
+                    "metadata": {"labels": labels(name, "backup")},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": "grab-mini",
+                        "automountServiceAccountToken": False,
+                        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                        "initContainers": [{
+                            "name": "dump",
+                            "image": POSTGRES_IMAGE,
+                            "command": ["sh", "/scripts/pg-backup.sh", "dump"],
+                            "envFrom": cfg,
+                            "env": common_env + [{"name": "DATABASE_URL_FILE", "value": "/etc/secrets/db/url"}],
+                            "volumeMounts": mounts + [{"name": "db", "mountPath": "/etc/secrets/db", "readOnly": True}],
+                            "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
+                            "securityContext": dict(SECURE, runAsUser=70),
+                        }],
+                        "containers": [{
+                            "name": "upload",
+                            "image": AWS_CLI_IMAGE,
+                            "command": ["sh", "/scripts/pg-backup.sh", "upload"],
+                            "envFrom": cfg,
+                            "env": common_env + [{"name": "HOME", "value": "/tmp"}, secret_env("AWS_ACCESS_KEY_ID"), secret_env("AWS_SECRET_ACCESS_KEY")],
+                            "volumeMounts": mounts + [{"name": "tmp", "mountPath": "/tmp"}],
+                            "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}},
+                            "securityContext": dict(SECURE, runAsUser=1000),
+                        }],
+                        "volumes": [
+                            {"name": "db", "secret": {"secretName": f"{CLUSTER}-db-{service}", "items": [{"key": "url", "path": "url"}]}},
+                            {"name": "scripts", "configMap": {"name": "grab-mini-data-ops-scripts"}},
+                            {"name": "backup", "emptyDir": {"sizeLimit": BACKUP_SCRATCH_SIZE}},
+                            {"name": "tmp", "emptyDir": {}},
+                        ],
+                    },
+                },
+            }},
+        },
+    }
+
+
+# ------------------------------------------------------------------ redis ----
+def redis_objects():
+    """Redis with Sentinel: three pods, each running redis, a sentinel and the exporter.
+
+    Replication is asynchronous and there is ONE master (Sentinel adds
+    availability, not capacity). Who is master is decided by the Sentinels at
+    run time (deploy/redis/*.sh), so the StatefulSet itself is symmetric.
+    """
+    sel = {"app.kubernetes.io/name": "redis"}
+    domain = "redis-headless.$(POD_NAMESPACE).svc"
+    pw = {"name": "REDIS_PASSWORD", "valueFrom": {"secretKeyRef": {"name": f"{CLUSTER}-redis", "key": "password"}}}
+    cli_pw = dict(pw, name="REDISCLI_AUTH")  # redis-cli, used by the probes, reads this
+    base_env = [{"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+                {"name": "REDIS_DOMAIN", "value": domain}, {"name": "REDIS_MASTER_NAME", "value": REDIS_MASTER_NAME},
+                {"name": "REDIS_REPLICAS", "value": str(REDIS_REPLICAS)}, pw, cli_pw]
+    ping = lambda port: ["sh", "-c", f"redis-cli -p {port} ping | grep -q PONG"]
+    scripts = {"name": "scripts", "mountPath": "/scripts", "readOnly": True}
+
+    redis_c = {
+        "name": "redis",
+        "image": REDIS_IMAGE,
+        "command": ["sh", "/scripts/redis-start.sh"],
+        "ports": [{"name": "redis", "containerPort": REDIS_PORT}],
+        "env": base_env + [{"name": "REDIS_MAXMEMORY", "value": "400mb"}],
+        "volumeMounts": [scripts, {"name": "data", "mountPath": "/data"}, {"name": "conf", "mountPath": "/conf"}],
+        # Loading a big AOF takes a while; PING answers LOADING until it is done, so it is not ready.
+        "startupProbe": {"exec": {"command": ping(REDIS_PORT)}, "periodSeconds": 5, "failureThreshold": 60},
+        "readinessProbe": {"exec": {"command": ping(REDIS_PORT)}, "periodSeconds": 5, "timeoutSeconds": 3, "failureThreshold": 3},
+        "livenessProbe": {"exec": {"command": ping(REDIS_PORT)}, "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 6},
+        # If this pod is the master, hand the role over before it stops (a drain or rollout
+        # then costs a planned failover, not Sentinel noticing a dead master).
+        "lifecycle": {"preStop": {"exec": {"command": ["sh", "/scripts/redis-prestop.sh"]}}},
+        # maxmemory 400mb + the copy-on-write of an AOF rewrite + replica buffers.
+        "resources": {"requests": {"cpu": "250m", "memory": "768Mi"}, "limits": {"memory": "768Mi"}},
+        "securityContext": SECURE,
+    }
+    sentinel_c = {
+        "name": "sentinel",
+        "image": REDIS_IMAGE,
+        "command": ["sh", "/scripts/sentinel-start.sh"],
+        "ports": [{"name": "sentinel", "containerPort": SENTINEL_PORT}],
+        "env": base_env,
+        "volumeMounts": [scripts, {"name": "sentinel", "mountPath": "/sentinel"}],
+        "readinessProbe": {"exec": {"command": ping(SENTINEL_PORT)}, "periodSeconds": 5, "timeoutSeconds": 3, "failureThreshold": 3},
+        "livenessProbe": {"exec": {"command": ping(SENTINEL_PORT)}, "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 6},
+        "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"memory": "64Mi"}},
+        "securityContext": SECURE,
+    }
+    exporter_c = {
+        "name": "exporter",
+        "image": REDIS_EXPORTER_IMAGE,
+        "ports": [{"name": "metrics", "containerPort": EXPORTER_PORT}],
+        "env": [{"name": "REDIS_ADDR", "value": f"redis://localhost:{REDIS_PORT}"}, pw],
+        "readinessProbe": {"httpGet": {"path": "/", "port": "metrics"}, "periodSeconds": 10},
+        "resources": {"requests": {"cpu": "25m", "memory": "32Mi"}, "limits": {"memory": "64Mi"}},
+        "securityContext": SECURE,
+    }
+    statefulset = {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": meta("redis", "redis"),
+        "spec": {
+            "serviceName": "redis-headless",
+            "replicas": REDIS_REPLICAS,
+            # In order: redis-0 is up (and master) before the others look for a master.
+            "podManagementPolicy": "OrderedReady",
+            "updateStrategy": {"type": "RollingUpdate"},
+            # Deleting the StatefulSet must never delete the data.
+            "persistentVolumeClaimRetentionPolicy": {"whenDeleted": "Retain", "whenScaled": "Retain"},
+            "selector": {"matchLabels": sel},
+            "template": {
+                "metadata": {"labels": labels("redis", "redis")},
+                "spec": {
+                    "serviceAccountName": "grab-mini",
+                    "automountServiceAccountToken": False,
+                    # Time for the preStop handover and a clean AOF flush.
+                    "terminationGracePeriodSeconds": 60,
+                    "securityContext": {"runAsNonRoot": True, "runAsUser": 999, "runAsGroup": 1000, "fsGroup": 1000,
+                                        "seccompProfile": {"type": "RuntimeDefault"}},
+                    # Never two on one node; one per zone (a zone lost = one of three, quorum holds).
+                    "affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                        {"topologyKey": "kubernetes.io/hostname", "labelSelector": {"matchLabels": sel}}]}},
+                    "topologySpreadConstraints": [{"maxSkew": 1, "topologyKey": "topology.kubernetes.io/zone",
+                                                   "whenUnsatisfiable": "DoNotSchedule", "labelSelector": {"matchLabels": sel}}],
+                    "containers": [redis_c, sentinel_c, exporter_c],
+                    "volumes": [
+                        {"name": "scripts", "configMap": {"name": "redis-scripts"}},
+                        {"name": "conf", "emptyDir": {}},
+                        {"name": "sentinel", "emptyDir": {}},
+                    ],
+                },
+            },
+            "volumeClaimTemplates": [{
+                "metadata": {"name": "data", "labels": labels("redis", "redis")},
+                # No storageClassName: the cluster's default. Pick a class that is zonal and expandable.
+                "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": REDIS_STORAGE}}},
+            }],
+        },
+    }
+    headless = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": meta("redis-headless", "redis"),
+        "spec": {
+            "clusterIP": "None",
+            # Peers must resolve each other before they are ready: that is how the cluster forms.
+            "publishNotReadyAddresses": True,
+            "selector": sel,
+            "ports": [{"name": "redis", "port": REDIS_PORT}, {"name": "sentinel", "port": SENTINEL_PORT},
+                      {"name": "metrics", "port": EXPORTER_PORT}],
+        },
+    }
+    pdb_ = {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": meta("redis", "redis"),
+        # Two of three must stay: Sentinel's quorum, and a replica to fail over to.
+        "spec": {"maxUnavailable": 1, "selector": {"matchLabels": sel}},
+    }
+    return [headless, statefulset, pdb_]
+
+
+def sentinel_addrs():
+    return ",".join(f"redis-{i}.redis-headless:{SENTINEL_PORT}" for i in range(REDIS_REPLICAS))
 
 
 # ---------------------------------------------------------------- scaling ----
@@ -495,6 +774,9 @@ def pod_monitors():
         {"apiVersion": "monitoring.coreos.com/v1", "kind": "PodMonitor", "metadata": meta("grab-mini-kafka-exporter", "monitoring"),
          "spec": {"selector": {"matchLabels": {"strimzi.io/name": f"{CLUSTER}-kafka-exporter"}},
                   "podMetricsEndpoints": [{"port": "tcp-prometheus", "path": "/metrics", "interval": "30s"}]}},
+        {"apiVersion": "monitoring.coreos.com/v1", "kind": "PodMonitor", "metadata": meta("grab-mini-redis", "monitoring"),
+         "spec": {"selector": {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini", "app.kubernetes.io/component": "redis"}},
+                  "podMetricsEndpoints": [{"port": "metrics", "path": "/metrics", "interval": "15s"}]}},
     ]
 
 
@@ -514,13 +796,14 @@ def config_map():
                 "KAFKA_SASL_MECHANISM": "SCRAM-SHA-512",
                 "KAFKA_REPLICATION_FACTOR": "3",
                 "KAFKA_TOPIC_PARTITIONS": "6",
-                # These point at things this repository doesn't deploy; set them per environment.
+                # This points at something this repository doesn't deploy; set it per environment.
                 "SCHEMA_REGISTRY_URL": "http://schema-registry:8081",
+                # Redis is deployed here (redis/): the services ask its Sentinels for the master and follow
+                # failovers on their own; REDIS_ADDR is then ignored. To use a managed Redis instead, empty
+                # REDIS_SENTINEL_ADDRS and set REDIS_ADDR (and drop redis/ from the kustomization).
                 "REDIS_ADDR": "redis:6379",
-                # With a Sentinel-managed Redis, list the Sentinels and the services follow failovers
-                # on their own (REDIS_ADDR is then ignored). Empty = the single node above.
-                "REDIS_SENTINEL_ADDRS": "",
-                "REDIS_MASTER_NAME": "mymaster",
+                "REDIS_SENTINEL_ADDRS": sentinel_addrs(),
+                "REDIS_MASTER_NAME": REDIS_MASTER_NAME,
                 # Cell size (degrees) to split the driver GEO set into; 0 = one key. Matching and
                 # Driver Location Service must agree: see docs/performance.md before changing it.
                 "GEO_SHARD_DEGREES": "0",
@@ -533,6 +816,13 @@ def config_map():
 class Dumper(yaml.SafeDumper):
     def ignore_aliases(self, data):
         return True
+
+
+class Literal(str):
+    """Dumped as a block scalar: a shell script in a ConfigMap reads as a script, not one escaped line."""
+
+
+Dumper.add_representer(Literal, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", str(v), style="|"))
 
 
 def dump(docs):
@@ -556,6 +846,15 @@ def build():
         files[f"migrations/{name}.yaml"] = dump(migration_job(name))
     for name, (owner, table, column) in RETENTION.items():
         files[f"retention/{name}.yaml"] = dump(retention_cronjob(name, owner, table, column))
+    for suffix, (owner, arg) in HISTORY_RETENTION.items():
+        files[f"retention/{suffix}.yaml"] = dump(history_retention_cronjob(suffix, owner, arg))
+    files["dataops/config.yaml"] = dump([data_ops_config(), script_config_map(
+        "grab-mini-data-ops-scripts", "dataops", ["scripts/pg-retention.sh", "scripts/pg-backup.sh"])])
+    for svc in MIGRATING:
+        files[f"backup/{svc}.yaml"] = dump(backup_cronjob(svc))
+    files["redis/redis.yaml"] = dump(redis_objects())
+    files["redis/scripts.yaml"] = dump(script_config_map(
+        "redis-scripts", "redis", [f"deploy/redis/{s}" for s in ("redis-start.sh", "sentinel-start.sh", "redis-prestop.sh")]))
     scaled = [trigger_authentication()] + [scaled_object(n, s, consumes) for n, s in SERVICES.items()]
     files["scaling/keda.yaml"] = dump(scaled)
     files["kafka/cluster.yaml"] = dump(kafka_cluster())
@@ -564,7 +863,7 @@ def build():
     files["network/policies.yaml"] = dump(network_policies())
     files["monitoring/podmonitors.yaml"] = dump(pod_monitors())
     files["monitoring/alerts.yaml"] = dump(prometheus_rule())
-    resources = ["namespace.yaml", "config.yaml"] + sorted(f for f in files if f.startswith(("services/", "migrations/", "retention/", "scaling/", "kafka/", "network/", "monitoring/")))
+    resources = ["namespace.yaml", "config.yaml"] + sorted(f for f in files if f.startswith(("services/", "migrations/", "retention/", "scaling/", "kafka/", "network/", "monitoring/", "dataops/", "backup/", "redis/")))
     files["kustomization.yaml"] = dump({
         "apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
         "namespace": "grab-mini", "resources": resources,

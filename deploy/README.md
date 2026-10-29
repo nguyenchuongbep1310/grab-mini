@@ -5,7 +5,8 @@ deploy/
   docker/Dockerfile         one multi-stage file for every Go service
   k8s/generate.py           writes k8s/base from one description (edit this, not the YAML)
   k8s/check.py              cross-checks the rendered manifests against each other and the Go source
-  k8s/base/                 Kustomize base: services, migrations, scaling, Kafka, network, monitoring
+  k8s/base/                 Kustomize base: services, migrations, scaling, Kafka, network, monitoring, redis, backup, retention
+  redis/                    start/stop scripts of the Redis and Sentinel containers (put in a ConfigMap by generate.py)
   monitoring/               alert rules (alerts.rules.yaml) and their tests (alerts.test.yaml)
   kafka-secure/             a local Kafka with TLS, SASL/SCRAM and ACLs, for trying the security model
   verify.sh                 everything above that can be checked without a cluster
@@ -23,14 +24,19 @@ docs/runbook.md             what to do when an alert fires
 | Kafka | a Strimzi cluster: 3 KRaft controllers and 3 brokers across zones, replication factor 3, `min.insync.replicas` 2 (1 for locations), no unclean leader election, no topic auto-creation; the six topics; a `KafkaUser` per service whose ACLs are read from `scripts/kafka-acls.sh`, so the two cannot disagree |
 | Network | ingress denied by default; the ingress controller may reach the APIs' public port; Prometheus may reach the admin port |
 | Monitoring | PodMonitors and a PrometheusRule made from `monitoring/alerts.rules.yaml` |
+| Redis | a StatefulSet of 3 pods, each `redis` + `sentinel` + `redis_exporter` (scripts in `redis/`), AOF on a 5Gi PVC, password from a Secret, one pod per node and per zone, a PodDisruptionBudget; the services find the master through the Sentinels. Proven on real Redis by `scripts/test-redis-ha.sh`. |
+| Data ops | `retention-*` CronJobs (finished orders and trips older than 180 days, in batches: `scripts/pg-retention.sh`); `backup-<service>` CronJobs (`pg_dump` every 6 h to object storage: `scripts/pg-backup.sh`); a restore drill (`scripts/pg-restore-drill.sh`). Proven on real Postgres by `scripts/test-data-ops.sh`. See `docs/disaster-recovery.md`. |
 
 ## Needs in the cluster
 
 [Strimzi](https://strimzi.io) (Kafka, KafkaNodePool, KafkaTopic, KafkaUser), [KEDA](https://keda.sh), the
 Prometheus Operator (PodMonitor, PrometheusRule) with kube-state-metrics, and an ingress controller in the
 `ingress-nginx` namespace. Prometheus is expected in the `monitoring` namespace. Not included, and set per
-environment in `k8s/base/config.yaml`: **Postgres**, **Redis**, **Schema Registry**, an OpenTelemetry collector,
-and the ingress routes (route only the APIs' public paths, never `/metrics`).
+environment in `k8s/base/config.yaml`: **Postgres**, **Schema Registry**, an OpenTelemetry collector,
+and the ingress routes (route only the APIs' public paths, never `/metrics`). The base *does* deploy Redis; to use a
+managed one instead, drop `redis/` from the kustomization, empty `REDIS_SENTINEL_ADDRS` and set `REDIS_ADDR`.
+Set `BACKUP_TARGET` in `grab-mini-data-ops` (`k8s/base/dataops/config.yaml`; it ships as `s3://CHANGE-ME-...` so the
+backup job fails loudly until you do). Development (`docker-compose.yml`) keeps one Redis with no password.
 
 ## Secrets you create
 
@@ -38,6 +44,8 @@ and the ingress routes (route only the APIs' public paths, never `/metrics`).
 |---|---|---|
 | `grab-mini-jwt` | `secret` (at least 32 bytes) | every API service |
 | `grab-mini-db-order-service`, `-trip-service`, `-rating-service` | `url` (a Postgres URL) | that service and its migration Job |
+| `grab-mini-redis` | `password` (used for Redis and its Sentinels) | the Redis pods and every service that uses Redis |
+| `grab-mini-backup` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (write-only on the bucket is enough) | the `backup-*` CronJobs |
 | `keda-kafka-auth` | `username` (`keda`), `password`, `ca.crt` | the KEDA Kafka scaler |
 
 Strimzi creates the rest: each service's Kafka password (a Secret named after its `KafkaUser`) and the cluster CA

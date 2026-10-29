@@ -73,6 +73,10 @@ spec:
           value: 'false'
         - name: PORT
           value: '3003'
+        - name: REDIS_PASSWORD_FILE
+          value: /etc/secrets/redis/password
+        - name: REDIS_SENTINEL_PASSWORD_FILE
+          value: /etc/secrets/redis/password
         - name: JWT_SECRET_FILE
           value: /etc/secrets/jwt/secret
         - name: ALLOWED_ORIGINS
@@ -86,6 +90,9 @@ spec:
           readOnly: true
         - name: kafka-ca
           mountPath: /etc/kafka/ca
+          readOnly: true
+        - name: redis
+          mountPath: /etc/secrets/redis
           readOnly: true
         - name: jwt
           mountPath: /etc/secrets/jwt
@@ -139,6 +146,12 @@ spec:
           items:
           - key: ca.crt
             path: ca.crt
+      - name: redis
+        secret:
+          secretName: grab-mini-redis
+          items:
+          - key: password
+            path: password
       - name: jwt
         secret:
           secretName: grab-mini-jwt
