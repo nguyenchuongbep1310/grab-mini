@@ -15,6 +15,7 @@ import (
 	"github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
@@ -284,9 +285,7 @@ func TestTripAccessFollowsTheTokenAndWhoIsPartyToTheTrip(t *testing.T) {
 	s, _ := newServer(db, rdb)
 	s.codec = nil // the transitions below are refused before they would encode
 
-	secret := "0123456789abcdef0123456789abcdef"
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	mux := s.routes(verifier)
 	do := func(method, path string, role auth.Role, subject, body string) int {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))

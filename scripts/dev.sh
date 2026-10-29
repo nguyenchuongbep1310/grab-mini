@@ -95,6 +95,10 @@ done
 echo "Seeding drivers..."
 "$BIN/matching-service" seed-drivers
 
+# The services sign (auth-service) and verify (the rest) tokens with the published
+# development Ed25519 key, which they only accept with APP_ENV=development.
+export APP_ENV="${APP_ENV:-development}"
+
 # Emit JSON logs by default so Promtail/Loki can index level, service and trace_id.
 export LOG_FORMAT="${LOG_FORMAT:-json}"
 

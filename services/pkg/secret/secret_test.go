@@ -46,6 +46,15 @@ func TestDevelopmentDefaultsApplyOutsideProduction(t *testing.T) {
 	}
 }
 
+func TestDevelopmentIsExplicit(t *testing.T) {
+	for env, want := range map[string]bool{"development": true, "Development": true, "": false, "production": false, "staging": false} {
+		t.Setenv("APP_ENV", env)
+		if got := Development(); got != want {
+			t.Errorf("APP_ENV=%q: Development() = %v, want %v", env, got, want)
+		}
+	}
+}
+
 func TestProductionRefusesToUseADefault(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
 	if _, err := GetOr("UNSET_SECRET", "dev-value"); !errors.Is(err, ErrMissing) {

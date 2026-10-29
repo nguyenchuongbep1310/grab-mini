@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"log"
 	"os"
 	"strings"
@@ -10,16 +11,23 @@ import (
 )
 
 type Env struct {
-	Port      string
-	JWTSecret string
-	TokenTTL  time.Duration
+	Port string
+	// SigningKey signs tokens; it is the only copy of the private key in the system.
+	SigningKey ed25519.PrivateKey
+	// PreviousKeys are retired public keys still published until their tokens expire.
+	PreviousKeys []ed25519.PublicKey
+	TokenTTL     time.Duration
 	// AllowDevTokens must be set to run in production: this service hands a
 	// token to anyone who asks, which is only right for development.
 	AllowDevTokens bool
 }
 
 func loadEnv() Env {
-	jwtSecret, err := auth.SecretFromEnv()
+	key, err := auth.PrivateKeyFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	previous, err := auth.PreviousPublicKeysFromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -29,7 +37,8 @@ func loadEnv() Env {
 	}
 	return Env{
 		Port:           getEnv("PORT", "3005"),
-		JWTSecret:      jwtSecret,
+		SigningKey:     key,
+		PreviousKeys:   previous,
 		TokenTTL:       ttl,
 		AllowDevTokens: strings.EqualFold(os.Getenv("ALLOW_DEV_TOKENS"), "true"),
 	}

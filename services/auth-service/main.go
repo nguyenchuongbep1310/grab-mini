@@ -5,16 +5,22 @@
 // without building user accounts. It must not run in production: there, put
 // a real identity provider in front and have the services verify its tokens.
 // It refuses to start with APP_ENV=production unless ALLOW_DEV_TOKENS=true.
+//
+// It is the only holder of the signing key (Ed25519, JWT_PRIVATE_KEY[_FILE];
+// the published development key only with APP_ENV=development) and publishes
+// the public keys at GET /.well-known/jwks.json for the other services.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -72,9 +78,24 @@ func handleToken(issuer *auth.Issuer) http.HandlerFunc {
 	}
 }
 
-func newMux(issuer *auth.Issuer) *http.ServeMux {
+// jwksMaxAge is how long a client may reuse the key set. Short enough that a
+// retired key stops being trusted soon, long enough to be cheap; the services
+// also refetch on their own when they meet a kid they don't know.
+const jwksMaxAge = 300
+
+// handleJWKS publishes the public keys that verify this service's tokens.
+func handleJWKS(jwks []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		w.Header().Set("Cache-Control", "public, max-age="+strconv.Itoa(jwksMaxAge))
+		w.Write(jwks)
+	}
+}
+
+func newMux(issuer *auth.Issuer, previous ...ed25519.PublicKey) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /token", handleToken(issuer))
+	mux.HandleFunc("GET /.well-known/jwks.json", handleJWKS(issuer.JWKS(previous...)))
 	live := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -94,7 +115,7 @@ func main() {
 		log.Fatal("auth-service issues a token to anyone who asks and is for development only: " +
 			"refusing to run with APP_ENV=production (set ALLOW_DEV_TOKENS=true to override, or use a real identity provider)")
 	}
-	issuer, err := auth.NewIssuer(env.JWTSecret, env.TokenTTL)
+	issuer, err := auth.NewIssuer(env.SigningKey, env.TokenTTL)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,8 +124,8 @@ func main() {
 	defer stop()
 	defer tracing.Setup(ctx, "auth-service")()
 
-	log.Printf("auth-service listening on :%s (development token issuer, tokens last %s)", env.Port, env.TokenTTL)
-	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("auth-service", metrics.HTTP(newMux(issuer)))); err != nil {
+	log.Printf("auth-service listening on :%s (development token issuer, tokens last %s, signing key %s)", env.Port, env.TokenTTL, issuer.KeyID())
+	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("auth-service", metrics.HTTP(newMux(issuer, env.PreviousKeys...)))); err != nil {
 		log.Fatal(err)
 	}
 }

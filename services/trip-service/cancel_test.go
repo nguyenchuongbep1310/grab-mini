@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
@@ -74,9 +75,7 @@ func newCancelEnv(t *testing.T) *cancelEnv {
 	t.Cleanup(func() { rdb.Close() })
 
 	s := &server{db: db, rdb: rdb, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: registry(t)}
-	secret := "0123456789abcdef0123456789abcdef"
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	return &cancelEnv{db, s, s.routes(verifier), issuer}
 }
 

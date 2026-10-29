@@ -1,8 +1,16 @@
 package auth
 
 import (
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -10,19 +18,23 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const testSecret = "0123456789abcdef0123456789abcdef" // 32 bytes
+func newKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub, priv
+}
 
 func newPair(t *testing.T) (*Issuer, *Verifier) {
 	t.Helper()
-	i, err := NewIssuer(testSecret, time.Hour)
+	pub, priv := newKey(t)
+	i, err := NewIssuer(priv, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := NewVerifier(testSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return i, v
+	return i, NewVerifier(NewKeySet(pub))
 }
 
 func TestATokenRoundTrips(t *testing.T) {
@@ -38,14 +50,15 @@ func TestATokenRoundTrips(t *testing.T) {
 	if time.Until(exp) < 59*time.Minute {
 		t.Errorf("expires in %s, want about an hour", time.Until(exp))
 	}
+	parsed, _, _ := jwt.NewParser().ParseUnverified(tok, jwt.MapClaims{})
+	if parsed.Header["kid"] != i.KeyID() || parsed.Header["alg"] != "EdDSA" {
+		t.Errorf("header = %v, want kid %s and alg EdDSA", parsed.Header, i.KeyID())
+	}
 }
 
-func TestAShortSecretIsRefused(t *testing.T) {
-	if _, err := NewIssuer("short", time.Hour); err == nil {
-		t.Error("NewIssuer accepted a short testSecret")
-	}
-	if _, err := NewVerifier("short"); err == nil {
-		t.Error("NewVerifier accepted a short testSecret")
+func TestAShortOrWrongKindOfKeyIsRefused(t *testing.T) {
+	if _, err := NewIssuer(ed25519.PrivateKey("short"), time.Hour); err == nil {
+		t.Error("NewIssuer accepted a short key")
 	}
 }
 
@@ -60,20 +73,30 @@ func TestIssueRefusesAnUnknownRoleOrNoSubject(t *testing.T) {
 }
 
 func TestVerifyRejectsWhatItShould(t *testing.T) {
-	i, v := newPair(t)
+	pub, priv := newKey(t)
+	i, _ := NewIssuer(priv, time.Hour)
+	v := NewVerifier(NewKeySet(pub))
+	_, otherPriv := newKey(t)
+
 	good := func() jwt.RegisteredClaims {
 		return jwt.RegisteredClaims{
 			Subject: "rider-1", Issuer: "grab-mini", Audience: jwt.ClaimStrings{"grab-mini-api"},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		}
 	}
-	sign := func(method jwt.SigningMethod, key any, c claims) string {
-		s, err := jwt.NewWithClaims(method, c).SignedString(key)
+	// sign builds a token by hand, with a kid unless the case says otherwise.
+	sign := func(method jwt.SigningMethod, key any, kid string, c claims) string {
+		tok := jwt.NewWithClaims(method, c)
+		if kid != "" {
+			tok.Header["kid"] = kid
+		}
+		s, err := tok.SignedString(key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return s
 	}
+	kid := i.KeyID()
 
 	expired := good()
 	expired.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Hour))
@@ -88,26 +111,108 @@ func TestVerifyRejectsWhatItShould(t *testing.T) {
 
 	mine, _, _ := i.Issue(Rider, "rider-1")
 	cases := map[string]string{
-		"garbage":            "not a token",
-		"empty":              "",
-		"wrong testSecret":   sign(jwt.SigningMethodHS256, []byte("a-different-testSecret-of-32-bytes!!!!"), claims{Rider, good()}),
-		"expired":            sign(jwt.SigningMethodHS256, []byte(testSecret), claims{Rider, expired}),
-		"no expiry":          sign(jwt.SigningMethodHS256, []byte(testSecret), claims{Rider, noExp}),
-		"wrong audience":     sign(jwt.SigningMethodHS256, []byte(testSecret), claims{Rider, wrongAud}),
-		"wrong issuer":       sign(jwt.SigningMethodHS256, []byte(testSecret), claims{Rider, wrongIss}),
-		"no subject":         sign(jwt.SigningMethodHS256, []byte(testSecret), claims{Rider, noSub}),
-		"unknown role":       sign(jwt.SigningMethodHS256, []byte(testSecret), claims{"admin", good()}),
-		"alg none":           sign(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, claims{Rider, good()}),
-		"other HMAC variant": sign(jwt.SigningMethodHS512, []byte(testSecret), claims{Rider, good()}),
-		"tampered":           mine[:len(mine)-2] + "xx",
+		"garbage":        "not a token",
+		"empty":          "",
+		"other key":      sign(jwt.SigningMethodEdDSA, otherPriv, kid, claims{Rider, good()}),
+		"expired":        sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, expired}),
+		"no expiry":      sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, noExp}),
+		"wrong audience": sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, wrongAud}),
+		"wrong issuer":   sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, wrongIss}),
+		"no subject":     sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, noSub}),
+		"unknown role":   sign(jwt.SigningMethodEdDSA, priv, kid, claims{"admin", good()}),
+		"no kid":         sign(jwt.SigningMethodEdDSA, priv, "", claims{Rider, good()}),
+		"unknown kid":    sign(jwt.SigningMethodEdDSA, priv, "not-a-kid", claims{Rider, good()}),
+		"alg none":       sign(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, kid, claims{Rider, good()}),
+		"tampered":       mine[:len(mine)-2] + "xx",
 	}
 	for name, tok := range cases {
 		if _, err := v.Verify(tok); err == nil {
 			t.Errorf("%s: token was accepted", name)
+		} else if !errors.Is(err, ErrInvalidToken) {
+			t.Errorf("%s: error %v doesn't wrap ErrInvalidToken", name, err)
 		}
 	}
 	if _, err := v.Verify(mine); err != nil {
 		t.Errorf("a good token was rejected: %v", err)
+	}
+}
+
+// The classic algorithm-confusion attacks: a token "signed" with HMAC using
+// the public key (or the published JWKS bytes, or a legacy shared secret) as
+// the secret, or with an RSA/ECDSA algorithm, must never verify.
+func TestAlgorithmConfusionIsRejected(t *testing.T) {
+	pub, priv := newKey(t)
+	i, _ := NewIssuer(priv, time.Hour)
+	v := NewVerifier(NewKeySet(pub))
+	c := claims{Rider, jwt.RegisteredClaims{
+		Subject: "rider-1", Issuer: "grab-mini", Audience: jwt.ClaimStrings{"grab-mini-api"},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}}
+	hmacSecrets := map[string][]byte{
+		"raw public key":         pub,
+		"public key as base64":   []byte(b64(pub)),
+		"published JWKS":         i.JWKS(),
+		"legacy dev HS256 value": []byte("grab-mini-dev-secret-not-for-production!"),
+	}
+	for name, secretBytes := range hmacSecrets {
+		for _, m := range []jwt.SigningMethod{jwt.SigningMethodHS256, jwt.SigningMethodHS384, jwt.SigningMethodHS512} {
+			tok := jwt.NewWithClaims(m, c)
+			tok.Header["kid"] = i.KeyID()
+			s, err := tok.SignedString(secretBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := v.Verify(s); err == nil {
+				t.Errorf("%s with %s was accepted", m.Alg(), name)
+			}
+		}
+	}
+
+	// A hand-built HS256 token that is *correctly* signed with the public key.
+	hdr := b64([]byte(`{"alg":"HS256","typ":"JWT","kid":"` + i.KeyID() + `"}`))
+	body := b64([]byte(`{"role":"rider","sub":"rider-1","iss":"grab-mini","aud":["grab-mini-api"],"exp":` + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + `}`))
+	mac := hmac.New(sha256.New, pub)
+	mac.Write([]byte(hdr + "." + body))
+	if _, err := v.Verify(hdr + "." + body + "." + b64(mac.Sum(nil))); err == nil {
+		t.Error("an HS256 token keyed with the public key was accepted")
+	}
+
+	// alg:none with and without a signature segment.
+	none := b64([]byte(`{"alg":"none","typ":"JWT","kid":"`+i.KeyID()+`"}`)) + "." + body
+	for _, tok := range []string{none + ".", none + "." + b64([]byte("sig"))} {
+		if _, err := v.Verify(tok); err == nil {
+			t.Error("an alg:none token was accepted")
+		}
+	}
+}
+
+func TestKeyIDIsTheRFC7638Thumbprint(t *testing.T) {
+	// RFC 8037 appendix A.3: the thumbprint of the example Ed25519 key.
+	x, _ := base64.RawURLEncoding.DecodeString("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo")
+	if got, want := KeyID(ed25519.PublicKey(x)), "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"; got != want {
+		t.Errorf("KeyID = %s, want %s", got, want)
+	}
+}
+
+func TestPEMRoundTrip(t *testing.T) {
+	pub, priv := newKey(t)
+	der, _ := x509.MarshalPKCS8PrivateKey(priv)
+	got, err := ParsePrivateKey(string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})))
+	if err != nil || !got.Equal(priv) {
+		t.Fatalf("ParsePrivateKey = %v", err)
+	}
+	pubDER, _ := x509.MarshalPKIXPublicKey(pub)
+	bundle := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})) +
+		string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+	keys, err := ParsePublicKeys(bundle)
+	if err != nil || len(keys) != 2 || !keys[0].Equal(pub) {
+		t.Fatalf("ParsePublicKeys = %v, %v", keys, err)
+	}
+	if _, err := ParsePrivateKey("nope"); err == nil {
+		t.Error("garbage parsed as a private key")
+	}
+	if _, err := ParsePublicKeys("nope"); err == nil {
+		t.Error("garbage parsed as a public key")
 	}
 }
 

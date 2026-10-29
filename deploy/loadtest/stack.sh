@@ -23,6 +23,8 @@ mkdir -p "$DIR/bin" "$DIR/logs"
 export KAFKA_BROKERS REDIS_ADDR DATABASE_URL
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 export LOG_LEVEL=${LOG_LEVEL:-warn}
+# Tokens use the published development Ed25519 key, accepted only with APP_ENV=development.
+export APP_ENV=${APP_ENV:-development}
 
 # name  port-env  metrics-port-for-workers
 SERVICES="dev-registry auth-service order-service matching-service trip-service driver-location-service notification-service rating-service location-gateway"

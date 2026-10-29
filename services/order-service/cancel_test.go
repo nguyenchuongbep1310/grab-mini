@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
@@ -40,9 +41,7 @@ func newCancelEnv(t *testing.T) *cancelEnv {
 	t.Helper()
 	db := testDB(t)
 	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: fakeRegistry(t)}
-	secret := "0123456789abcdef0123456789abcdef"
-	issuer, _ := auth.NewIssuer(secret, time.Hour)
-	verifier, _ := auth.NewVerifier(secret)
+	issuer, verifier := authtest.Pair(t, time.Hour)
 	return &cancelEnv{s, db, s.routes(verifier), issuer}
 }
 

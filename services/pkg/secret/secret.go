@@ -23,6 +23,13 @@ import (
 // Production reports whether APP_ENV=production.
 func Production() bool { return strings.EqualFold(os.Getenv("APP_ENV"), "production") }
 
+// Development reports whether APP_ENV=development. Unlike the other
+// development defaults (which apply whenever APP_ENV is not "production"),
+// key material that is public in this repository is only used when a
+// developer says so explicitly, so a deployment that forgot to set APP_ENV
+// fails closed instead of trusting a published key.
+func Development() bool { return strings.EqualFold(os.Getenv("APP_ENV"), "development") }
+
 // ErrMissing is returned when a secret is not set and no default is allowed.
 var ErrMissing = errors.New("secret not set")
 

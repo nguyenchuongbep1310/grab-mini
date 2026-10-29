@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,11 +12,11 @@ import (
 	"grab-mini/pkg/auth"
 )
 
-const testSecret = "0123456789abcdef0123456789abcdef"
+var testPub, testPriv, _ = ed25519.GenerateKey(nil)
 
 func post(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	issuer, err := auth.NewIssuer(testSecret, time.Hour)
+	issuer, err := auth.NewIssuer(testPriv, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestIssuesATokenTheServicesAccept(t *testing.T) {
 	if err := jsonDecode(rec, &resp); err != nil {
 		t.Fatal(err)
 	}
-	v, _ := auth.NewVerifier(testSecret)
+	v := auth.NewVerifier(auth.NewKeySet(testPub))
 	if id, err := v.Verify(resp.Token); err != nil || id.Subject != "driver-3" || id.Role != auth.Driver {
 		t.Errorf("Verify = %+v, %v", id, err)
 	}
@@ -57,4 +58,42 @@ func TestRejectsBadRequests(t *testing.T) {
 
 func jsonDecode(rec *httptest.ResponseRecorder, v any) error {
 	return json.NewDecoder(rec.Body).Decode(v)
+}
+
+func TestPublishesTheVerificationKeysAsJWKS(t *testing.T) {
+	issuer, _ := auth.NewIssuer(testPriv, time.Hour)
+	oldPub, _, _ := ed25519.GenerateKey(nil)
+	rec := httptest.NewRecorder()
+	newMux(issuer, oldPub).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "public") || !strings.Contains(cc, "max-age=") {
+		t.Errorf("Cache-Control = %q, want public with a max-age", cc)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "json") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	keys, err := auth.ParseJWKS(rec.Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || !keys[issuer.KeyID()].Equal(testPub) || !keys[auth.KeyID(oldPub)].Equal(oldPub) {
+		t.Errorf("published keys = %d, want the signing key and the retired one", len(keys))
+	}
+	// The private key must never appear in what is published.
+	if strings.Contains(rec.Body.String(), `"d"`) {
+		t.Error("the JWKS has a private member")
+	}
+}
+
+func TestATokenVerifiesAgainstThePublishedJWKS(t *testing.T) {
+	issuer, _ := auth.NewIssuer(testPriv, time.Hour)
+	srv := httptest.NewServer(newMux(issuer))
+	defer srv.Close()
+	tok, _, _ := issuer.Issue(auth.Rider, "rider-9")
+	v := auth.NewVerifier(auth.NewJWKSClient(srv.URL + "/.well-known/jwks.json"))
+	if id, err := v.Verify(tok); err != nil || id.Subject != "rider-9" {
+		t.Errorf("Verify via JWKS = %+v, %v", id, err)
+	}
 }

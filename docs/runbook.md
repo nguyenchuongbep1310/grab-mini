@@ -217,8 +217,9 @@ Mã 5xx nghĩa là một trong ba thứ đó hỏng. Phân biệt bằng log c�
   thấy (một phiên bản schema mới). Vì vậy sự cố registry thường lộ ra sau một lần deploy hoặc scale-out, không phải ngay
   lúc registry chết. Khôi phục registry, rồi kiểm tra `/readyz`.
 - **Postgres down:** xem [Pods not ready](#pods-not-ready); failover của Postgres là việc của nhà cung cấp/DBA.
-- **401 tăng đột ngột** (không phải 5xx, nhưng người dùng thấy lỗi): `JWT_SECRET` không đồng nhất giữa các service
-  hoặc token hết hạn hàng loạt. Tất cả service verify và nhà phát hành token phải dùng cùng một secret.
+- **401 tăng đột ngột** (không phải 5xx, nhưng người dùng thấy lỗi): `JWT_JWKS_URL` không tới được (xem log `auth: refreshing signing keys`, và NetworkPolicy egress `allow-egress-jwks`),
+  nhà phát hành vừa xoay khóa (service tự lấy khóa mới khi gặp `kid` lạ, tối đa 15 giây một lần), hoặc token hết hạn hàng loạt.
+  Xem [security.md](security.md).
 
 ## Surge pricing
 
@@ -285,8 +286,10 @@ Không replay `driver.location.updated` (vị trí cũ bị loại vì `timestam
 
 - **Mật khẩu Kafka của một service:** xóa Secret do Strimzi tạo cho `KafkaUser` đó để nó sinh lại, rồi restart pod của service
   (mật khẩu chỉ được đọc lúc khởi động). Làm lần lượt từng service.
-- **`JWT_SECRET`:** dùng chung HS256, nên đổi là **mọi token hiện có mất hiệu lực**. Đổi Secret `grab-mini-jwt` rồi restart
-  *tất cả* service cùng lúc (nhà phát hành token và các service verify). App tự lấy token mới khi nhận 401.
+- **Khóa ký token (Ed25519):** chỉ nhà phát hành giữ khóa riêng. Xoay không làm mất token đang sống: cấp khóa mới cho nhà phát hành,
+  giữ khóa cũ ở `JWT_PREVIOUS_PUBLIC_KEYS` đến khi token cuối cùng hết hạn (`TOKEN_TTL` + 10 phút cache). Các service dùng JWKS không cần restart.
+  Chi tiết trong [security.md](security.md).
+- **Mật khẩu Schema Registry:** đổi Secret `grab-mini-schema-registry` rồi restart (đọc lúc khởi động).
 - **Mật khẩu Postgres:** đổi trong Secret `grab-mini-db-<service>` rồi restart; service đọc `DATABASE_URL` lúc khởi động.
 
 ### Scale tay
