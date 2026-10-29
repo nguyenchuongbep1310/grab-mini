@@ -34,6 +34,7 @@ TOPICS = {
     "order.cancelled": (6, 7 * DAY, 2),
     "trip.status.changed": (12, 7 * DAY, 2),
     "trip.rated": (6, 7 * DAY, 2),
+    "payment.recorded": (6, 7 * DAY, 2),
     "driver.location.updated": (48, 1 * DAY, 1),
 }
 
@@ -44,6 +45,8 @@ SERVICES = {
     "order-service": dict(port=3001, kind="api", db=True, redis=True, quote=True, scale=("lag", 2, 6)),
     "trip-service": dict(port=3002, kind="api", db=True, redis=True, scale=("lag", 2, 12)),
     "rating-service": dict(port=3004, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
+    # Settles rides: fare, tip and cancellation fee into a double-entry ledger. No Redis.
+    "payment-service": dict(port=3008, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
@@ -54,7 +57,7 @@ SERVICES = {
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
-MIGRATING = ["order-service", "trip-service", "rating-service"]
+MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service"]
 
 # Dedupe tables grow one row per event and are only read for a redelivery, so
 # rows older than anything Kafka or the DLQ can still hand back are dead
@@ -65,6 +68,9 @@ DEDUPE_RETENTION_DAYS = 30
 RETENTION = {
     "trip-processed-events": ("trip-service", "processed_events", "processed_at"),
     "rating-rating-events": ("rating-service", "rating_events", "processed_at"),
+    # Safe to prune: a payment is unique per (trip, kind), so a very late redelivery is still refused.
+    # The ledger, payments and order_prices (a late DLQ redrive still needs the price) are never pruned.
+    "payment-payment-events": ("payment-service", "payment_events", "processed_at"),
 }
 POSTGRES_IMAGE = "postgres:16-alpine"
 REDIS_IMAGE = "redis:7.4.12-alpine"

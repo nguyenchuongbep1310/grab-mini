@@ -38,6 +38,13 @@ body {
 .rating-box { display: flex; flex-direction: column; align-items: center; gap: var(--gm-space-3); text-align: center; }
 .rating-box .gm-btn { margin-top: var(--gm-space-1); }
 
+.receipt { margin: 0; display: flex; flex-direction: column; gap: var(--gm-space-2); font-size: var(--gm-text-sm); }
+.receipt > div { display: flex; justify-content: space-between; }
+.receipt dt { color: var(--gm-text-muted); }
+.receipt dd { margin: 0; font-variant-numeric: tabular-nums; }
+.receipt__total { font-weight: 700; border-top: 1px solid currentColor; padding-top: var(--gm-space-2); }
+.receipt__total dt { color: inherit; }
+.receipt__pending { margin: 0; font-size: var(--gm-text-sm); color: var(--gm-text-muted); }
 .tip-picker { display: flex; flex-direction: column; gap: var(--gm-space-2); width: 100%; text-align: left; }
 .tip-picker__label { font-size: 0.875rem; font-weight: 600; }
 .tip-picker__comment, .tip-picker__custom { width: 100%; box-sizing: border-box; padding: var(--gm-space-2); font: inherit; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; opacity: 0.9; }

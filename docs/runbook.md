@@ -306,6 +306,43 @@ Bối cảnh: CronJob `backup-<service>` (6 giờ một lần) chạy `pg_dump -
 5. **Dọn bản sao lưu cũ** là lifecycle rule của bucket (ví dụ 35 ngày), không phải của job. Cấp cho credential của job quyền ghi mà không có quyền xóa:
    job bị xâm phạm thì không xóa được các bản sao lưu.
 
+## Payments
+
+**Cảnh báo:** `PaymentConsumerLagHigh` (ticket), `PaymentDeadLettered` (page), `LedgerUnbalancedTransactionRejected` (page).
+**Nghĩa là:** Payment Service không xử lý kịp, hoặc không xử lý được, một event `order.created` / `trip.status.changed` /
+`trip.rated`. Hậu quả: một chuyến **chưa được tính tiền** (cước, tip hoặc phí huỷ), hoặc tài xế chưa được ghi có.
+Không có tiền nào bị tính sai: mỗi khoản là một dòng `payments` duy nhất theo `(trip_id, kind)` và một giao dịch sổ cái
+cân bằng, nên xử lý lại luôn an toàn.
+
+**Kiểm tra theo thứ tự:**
+
+1. **Lag:** mục [Consumer lag](#consumer-lag), group `payment-service-group` (một group đọc cả ba topic). Số replica bị chặn
+   bởi số partition.
+2. **Dead letter:** `PaymentDeadLettered` có nhãn `topic`. Xem nội dung bằng `dlq-redrive -topic <topic> -dry-run`.
+   Hai nguyên nhân hay gặp:
+   - `no price recorded yet for order ...`: `trip.status.changed` đến mà `order.created` chưa được ghi (hai topic khác nhau
+     nên không có thứ tự). Consumer đã thử lại qua các tầng retry (5s, 1 phút, 10 phút). Nếu vẫn lỗi thì `order.created`
+     thật sự thiếu (đã dead-letter, hoặc đơn tạo trước khi có Payment Service): xem `order.created.DLQ`, redrive nó
+     **trước**, rồi redrive `trip.status.changed`.
+   - `invalid payment event` / `invalid amount`: event không bao giờ tính được (thiếu driver, tip âm, tiền tệ khác VND).
+     Redrive vô ích; sửa nguồn gửi.
+3. **Nhà cung cấp thanh toán** lỗi hoặc timeout: `payment_provider_errors_total` tăng, event đi theo đường retry. Khóa
+   idempotency (`fare:<tripId>`, `tip:<tripId>`, `cancellation_fee:<tripId>`) làm việc thử lại không tính hai lần.
+   Redrive sau khi nhà cung cấp khỏe lại.
+4. **`LedgerUnbalancedTransactionRejected`:** code dựng một giao dịch không cộng về 0, và bị từ chối **trước khi ghi**.
+   Đó là bug, không phải sự cố dữ liệu. Event liên quan nằm trong DLQ; sửa code, deploy rồi redrive.
+5. **Kiểm tra sổ cái bằng SQL** (phải trả về 0 dòng và tổng 0):
+   ```sql
+   SELECT txn_id, SUM(amount) FROM ledger_entries GROUP BY txn_id HAVING SUM(amount) <> 0;
+   SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;
+   ```
+6. **Một chuyến không có thanh toán?** `SELECT * FROM payments WHERE trip_id = '...'`. Không có dòng nào và không có DLQ:
+   kiểm tra `payments_skipped_total{reason}` (đơn không có giá, chuyến miễn phí, tài xế huỷ, `CANCELLATION_FEE_VND=0`).
+   Một dòng `DECLINED` nghĩa là nhà cung cấp từ chối thẻ của rider; dòng đó không có bút toán sổ cái và hệ thống **không
+   tự thử lại** (xử lý nợ là việc của người vận hành).
+
+**Không nên làm:** sửa hoặc xoá `ledger_*` (có trigger chặn; sổ cái chỉ thêm). Muốn sửa sai, thêm một giao dịch đảo.
+
 ## Pods not ready
 
 **Alerts:** `DeploymentReplicasUnavailable`.

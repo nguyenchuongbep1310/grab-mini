@@ -394,3 +394,42 @@ mới được kiểm tra schema + kiểm tra chéo và chạy các script của
 RTO khôi phục Postgres chưa đo ở kích thước production (drill cục bộ chỉ ~8 KB); sao lưu Postgres là dump 6 giờ một lần, không PITR (cần Postgres managed); Redis Cluster chưa hỗ trợ
 (script dựng key động); Redis vẫn một master (Sentinel cho sẵn sàng chứ không cho dung lượng), và hệ quả của việc mất vài giây ghi cuối khi failover (lease, `match:<orderId>`) chưa được kiểm thử.
 Cùng với các giới hạn ở mục 13 và 14 và việc nhỏ từ giai đoạn 2 (cache ánh xạ tài xế→rider nếu đo thấy cần).
+
+## 16. Thanh toán: Payment Service (đã làm)
+
+Chuyến đi giờ được tính tiền. Không có cổng thanh toán thật: `PaymentProvider` là một interface (`services/payment-service/provider.go`)
+và chỉ có bản `fake` (sandbox, rider có id bắt đầu bằng `decline-` bị từ chối). Service **không bao giờ** nhận số thẻ: `ChargeRequest`
+chỉ có `RiderID`, phương thức thanh toán nằm ở phía nhà cung cấp.
+
+**Giá đến Payment Service bằng cách nào.** Đã chọn: tiêu thụ `order.created` và giữ bản sao cục bộ `order_prices(order_id, rider_id, price)`
+(giá đã khóa lúc đặt, v3 của schema). Phương án còn lại là thêm trường `price` (có default) vào `trip.status.changed`, nhưng Trip Service
+không biết giá: phải mở rộng cả `order.matched` (Matching) và Trip Service, tức sửa ba service và ba schema chỉ để chở một số mà
+Order Service đã công bố. Chọn bản sao cục bộ thì **không đổi schema nào**, không đổi service nào khác, và Payment Service không phụ thuộc
+một lời gọi đồng bộ sang Order Service. Cái giá: hai topic khác nhau nên không có thứ tự, `trip.status.changed` có thể đến trước
+`order.created`. Khi đó handler trả lỗi tạm thời và event đi qua các tầng retry (5s, 1 phút, 10 phút); chỉ khi `order.created` thật sự
+không bao giờ đến thì nó vào DLQ và cảnh báo `PaymentDeadLettered` page. Đơn tạo trước khi có giá (`price` null) không bị tính tiền
+(`payments_skipped_total{reason="no_price"}`). Chỉ schema mới `payment.recorded` được thêm; mọi trường sau eventId/occurredAt/định danh
+đều có default, nên tiến hóa về sau vẫn BACKWARD compatible.
+
+**Quy tắc tiền.**
+- Cước: đúng giá đã khóa, tính khi `trip.status.changed` = COMPLETED.
+- Tip: `trip.rated.tipAmount`, một khoản tính riêng (`TIP`), tài xế nhận đủ, không chiết khấu.
+- Huỷ: huỷ khi đơn còn PENDING thì không có chuyến và không có event nào Payment Service đọc (nó không đọc `order.cancelled`), nên không
+  bao giờ bị tính. Rider huỷ **sau khi** có tài xế (`trip.status.changed` CANCELLED, `cancelledBy=RIDER`) chịu phí `CANCELLATION_FEE_VND`,
+  **mặc định 0** để giữ nguyên hành vi hiện tại (huỷ vẫn miễn phí; bật bằng cấu hình), tối đa bằng giá chuyến. Tài xế huỷ, hoặc
+  `cancelledBy` rỗng (event cũ), thì không tính.
+- Chiết khấu nền tảng: `PLATFORM_COMMISSION_BPS`, mặc định 2000 (20%) cho cước và phí huỷ; làm tròn xuống, tài xế nhận phần còn lại, nên
+  không một đồng nào sinh ra hay mất đi.
+
+**Sổ cái.** Bút toán kép trong Postgres: tài khoản `RIDER`, `DRIVER_PAYABLE`, `PLATFORM_REVENUE`; mỗi giao dịch là các bút toán có dấu
+(âm = trừ khỏi tài khoản) cộng đúng bằng 0. Tiền là `BIGINT` đơn vị nhỏ nhất (VND không có đơn vị nhỏ hơn đồng), không có float nào sau
+chỗ đổi `price` (float64 của event) sang số nguyên. Cân bằng được kiểm **hai lần**: trong code (`Txn.Validate`, trước khi gọi nhà cung cấp
+và trước khi ghi; vi phạm đếm vào `ledger_unbalanced_rejected_total`) và trong DB (constraint trigger hoãn đến lúc commit); sổ cái chỉ
+được thêm (trigger chặn UPDATE/DELETE). Số dư là tổng bút toán, không lưu riêng. Mỗi khoản duy nhất theo `(trip_id, kind)`;
+event dedupe theo `eventId` trong **cùng transaction** với `payments`, bút toán và dòng outbox của `payment.recorded`. Gọi nhà cung cấp
+nằm ngoài transaction và idempotent theo khóa (`fare:<tripId>`), nên sập giữa chừng rồi thử lại không tính hai lần.
+Từ chối thẻ (`DECLINED`) được ghi và công bố, không có bút toán, không tự thử lại.
+
+**Giới hạn đã biết:** nhà cung cấp là giả; chưa có chi trả thật cho tài xế (số dư `DRIVER_PAYABLE` chỉ ghi nhận), chưa hoàn tiền/đảo bút toán,
+chưa xử lý nợ khi thẻ bị từ chối, chưa đối soát với báo cáo của nhà cung cấp. Egress cần cho Payment Service: Postgres, Kafka, Schema
+Registry, OTLP collector (không cần Redis); khi có nhà cung cấp thật thì thêm HTTPS tới nhà cung cấp đó.

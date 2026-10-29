@@ -29,6 +29,7 @@ use (
 	./services/pkg/serve
 	./services/pkg/surge
 	./services/pkg/tracing
+	./services/payment-service
 	./services/pricing-service
 	./services/rating-service
 	./services/trip-service

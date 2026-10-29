@@ -92,6 +92,21 @@ spec:
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaTopic
 metadata:
+  name: payment-recorded
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  topicName: payment.recorded
+  partitions: 6
+  replicas: 3
+  config:
+    retention.ms: 604800000
+    min.insync.replicas: 2
+    compression.type: producer
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
   name: driver-location-updated
   labels:
     strimzi.io/cluster: grab-mini

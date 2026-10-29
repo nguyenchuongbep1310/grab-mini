@@ -131,6 +131,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | Notification Service | 3003 | all of the above | | WebSocket connections (per instance), Redis (routing state and Pub/Sub between instances) |
 | Auth Service | 3005 | | | none (development token issuer) |
 | Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored |
+| Payment Service | 3008 | `order.created` (the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (double-entry ledger, payments); a sandbox `PaymentProvider`, no real card processor ([production-design §16](../specs/ride-booking-mini/production-design.md)) |
 | Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
 | `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
 
@@ -190,6 +191,10 @@ curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/
 # Rating Service
 curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count": 3, "totalTips": 30000, "tipCount": 2}
 curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a driver's own reviews, newest first (driver token only)
+
+# Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
+curl "localhost:3008/payments?tripId=<tripId>" -H "Authorization: Bearer <token>"   # fare, tip and cancellation fee of one trip, plus the captured total
+curl localhost:3008/drivers/driver-1/earnings -H "Authorization: Bearer <driver token>"   # {"total": 98000, "fares": 80000, "tips": 18000, "commission": 20000, "trips": 1, ...}; optional ?from=&to= (RFC 3339)
 ```
 
 Repeating `pickup` or `complete` is a no-op. The WebSocket is `ws://localhost:3003/ws/rider/<id>` or `/ws/driver/<id>`, pushing `{"type": "...", "payload": {...}}`.

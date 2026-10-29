@@ -137,8 +137,43 @@ type TripRated struct {
 	DriverID string `json:"driverId" avro:"driverId"`
 	Stars    int    `json:"stars" avro:"stars"`
 	Comment  string `json:"comment" avro:"comment"`
-	// TipAmount is a recorded amount in whole currency units (VND has no
-	// minor unit); no money moves, there is no payment system.
+	// TipAmount is in whole currency units (VND has no minor unit, so these
+	// are also its minor units). Payment Service charges it to the rider.
 	TipAmount int64  `json:"tipAmount" avro:"tipAmount"`
 	Currency  string `json:"currency" avro:"currency"`
+}
+
+// Payment kinds and outcomes carried by PaymentRecorded.
+const (
+	PaymentKindFare            = "FARE"
+	PaymentKindTip             = "TIP"
+	PaymentKindCancellationFee = "CANCELLATION_FEE"
+
+	PaymentStatusCaptured = "CAPTURED"
+	PaymentStatusDeclined = "DECLINED"
+)
+
+// PaymentRecorded is published by Payment Service once for each charge it
+// settles (a trip's fare, its tip, or a cancellation fee), in the same
+// transaction as the ledger write. All amounts are integer minor units of
+// Currency (VND has none, so whole dong). For a CAPTURED payment
+// DriverAmount + PlatformAmount == Amount; for a DECLINED one both are 0 and
+// no ledger entries exist.
+type PaymentRecorded struct {
+	Envelope
+	PaymentID string `json:"paymentId" avro:"paymentId"`
+	TripID    string `json:"tripId" avro:"tripId"`
+	OrderID   string `json:"orderId" avro:"orderId"`
+	RiderID   string `json:"riderId" avro:"riderId"`
+	DriverID  string `json:"driverId" avro:"driverId"`
+	// FARE, TIP or CANCELLATION_FEE.
+	Kind string `json:"kind" avro:"kind"`
+	// CAPTURED or DECLINED.
+	Status         string `json:"status" avro:"status"`
+	Amount         int64  `json:"amount" avro:"amount"`
+	DriverAmount   int64  `json:"driverAmount" avro:"driverAmount"`
+	PlatformAmount int64  `json:"platformAmount" avro:"platformAmount"`
+	Currency       string `json:"currency" avro:"currency"`
+	// The ledger transaction that booked it; empty when DECLINED.
+	LedgerTransactionID string `json:"ledgerTransactionId" avro:"ledgerTransactionId"`
 }

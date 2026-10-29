@@ -6,6 +6,7 @@ resources:
 - namespace.yaml
 - config.yaml
 - backup/order-service.yaml
+- backup/payment-service.yaml
 - backup/rating-service.yaml
 - backup/trip-service.yaml
 - dataops/config.yaml
@@ -13,6 +14,7 @@ resources:
 - kafka/topics.yaml
 - kafka/users.yaml
 - migrations/order-service.yaml
+- migrations/payment-service.yaml
 - migrations/rating-service.yaml
 - migrations/trip-service.yaml
 - monitoring/alerts.yaml
@@ -21,6 +23,7 @@ resources:
 - redis/redis.yaml
 - redis/scripts.yaml
 - retention/order-orders.yaml
+- retention/payment-payment-events.yaml
 - retention/rating-rating-events.yaml
 - retention/trip-processed-events.yaml
 - retention/trip-trips.yaml
@@ -30,6 +33,7 @@ resources:
 - services/matching-service.yaml
 - services/notification-service.yaml
 - services/order-service.yaml
+- services/payment-service.yaml
 - services/pricing-service.yaml
 - services/rating-service.yaml
 - services/trip-service.yaml

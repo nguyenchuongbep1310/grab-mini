@@ -10,6 +10,7 @@ const (
 	TopicDriverLocationUpdate = "driver.location.updated"
 	TopicTripStatusChanged    = "trip.status.changed"
 	TopicTripRated            = "trip.rated"
+	TopicPaymentRecorded      = "payment.recorded"
 )
 
 func DeadLetterTopic(topic string) string {

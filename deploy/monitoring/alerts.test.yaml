@@ -201,6 +201,95 @@ tests:
               description: "Kafka rejected an event for good (too large, say). The state change is saved but nobody was told. See outbox_dead."
               runbook: "docs/runbook.md#outbox-backlog"
 
+  # -------------------------------------------------------------------- payments
+  - name: payment-service falling behind is a ticket once it persists
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="payment-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 150 150 150 150 150 150 150'
+      - series: 'kafka_consumergroup_lag{consumergroup="payment-service-group", topic="order.created", partition="1"}'
+        values: '0 20 20 20 20 20 20 20'
+      - series: 'kafka_consumergroup_lag{consumergroup="rating-service-group", topic="trip.rated", partition="0"}'
+        values: '0 150 150 150 150 150 150 150'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: PaymentConsumerLagHigh
+        exp_alerts: []   # high, but not for five minutes yet
+      - eval_time: 7m
+        alertname: PaymentConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: payment-service-group}
+            exp_annotations:
+              summary: "payment-service-group is 170 messages behind"
+              description: "Completed trips are not being settled promptly: fares, tips and driver earnings are late."
+              runbook: "docs/runbook.md#payments"
+
+  - name: a small payment backlog, or another group's lag, is not a payment alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="payment-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 40 60 80 90 60 30 10'
+      - series: 'kafka_consumergroup_lag{consumergroup="rating-service-group", topic="trip.rated", partition="0"}'
+        values: '0 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: PaymentConsumerLagHigh
+        exp_alerts: []
+
+  - name: a dead-lettered payment event pages with the payments runbook, and the generic alert stays quiet for it
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="payment-service-group", topic="trip.status.changed", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'kafka_consumer_messages_total{group="payment-service-group", topic="trip.status.changed", result="ok"}'
+        values: '0 10 20 30 40 50 60 70'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PaymentDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PaymentDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, topic: trip.status.changed}
+            exp_annotations:
+              summary: "payment-service dead-lettered a message from trip.status.changed"
+              description: "A trip event could not be settled after its retries, so that ride has no payment. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#payments"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []   # one page, not two
+
+  - name: another service's dead letters do not raise the payment alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="trip-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PaymentDeadLettered
+        exp_alerts: []
+
+  - name: a rejected unbalanced ledger transaction pages, a clean ledger does not
+    interval: 1m
+    input_series:
+      - series: 'ledger_unbalanced_rejected_total'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LedgerUnbalancedTransactionRejected
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: LedgerUnbalancedTransactionRejected
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Payment Service built a ledger transaction that does not sum to zero"
+              description: "The transaction was refused (nothing was written), which means a bug in how charges are split. The affected events are dead-lettered."
+              runbook: "docs/runbook.md#payments"
+      - eval_time: 20m
+        alertname: LedgerUnbalancedTransactionRejected
+        exp_alerts: []   # resolves once the counter stops moving
+
   # -------------------------------------------------------------------- business
   - name: slow matching breaches the SLO
     interval: 1m

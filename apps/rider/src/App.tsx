@@ -29,6 +29,7 @@ import {
 } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
 import { checkOutcome, findActiveRide } from "./recovery";
+import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
 import { useQuote } from "./useQuote";
 import { useRide, type Phase } from "./useRide";
@@ -331,6 +332,7 @@ export function App() {
                 Cancel trip
               </Button>
             )}
+            {phase === "completed" && <Receipt tripId={tripId} rated={rated} tip={tip} />}
             {phase === "completed" && (
               <Card padding="sm">
                 <div className="rating-box">

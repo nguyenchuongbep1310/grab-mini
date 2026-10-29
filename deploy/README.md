@@ -17,7 +17,7 @@ docs/runbook.md             what to do when an alert fires
 
 | | |
 |---|---|
-| Services | order, trip, rating, notification, location-gateway, pricing (HTTP) and matching, driver-location (workers). **Auth Service is not deployed**: it hands a token to anyone and refuses to run in production. Put a real identity provider in front and have the services verify its tokens. |
+| Services | order, trip, rating, payment, notification, location-gateway, pricing (HTTP) and matching, driver-location (workers). **Auth Service is not deployed**: it hands a token to anyone and refuses to run in production. Put a real identity provider in front and have the services verify its tokens. |
 | Per pod | non-root, read-only filesystem, no capabilities; probes on a separate **admin port** (`9090`: `/livez`, `/readyz`, `/metrics`) that no ingress should route; `maxUnavailable: 0`; spread over zones and nodes; a PodDisruptionBudget; a 5 s `preStop` sleep so the pod leaves the endpoints before it drains |
 | Scaling | KEDA scales consumers on **Kafka lag** (replicas capped at the partition count) and APIs on CPU; the location gateway scales on CPU only |
 | Migrations | one Job per database-owning service (`<service> migrate`); the Deployments run with `RUN_MIGRATIONS=false` |
@@ -43,7 +43,7 @@ backup job fails loudly until you do). Development (`docker-compose.yml`) keeps 
 | Secret | Keys | Used by |
 |---|---|---|
 | `grab-mini-schema-registry` | `username`, `password`, `ca.crt` (the CA that signed the registry's certificate) | every service |
-| `grab-mini-db-order-service`, `-trip-service`, `-rating-service` | `url` (a Postgres URL) | that service and its migration Job |
+| `grab-mini-db-order-service`, `-trip-service`, `-rating-service`, `-payment-service` | `url` (a Postgres URL) | that service and its migration Job |
 | `grab-mini-redis` | `password` (used for Redis and its Sentinels) | the Redis pods and every service that uses Redis |
 | `grab-mini-backup` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (write-only on the bucket is enough) | the `backup-*` CronJobs |
 | `keda-kafka-auth` | `username` (`keda`), `password`, `ca.crt` | the KEDA Kafka scaler |
@@ -60,7 +60,7 @@ is there: with `APP_ENV=production` there are no development defaults.
 
 ```bash
 # 1. set the image of each service
-for s in order-service trip-service rating-service notification-service location-gateway pricing-service matching-service driver-location-service; do
+for s in order-service trip-service rating-service payment-service notification-service location-gateway pricing-service matching-service driver-location-service; do
   (cd deploy/k8s/base && kustomize edit set image ghcr.io/example/grab-mini/$s=$REGISTRY/$s:$TAG)
 done
 # 2. the cluster, the topics and the users, and wait for Kafka

@@ -238,6 +238,7 @@ spec:
       operator: In
       values:
       - order-service
+      - payment-service
       - rating-service
       - trip-service
   policyTypes:
@@ -311,6 +312,7 @@ spec:
       - location-gateway
       - notification-service
       - order-service
+      - payment-service
       - pricing-service
       - rating-service
       - trip-service

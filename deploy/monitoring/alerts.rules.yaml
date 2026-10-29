@@ -38,7 +38,8 @@ groups:
       - alert: KafkaMessagesDeadLettered
         # Any message at all: a dead letter in the transactional flow is an event
         # that was not processed (an order not matched, a rating not counted).
-        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!="driver.location.updated"}[5m])) > 0
+        # Payment Service has its own, more specific alert (PaymentDeadLettered).
+        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!="driver.location.updated", group!="payment-service-group"}[5m])) > 0
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.group }} dead-lettered messages from {{ $labels.topic }}"
@@ -187,6 +188,38 @@ groups:
         annotations:
           summary: "More than 5% of {{ $labels.route }} requests fail"
           runbook: "docs/runbook.md#booking-errors"
+
+  - name: grab-mini.payments
+    rules:
+      - alert: PaymentConsumerLagHigh
+        # Much lower than the generic 1000: a few hundred trips waiting means a few hundred
+        # riders not yet charged and drivers not yet credited. It does not need to be growing.
+        expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="payment-service-group"}) > 100
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "payment-service-group is {{ $value }} messages behind"
+          description: "Completed trips are not being settled promptly: fares, tips and driver earnings are late."
+          runbook: "docs/runbook.md#payments"
+
+      - alert: PaymentDeadLettered
+        # A dead letter here is a ride that was not charged (or a tip not paid out).
+        expr: sum by (topic) (increase(kafka_consumer_messages_total{group="payment-service-group", result="dead_lettered"}[5m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "payment-service dead-lettered a message from {{ $labels.topic }}"
+          description: "A trip event could not be settled after its retries, so that ride has no payment. Fix the cause, then redrive with dlq-redrive."
+          runbook: "docs/runbook.md#payments"
+
+      - alert: LedgerUnbalancedTransactionRejected
+        # Unbalanced ledger transactions are refused before any write, so no money is wrong,
+        # but the code that built one is: the event is dead-lettered and that trip is unpaid.
+        expr: sum(increase(ledger_unbalanced_rejected_total[10m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "Payment Service built a ledger transaction that does not sum to zero"
+          description: "The transaction was refused (nothing was written), which means a bug in how charges are split. The affected events are dead-lettered."
+          runbook: "docs/runbook.md#payments"
 
   - name: grab-mini.workloads
     rules:

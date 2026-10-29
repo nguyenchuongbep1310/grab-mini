@@ -9,6 +9,7 @@ dist/
 /services/*/driver-app-sim
 /services/*/notification-service
 /services/*/rating-service
+/services/*/payment-service
 .dev/
 
 # Redis snapshots from local test instances

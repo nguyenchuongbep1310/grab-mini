@@ -25,6 +25,7 @@ import {
   type TripAction,
 } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
+import { EarningsLine, TripEarnings } from "./Earnings";
 import { useDriverTrip, type Phase } from "./useDriverTrip";
 
 // Where the map sits until the first location arrives (central Ho Chi Minh City).
@@ -70,6 +71,8 @@ export function App() {
   const [pending, setPending] = useState<TripAction | null>(null);
   const [rating, setRating] = useState<DriverRating | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  // Bumped when a rating arrives: its tip is a payment that settles a moment later.
+  const [ratings, setRatings] = useState(0);
 
   const refreshRating = useCallback(() => {
     getDriverRating(driverId).then(setRating).catch(() => {});
@@ -98,6 +101,7 @@ export function App() {
       );
       // Rating Service updates its totals asynchronously, so give it a moment.
       setTimeout(refreshRating, 800);
+      setRatings((n) => n + 1);
       return;
     }
     dispatch({ type: "notification", message, driverId });
@@ -196,6 +200,7 @@ export function App() {
                   </span>
                 </div>
               )}
+              <EarningsLine driverId={driverId} refreshKey={ratings} />
             </>
           )}
 
@@ -247,6 +252,7 @@ export function App() {
                   </Button>
                 </div>
               )}
+              {(phase === "completed" || phase === "cancelled") && <TripEarnings tripId={tripId} refreshKey={ratings} />}
               {(phase === "completed" || phase === "cancelled") && (
                 <Button block onClick={() => dispatch({ type: "reset" })}>
                   Back online
