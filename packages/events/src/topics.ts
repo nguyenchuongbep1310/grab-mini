@@ -6,6 +6,7 @@ export const Topics = {
   DriverLocationUpdated: "driver.location.updated",
   TripStatusChanged: "trip.status.changed",
   TripRated: "trip.rated",
+  PaymentRecorded: "payment.recorded",
 } as const;
 
 export type Topic = (typeof Topics)[keyof typeof Topics];

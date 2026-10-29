@@ -244,3 +244,67 @@ export async function getLatestOrder(riderId: string): Promise<Order | null> {
     throw err;
   }
 }
+
+// ---- Payment Service ------------------------------------------------------
+// Amounts are whole VND (integer minor units; VND has none).
+const PAYMENT_API = "/payment-api";
+
+export type PaymentKind = "FARE" | "TIP" | "CANCELLATION_FEE";
+
+/** What a rider was charged for one trip. */
+export interface RiderPayment {
+  id: string;
+  kind: PaymentKind;
+  /** DECLINED when the payment provider refused the rider's payment method. */
+  status: "CAPTURED" | "DECLINED";
+  amount: number;
+  currency: string;
+  createdAt: string;
+}
+
+/** What a driver earns from one charge: their share, the gross and the platform's commission. */
+export interface DriverPayout {
+  id: string;
+  kind: PaymentKind;
+  status: "CAPTURED";
+  amount: number;
+  gross: number;
+  commission: number;
+  currency: string;
+  createdAt: string;
+}
+
+export interface DriverEarnings {
+  driverId: string;
+  currency: string;
+  /** The driver's share of every captured payment (fares + tips + cancellation fees). */
+  total: number;
+  fares: number;
+  tips: number;
+  cancellationFees: number;
+  commission: number;
+  /** Trips with a captured fare. */
+  trips: number;
+  /** What the platform currently owes the driver, from the ledger (all time). */
+  payableBalance: number;
+}
+
+/**
+ * The charges of one trip as the caller sees them: a rider gets `payments`, a
+ * driver `payouts`. Both are empty until Payment Service has settled the trip,
+ * so callers poll briefly after a trip completes.
+ */
+export function getTripPayments(
+  tripId: string,
+): Promise<{ tripId: string; currency: string; total: number; payments?: RiderPayment[]; payouts?: DriverPayout[] }> {
+  return request(`${PAYMENT_API}/payments?tripId=${encodeURIComponent(tripId)}`);
+}
+
+/** A driver's own earnings summary; optional RFC 3339 `from` (inclusive) and `to` (exclusive). */
+export function getDriverEarnings(driverId: string, range: { from?: string; to?: string } = {}): Promise<DriverEarnings> {
+  const q = new URLSearchParams();
+  if (range.from) q.set("from", range.from);
+  if (range.to) q.set("to", range.to);
+  const qs = q.toString();
+  return request(`${PAYMENT_API}/drivers/${driverId}/earnings${qs ? `?${qs}` : ""}`);
+}
