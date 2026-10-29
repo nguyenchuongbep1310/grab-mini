@@ -340,6 +340,80 @@ spec:
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
 metadata:
+  name: payment-service
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+    - resource:
+        type: topic
+        name: payment.recorded
+        patternType: literal
+      operations:
+      - Write
+      - Describe
+    - resource:
+        type: group
+        name: payment-service-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: order.created
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.created.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: trip.status.changed
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: trip.status.changed.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: trip.rated
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: trip.rated.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
   name: pricing-service
   labels:
     strimzi.io/cluster: grab-mini

@@ -19,7 +19,7 @@ for t in $topics; do
   "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BROKERS" --delete --topic "$t" >/dev/null 2>&1 || true
 done
 # the consumer groups too, so a new run starts from the new topics' beginning
-for g in $("$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" --list 2>/dev/null | grep -E '^(matching|order|trip|driver-location|notification|rating)-|^dlq-redrive'); do
+for g in $("$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" --list 2>/dev/null | grep -E '^(matching|order|trip|driver-location|notification|rating|payment)-|^dlq-redrive'); do
   "$KAFKA_BIN/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" --delete --group "$g" >/dev/null 2>&1 || true
 done
 

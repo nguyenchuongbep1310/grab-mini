@@ -9,11 +9,13 @@ resources:
 - kafka/topics.yaml
 - kafka/users.yaml
 - migrations/order-service.yaml
+- migrations/payment-service.yaml
 - migrations/rating-service.yaml
 - migrations/trip-service.yaml
 - monitoring/alerts.yaml
 - monitoring/podmonitors.yaml
 - network/policies.yaml
+- retention/payment-payment-events.yaml
 - retention/rating-rating-events.yaml
 - retention/trip-processed-events.yaml
 - scaling/keda.yaml
@@ -22,6 +24,7 @@ resources:
 - services/matching-service.yaml
 - services/notification-service.yaml
 - services/order-service.yaml
+- services/payment-service.yaml
 - services/pricing-service.yaml
 - services/rating-service.yaml
 - services/trip-service.yaml
