@@ -8,6 +8,11 @@
     {"name": "orderId", "type": "string"},
     {"name": "driverId", "type": "string"},
     {"name": "vehicleType", "type": "string", "default": "CAR"},
-    {"name": "riderId", "type": "string", "default": ""}
+    {"name": "riderId", "type": "string", "default": ""},
+    {"name": "pickup", "type": ["null", {
+      "type": "record", "name": "LatLng",
+      "fields": [{"name": "lat", "type": "double"}, {"name": "lng", "type": "double"}]
+    }], "default": null},
+    {"name": "dropoff", "type": ["null", "LatLng"], "default": null}
   ]
 }

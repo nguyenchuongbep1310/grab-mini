@@ -397,10 +397,29 @@ func TestCurrentEventsReadMessagesWrittenBeforeRiderId(t *testing.T) {
 		if err := New(url).Decode(ctx, events.TopicOrderMatched, data, &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.DriverID != "d1" || got.VehicleType != events.VehicleBike || got.RiderID != "" {
-			t.Errorf("got %+v, want the old fields intact and an empty riderId", got)
+		if got.DriverID != "d1" || got.VehicleType != events.VehicleBike || got.RiderID != "" || got.Pickup != nil || got.Dropoff != nil {
+			t.Errorf("got %+v, want the old fields intact, an empty riderId and no route", got)
 		}
 	})
+}
+
+func TestOrderMatchedCarriesTheRoute(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+	c := New(url)
+	in := events.OrderMatched{Envelope: sampleOrder.Envelope, OrderID: "o1", DriverID: "d1", VehicleType: events.VehicleCar,
+		Pickup: &events.LatLng{Lat: 10.1, Lng: 106.2}, Dropoff: &events.LatLng{Lat: 10.3, Lng: 106.4}}
+	data, err := c.Encode(ctx, events.TopicOrderMatched, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got events.OrderMatched
+	if err := c.Decode(ctx, events.TopicOrderMatched, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Pickup == nil || *got.Pickup != *in.Pickup || got.Dropoff == nil || *got.Dropoff != *in.Dropoff {
+		t.Errorf("got %+v, want the route back", got)
+	}
 }
 
 func TestTripRatedV1PayloadDecodesWithZeroTip(t *testing.T) {

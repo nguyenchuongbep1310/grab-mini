@@ -97,6 +97,12 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	req.RiderID = caller.Subject
 
+	idemKey, err := idempotencyKey(r.Header)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+
 	if !isValidLatLng(req.Pickup) || !isValidLatLng(req.Dropoff) {
 		http.Error(w, `{"error":"pickup {lat,lng} and dropoff {lat,lng} are required"}`, http.StatusBadRequest)
 		return
@@ -110,8 +116,37 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orderID := uuid.NewString()
 	ctx := r.Context()
+
+	// An Idempotency-Key retry is answered from what the first attempt stored,
+	// before the quote is looked at (a retry carries the quote the first
+	// attempt used up). The key is locked until this request ends, so a
+	// concurrent duplicate waits and then replays rather than booking twice.
+	var tx pgx.Tx
+	fp := fingerprint(req)
+	if idemKey != "" {
+		var err error
+		if tx, err = s.db.Begin(ctx); err != nil {
+			log.Printf("failed to begin transaction: %v", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback(ctx)
+		var rec *idemRecord
+		if err = lockKey(ctx, tx, req.RiderID, idemKey); err == nil {
+			rec, err = lookupKey(ctx, tx, req.RiderID, idemKey)
+		}
+		if err != nil {
+			log.Printf("failed to look up idempotency key: %v", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if answerFromKey(w, rec, fp) {
+			return
+		}
+	}
+
+	orderID := uuid.NewString()
 
 	pr := s.pricer
 	if pr == nil {
@@ -123,7 +158,7 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &moved):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]any{"error": "the price has changed", "newQuote": moved.NewQuote})
+		json.NewEncoder(w).Encode(map[string]any{"error": moved.Error(), "newQuote": moved.NewQuote})
 		return
 	case errors.Is(err, errInvalidQuote):
 		http.Error(w, `{"error":"quote is invalid: request a new one"}`, http.StatusBadRequest)
@@ -134,6 +169,13 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.surgeMultiplier, req.price = settled.Multiplier, &settled.Price
+	// From here a failure must hand the quote back, so the retry can use it.
+	saved := false
+	defer func() {
+		if !saved {
+			pr.release(ctx, settled)
+		}
+	}()
 
 	event := events.OrderCreated{
 		Envelope: events.Envelope{
@@ -165,34 +207,70 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	// The order and its order.created event commit together, so there is
 	// never an order that nobody is told about. The relay publishes the
 	// event once the transaction is committed.
-	if err := s.insertOrder(ctx, orderID, req, payload); err != nil {
+	respBody, _ := json.Marshal(map[string]any{
+		"orderId": orderID, "status": "PENDING",
+		"surgeMultiplier": settled.Multiplier, "price": settled.Price, "currency": surge.Currency,
+	})
+	respBody = append(respBody, '\n')
+
+	var idem *idemRecord
+	if idemKey != "" {
+		idem = &idemRecord{Key: idemKey, Fingerprint: fp, OrderID: orderID, Status: http.StatusCreated, Body: respBody}
+	}
+	if tx != nil {
+		err = s.insertOrderTx(ctx, tx, orderID, req, payload, idem)
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+	} else {
+		err = s.insertOrder(ctx, orderID, req, payload)
+	}
+	if isDuplicateKey(err) {
+		// Another request with this key committed first (the lock normally
+		// makes it finish before we get here): answer with its order.
+		rec, lerr := lookupKey(ctx, s.db, req.RiderID, idemKey)
+		if lerr == nil && answerFromKey(w, rec, fp) {
+			return
+		}
+	}
+	if err != nil {
 		log.Printf("failed to save order: %v", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
+	saved = true
 	s.relay.Wake()
 	ordersCreated.WithLabelValues(string(req.VehicleType)).Inc()
+	if idemKey != "" {
+		idempotentRequests.WithLabelValues("new").Inc()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{
-		"orderId": orderID, "status": "PENDING",
-		"surgeMultiplier": settled.Multiplier, "price": settled.Price, "currency": surge.Currency,
-	})
+	w.Write(respBody)
 }
 
+// insertOrder saves an order and its event in one transaction.
 func (s *server) insertOrder(ctx context.Context, orderID string, req createOrderRequest, payload []byte) error {
-	multiplier := req.surgeMultiplier
-	if multiplier == 0 {
-		multiplier = 1.0 // an order built without pricing (tests)
-	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := s.insertOrderTx(ctx, tx, orderID, req, payload, nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
-	_, err = tx.Exec(ctx, `
+// insertOrderTx adds the order, its order.created outbox row and, when the
+// booking carries an Idempotency-Key, the key's record to tx. The caller commits.
+func (s *server) insertOrderTx(ctx context.Context, tx pgx.Tx, orderID string, req createOrderRequest, payload []byte, idem *idemRecord) error {
+	multiplier := req.surgeMultiplier
+	if multiplier == 0 {
+		multiplier = 1.0 // an order built without pricing (tests)
+	}
+	_, err := tx.Exec(ctx, `
 		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9)`,
 		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng, req.VehicleType,
@@ -204,7 +282,10 @@ func (s *server) insertOrder(ctx context.Context, orderID string, req createOrde
 	if err := outbox.Add(ctx, tx, outboxSource, events.TopicOrderCreated, []byte(orderID), payload); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if idem != nil {
+		return saveKey(ctx, tx, req.RiderID, *idem)
+	}
+	return nil
 }
 
 // orderView is what clients see of an order.
@@ -336,12 +417,13 @@ func main() {
 	defer rdb.Close()
 	s := &server{db: db, relay: relay, codec: codec, pricer: &pricer{
 		signer: signer, mult: redisMultipliers{rdb}, tolerance: env.QuoteTolerance,
-		cellDeg: surge.CellDegrees(), now: time.Now,
+		cellDeg: surge.CellDegrees(), now: time.Now, claims: redisClaims{rdb},
 	}}
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })
 	background.Go(func() { runOutcomeConsumer(ctx, env, db, codec) })
+	background.Go(func() { runKeyPurge(ctx, db, time.Hour) })
 
 	verifier, err := auth.VerifierFromEnv()
 	if err != nil {

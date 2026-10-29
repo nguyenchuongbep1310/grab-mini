@@ -189,6 +189,10 @@ curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count"
 curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a driver's own reviews, newest first (driver token only)
 ```
 
+**Retries.** `POST /orders` accepts an optional `Idempotency-Key` header (1 to 128 printable characters; `@grab-mini/client` sends a fresh UUID per booking and reuses it when it retries after a network error or 5xx). Repeating a key with the same body returns the original response (same `orderId`, header `Idempotent-Replayed: true`) and publishes nothing; the same key with a different body is `422`. Keys are scoped to the rider and kept for 24 hours. A `quoteId` books once: using it again is `409` with a fresh `newQuote` (if Redis is down the booking is priced at the current multiplier instead of being rejected).
+
+**Pickup and complete need the driver to be there.** `pickup` is refused with `409` unless the driver's last reported location is within `PICKUP_RADIUS_M` (default 200) of the pickup point, `complete` within `DROPOFF_RADIUS_M` (default 300) of the dropoff. The error `code` says why: `driver_too_far`, `driver_location_unknown`, or `driver_location_stale` (older than `LOCATION_MAX_AGE`, default 60s); if Redis is unreachable it is a `503`. Repeating a step that already happened is still a no-op. `driver-app-sim` only wanders near its seed point, so `make dev` and `deploy/loadtest/stack.sh` start Trip Service with `APP_ENV=development PROXIMITY_CHECK=off`; Trip Service refuses `PROXIMITY_CHECK=off` under any other `APP_ENV`. To try the check locally, unset it and report a position first (`POST localhost:3006/locations` with a driver token) or use `redis-cli`/`driverlocation.Update`.
+
 Repeating `pickup` or `complete` is a no-op. The WebSocket is `ws://localhost:3003/ws/rider/<id>` or `/ws/driver/<id>`, pushing `{"type": "...", "payload": {...}}`.
 
 Inspect state directly:

@@ -94,10 +94,19 @@ func handleOrderMatched(ctx context.Context, db *pgxpool.Pool, rdb *redis.Client
 	}
 
 	tripID := uuid.NewString()
+	var pickupLat, pickupLng, dropoffLat, dropoffLng *float64 // NULL when the event carries no route
+	if evt.Pickup != nil {
+		pickupLat, pickupLng = &evt.Pickup.Lat, &evt.Pickup.Lng
+	}
+	if evt.Dropoff != nil {
+		dropoffLat, dropoffLng = &evt.Dropoff.Lat, &evt.Dropoff.Lng
+	}
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO trips (id, order_id, driver_id, rider_id, status) VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO trips (id, order_id, driver_id, rider_id, status, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (order_id) DO NOTHING`,
 		tripID, evt.OrderID, evt.DriverID, evt.RiderID, events.TripStatusAssigned,
+		pickupLat, pickupLng, dropoffLat, dropoffLng,
 	)
 	if err != nil {
 		return err

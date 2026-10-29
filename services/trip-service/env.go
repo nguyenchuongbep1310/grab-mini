@@ -13,10 +13,20 @@ type Env struct {
 	DatabaseURL       string
 	KafkaBrokers      []string
 	RedisAddr         string
+	// Pickup/complete driver proximity check (see proximity.go).
+	Proximity Proximity
 }
 
 func loadEnv() Env {
+	prox, err := loadProximity(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if prox.Off {
+		log.Printf("WARNING: PROXIMITY_CHECK=off (APP_ENV=development): drivers can pick up and complete from anywhere")
+	}
 	return Env{
+		Proximity:         prox,
 		SchemaRegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
 		Port:              getEnv("PORT", "3002"),
 		DatabaseURL:       databaseURL(),
