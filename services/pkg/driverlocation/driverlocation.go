@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -181,6 +182,54 @@ func Clear(ctx context.Context, rdb *redis.Client) error {
 		}
 	}
 	return iter.Err()
+}
+
+// Position is a driver's last known location and the (device) time of the
+// update that set it.
+type Position struct {
+	Lat, Lng float64
+	At       time.Time
+}
+
+// Age is how long ago the position was reported, by now's clock. The time is
+// the driver device's, so a badly skewed phone clock skews this too.
+func (p Position) Age(now time.Time) time.Duration { return now.Sub(p.At) }
+
+// Get returns a driver's last known position, or found=false if none is
+// recorded. It follows the driver's cell pointer so it works with and without
+// GEO_SHARD_DEGREES.
+func Get(ctx context.Context, rdb *redis.Client, driverID string) (pos Position, found bool, err error) {
+	ms, err := rdb.Get(ctx, timestampKey(driverID)).Int64()
+	if err == redis.Nil {
+		return Position{}, false, nil
+	}
+	if err != nil {
+		return Position{}, false, err
+	}
+	key, err := rdb.Get(ctx, cellPointerKey(driverID)).Result()
+	if err == redis.Nil {
+		key = GeoKey // written before cells existed
+	} else if err != nil {
+		return Position{}, false, err
+	}
+	res, err := rdb.GeoPos(ctx, key, driverID).Result()
+	if err != nil {
+		return Position{}, false, err
+	}
+	if len(res) == 0 || res[0] == nil {
+		return Position{}, false, nil
+	}
+	return Position{Lat: res[0].Latitude, Lng: res[0].Longitude, At: time.UnixMilli(ms)}, true, nil
+}
+
+// DistanceM is the great-circle distance in metres between two points.
+func DistanceM(lat1, lng1, lat2, lng2 float64) float64 {
+	const earthRadiusM = 6371008.8
+	rad := math.Pi / 180
+	dLat, dLng := (lat2-lat1)*rad, (lng2-lng1)*rad
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*rad)*math.Cos(lat2*rad)*math.Sin(dLng/2)*math.Sin(dLng/2)
+	return 2 * earthRadiusM * math.Asin(math.Min(1, math.Sqrt(a)))
 }
 
 // ResetTimestamp clears a driver's recorded last-update time, e.g. when

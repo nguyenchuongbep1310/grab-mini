@@ -127,6 +127,46 @@ func TestADriverWhoCrossesACellLeavesTheOldOne(t *testing.T) {
 	}
 }
 
+func TestGetReturnsTheLastPositionShardedOrNot(t *testing.T) {
+	ctx := context.Background()
+	for _, deg := range []string{"", "0.05"} {
+		t.Setenv(shardEnv, deg)
+		rdb := newClient(t)
+		if _, found, err := Get(ctx, rdb, "d1"); err != nil || found {
+			t.Fatalf("GEO_SHARD_DEGREES=%q: unknown driver = found %v, %v", deg, found, err)
+		}
+		Update(ctx, rdb, "d1", 10.70, 106.70, 1_700_000_000_000)
+		Update(ctx, rdb, "d1", 10.90, 106.90, 1_700_000_005_000) // another cell when sharded
+		pos, found, err := Get(ctx, rdb, "d1")
+		if err != nil || !found {
+			t.Fatalf("GEO_SHARD_DEGREES=%q: Get = %v, %v", deg, found, err)
+		}
+		if d := DistanceM(pos.Lat, pos.Lng, 10.90, 106.90); d > 1 {
+			t.Errorf("GEO_SHARD_DEGREES=%q: position %.5f,%.5f is %.1f m from the last update", deg, pos.Lat, pos.Lng, d)
+		}
+		if pos.At.UnixMilli() != 1_700_000_005_000 {
+			t.Errorf("GEO_SHARD_DEGREES=%q: At = %v", deg, pos.At)
+		}
+	}
+}
+
+func TestDistanceM(t *testing.T) {
+	if d := DistanceM(10.776, 106.7, 10.776, 106.7); d != 0 {
+		t.Errorf("same point = %v", d)
+	}
+	// 0.001 degrees of latitude is about 111 m.
+	if d := DistanceM(10.776, 106.7, 10.777, 106.7); d < 110 || d > 112 {
+		t.Errorf("0.001 deg of latitude = %.2f m, want about 111", d)
+	}
+	// Longitude shrinks with latitude: at 60 N, 0.001 deg is about 55.7 m.
+	if d := DistanceM(60, 10, 60, 10.001); d < 55 || d > 56.5 {
+		t.Errorf("0.001 deg of longitude at 60N = %.2f m, want about 55.7", d)
+	}
+	if a, b := DistanceM(10, 106, 11, 107), DistanceM(11, 107, 10, 106); a != b {
+		t.Errorf("not symmetric: %v vs %v", a, b)
+	}
+}
+
 func TestClearRemovesEveryCell(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv(shardEnv, "0.05")

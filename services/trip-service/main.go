@@ -56,6 +56,44 @@ type server struct {
 	rdb   *redis.Client
 	relay *outbox.Relay
 	codec *eventcodec.Codec
+	// Zero value means the defaults (see proximity()); now is time.Now unless a test sets it.
+	prox Proximity
+	now  func() time.Time
+}
+
+func (s *server) proximity() Proximity {
+	if s.prox == (Proximity{}) {
+		return defaultProximity()
+	}
+	return s.prox
+}
+
+func (s *server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// nearRoute returns the precheck of a transition: the driver must be within
+// radius of the trip's pickup or dropoff (see checkProximity).
+func (s *server) nearRoute(step string) func(context.Context, *trip) *proximityRefusal {
+	return func(ctx context.Context, t *trip) *proximityRefusal {
+		cfg := s.proximity()
+		if cfg.Off {
+			return nil
+		}
+		route, err := getTripRoute(ctx, s.db, t.ID)
+		if err != nil {
+			log.Printf("trip proximity: loading route of trip %s: %v", t.ID, err)
+			return &proximityRefusal{Status: http.StatusInternalServerError, Code: "internal_error", Msg: "internal error"}
+		}
+		target, radius := route.Pickup, cfg.PickupRadiusM
+		if step == "dropoff" {
+			target, radius = route.Dropoff, cfg.DropoffRadiusM
+		}
+		return checkProximity(ctx, s.rdb, cfg, s.clock(), step, t.DriverID, target, radius)
+	}
 }
 
 func (s *server) encodeStatusChanged(ctx context.Context, t *trip, status events.TripStatus, cancel ...cancelInfo) ([]byte, error) {
@@ -171,6 +209,7 @@ func (s *server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		[]events.TripStatus{events.TripStatusAssigned},
 		events.TripStatusInProgress,
 		startedAt,
+		s.nearRoute("pickup"),
 		nil,
 	)
 }
@@ -182,6 +221,7 @@ func (s *server) handleComplete(w http.ResponseWriter, r *http.Request) {
 		[]events.TripStatus{events.TripStatusInProgress},
 		events.TripStatusCompleted,
 		completedAt,
+		s.nearRoute("dropoff"),
 		func(ctx context.Context, t *trip) error {
 			return driverstatus.Set(ctx, s.rdb, t.DriverID, driverstatus.Available)
 		},
@@ -196,6 +236,7 @@ func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		[]events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress},
 		events.TripStatusCancelled,
 		cancelledAt,
+		nil,
 		func(ctx context.Context, t *trip) error {
 			return driverstatus.Set(ctx, s.rdb, t.DriverID, driverstatus.Available)
 		},
@@ -207,7 +248,7 @@ func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
 // it's currently in fromStatuses. If it's already at targetStatus, the
 // call is a no-op success (US-6.1). Any other current status is a
 // rejected transition (e.g. US-4.3: cancelling an already-completed trip).
-func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo func(auth.Identity, *trip) bool, fromStatuses []events.TripStatus, targetStatus events.TripStatus, field timestampField, onTransition func(context.Context, *trip) error) {
+func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo func(auth.Identity, *trip) bool, fromStatuses []events.TripStatus, targetStatus events.TripStatus, field timestampField, precheck func(context.Context, *trip) *proximityRefusal, onTransition func(context.Context, *trip) error) {
 	c, ok := caller(w, r)
 	if !ok {
 		return
@@ -239,6 +280,20 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"tripId": t.ID, "status": string(t.Status)})
 		return
+	}
+
+	// Pickup and complete only from where the trip says they happen. This
+	// comes after the "already there" no-op above, so a retry of a finished
+	// step still succeeds from wherever the driver is by then.
+	if precheck != nil {
+		if refusal := precheck(ctx, t); refusal != nil {
+			if refusal.Code == "internal_error" {
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			refusal.write(w)
+			return
+		}
 	}
 
 	// Encode before changing any state: if the schema registry is down we
@@ -468,7 +523,7 @@ func main() {
 
 	codec := eventcodec.New(env.SchemaRegistryURL)
 	relay := outbox.NewRelay(db, producer, outboxSource)
-	s := &server{db: db, rdb: rdb, relay: relay, codec: codec}
+	s := &server{db: db, rdb: rdb, relay: relay, codec: codec, prox: env.Proximity}
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })

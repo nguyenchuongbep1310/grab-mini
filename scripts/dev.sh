@@ -110,6 +110,12 @@ for svc in $SERVICES; do
     driver-location-service)
       start "$svc" "services/$svc" env HEALTH_PORT=9102 "$ROOT/$BIN/$svc"
       ;;
+    trip-service)
+      # driver-app-sim never drives to a rider, so the pickup/complete
+      # proximity check (PICKUP_RADIUS_M / DROPOFF_RADIUS_M) is off for demos.
+      # Trip Service accepts this only with APP_ENV=development.
+      start "$svc" "services/$svc" env APP_ENV=development PROXIMITY_CHECK=off "$ROOT/$BIN/$svc"
+      ;;
     *)
       start "$svc" "services/$svc" "$ROOT/$BIN/$svc"
       ;;

@@ -104,6 +104,8 @@ func matchOrder(ctx context.Context, env Env, rdb *redis.Client, producer publis
 			DriverID:    driverID,
 			VehicleType: order.VehicleType,
 			RiderID:     order.RiderID,
+			Pickup:      &order.Pickup,
+			Dropoff:     &order.Dropoff,
 		}
 		publish := func() error {
 			payload, err := codec.Encode(ctx, events.TopicOrderMatched, event)

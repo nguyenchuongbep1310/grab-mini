@@ -89,7 +89,7 @@ func testDB(t *testing.T) *pgxpool.Pool {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
-	if _, err := db.Exec(context.Background(), `DELETE FROM outbox; DELETE FROM orders`); err != nil {
+	if _, err := db.Exec(context.Background(), `DELETE FROM outbox; DELETE FROM idempotency_keys; DELETE FROM orders`); err != nil {
 		t.Fatal(err)
 	}
 	return db

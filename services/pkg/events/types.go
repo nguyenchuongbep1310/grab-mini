@@ -71,6 +71,11 @@ type OrderMatched struct {
 	// Who to tell: lets Notification Service route the event without
 	// remembering which rider made the order. Empty on older messages.
 	RiderID string `json:"riderId" avro:"riderId"`
+	// Added in schema v3 (default null): where the trip starts and ends, so
+	// Trip Service can check the driver is there before pickup/complete.
+	// Nil on older messages.
+	Pickup  *LatLng `json:"pickup" avro:"pickup"`
+	Dropoff *LatLng `json:"dropoff" avro:"dropoff"`
 }
 
 type OrderNoDriverFound struct {

@@ -48,7 +48,8 @@ start() {
   sleep 0.5
   launch auth-service PORT=3005
   launch order-service PORT=3001
-  launch trip-service PORT=3002
+  # The load test's drivers pick up and complete from wherever they are.
+  launch trip-service PORT=3002 APP_ENV=development PROXIMITY_CHECK=off
   launch notification-service PORT=3003
   launch rating-service PORT=3004
   launch location-gateway PORT=3006

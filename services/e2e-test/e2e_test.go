@@ -454,6 +454,16 @@ func TestFullSystemEndToEnd(t *testing.T) {
 	}
 	waitWS(t, riderEvents, "trip.status.changed", 10*time.Second)
 
+	// The driver is still at the pickup point, ~1.9 km from the dropoff: Trip
+	// Service refuses to complete from there.
+	if code := st.request("driver", "driver-1", http.MethodPost, st.tripURL+"/trips/"+trip.ID+"/complete", nil, nil); code != http.StatusConflict {
+		t.Fatalf("complete from the pickup point = %d, want 409", code)
+	}
+	// Drive to the dropoff (what the Driver App's location reports would do).
+	if _, err := driverlocation.Update(context.Background(), st.rdb, "driver-1", 10.7901, 106.7100, time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
 	if code := st.request("driver", "driver-1", http.MethodPost, st.tripURL+"/trips/"+trip.ID+"/complete", nil, nil); code != http.StatusOK {
 		t.Fatalf("complete = %d, want 200", code)
 	}

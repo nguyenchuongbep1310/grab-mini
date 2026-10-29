@@ -113,18 +113,38 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
  * quote has expired and the price moved, this rejects with an ApiError of
  * status 409 whose `body.newQuote` is the price to confirm (see `newQuoteOf`).
  */
-export function createOrder(
+export async function createOrder(
   riderId: string,
   pickup: LatLng,
   dropoff: LatLng,
   vehicleType: VehicleType,
   quoteId?: string,
+  retryDelayMs = 300,
 ): Promise<{ orderId: string; price?: number; surgeMultiplier?: number }> {
-  return request(`${ORDER_API}/orders`, {
+  // One key per booking attempt, reused by every retry of it, so a request that
+  // reached the server but whose answer was lost books one order, not two.
+  const init: RequestInit = {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
     body: JSON.stringify({ riderId, pickup, dropoff, vehicleType, ...(quoteId ? { quoteId } : {}) }),
-  });
+  };
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await request(`${ORDER_API}/orders`, init);
+    } catch (err) {
+      // Retry only what may not have reached the server or may succeed later:
+      // a network failure (fetch rejects) or a 5xx. A 4xx is an answer.
+      const retryable = err instanceof ApiError ? err.status >= 500 : err instanceof TypeError;
+      if (!retryable || attempt >= maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+    }
+  }
+}
+
+function newIdempotencyKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
 /** The fresh quote carried by a 409 from createOrder, or null if err isn't one. */

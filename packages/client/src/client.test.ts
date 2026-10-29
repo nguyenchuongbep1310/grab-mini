@@ -102,6 +102,43 @@ describe("auth & api client", () => {
     expect(newQuoteOf(new Error("other"))).toBeNull();
   });
 
+  it("sends a fresh Idempotency-Key per booking and reuses it when the attempt is retried", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockRejectedValueOnce(new TypeError("network down"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "boom" }), { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: "o-1" }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: "o-2" }), { status: 201 }));
+
+    const pickup = { lat: 10.77, lng: 106.7 };
+    const dropoff = { lat: 10.78, lng: 106.71 };
+    await expect(createOrder("rider-1", pickup, dropoff, "CAR", "q-1", 0)).resolves.toEqual({ orderId: "o-1" });
+    await createOrder("rider-1", pickup, dropoff, "CAR", undefined, 0);
+
+    const keys = fetchMock.mock.calls
+      .filter(([url]) => url === "/order-api/orders")
+      .map(([, init]) => new Headers(init.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(4);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]); // retried after the network error
+    expect(keys[2]).toBe(keys[0]); // and after the 503
+    expect(keys[3]).not.toBe(keys[0]); // a new booking gets a new key
+  });
+
+  it("does not retry a 4xx from createOrder", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "quote used" }), { status: 409 }));
+    await expect(
+      createOrder("rider-1", { lat: 10.77, lng: 106.7 }, { lat: 10.78, lng: 106.71 }, "CAR", "q-1", 0),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/order-api/orders")).toHaveLength(1);
+  });
+
   it("retries 404 in waitForTripByOrder until the trip exists", async () => {
     signIn("rider", "rider-1");
     const future = new Date(Date.now() + 3600_000).toISOString();
