@@ -189,6 +189,9 @@ func TestOnlyTheOrdersRiderMayCancelIt(t *testing.T) {
 // ends in exactly one of two consistent states: CANCELLED with its event, or
 // MATCHED with no event (and the rider told to cancel the trip).
 func TestMatchAndCancelRacingLeaveOneConsistentOutcome(t *testing.T) {
+	// One rider fires these requests back to back on purpose; the per-caller rate limit
+	// (tested on its own) would answer 429 and hide what this test is about.
+	t.Setenv(auth.RateLimitScaleEnv, "0")
 	e := newCancelEnv(t)
 	ctx := context.Background()
 

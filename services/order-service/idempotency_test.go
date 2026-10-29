@@ -298,6 +298,9 @@ func TestWithoutAKeyEveryRequestIsABooking(t *testing.T) {
 }
 
 func TestConcurrentDuplicatesCreateOneOrder(t *testing.T) {
+	// One rider fires these requests back to back on purpose; the per-caller rate limit
+	// (tested on its own) would answer 429 and hide what this test is about.
+	t.Setenv(auth.RateLimitScaleEnv, "0")
 	a := newAPI(t)
 	const n = 12
 	replies := make([]reply, n)
