@@ -198,3 +198,41 @@ groups:
           summary: "{{ $labels.deployment }} has {{ $value }} replica(s) not ready"
           description: "Check /readyz: a dependency (Postgres, Redis, Kafka) is probably down."
           runbook: "docs/runbook.md#pods-not-ready"
+
+  # Redis (deploy/k8s/base/redis, scraped through the redis_exporter sidecar) and the data-ops CronJobs.
+  - name: grab-mini.dataops
+    rules:
+      - alert: RedisNotExactlyOneMaster
+        # Zero for a minute: a failover is not finishing. Two: a split brain, writes diverge.
+        expr: (sum(redis_instance_info{namespace="grab-mini", role="master"}) or vector(0)) != 1
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "Redis has {{ $value }} masters instead of 1"
+          runbook: "docs/runbook.md#redis-failover"
+
+      - alert: RedisMemoryNearLimit
+        # maxmemory-policy is noeviction: at 100% writes fail, they are not evicted.
+        expr: max(redis_memory_used_bytes{namespace="grab-mini"} / redis_memory_max_bytes{namespace="grab-mini"}) > 0.85
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Redis memory is at {{ $value | humanizePercentage }} of maxmemory"
+          runbook: "docs/runbook.md#redis-failover"
+
+      - alert: PostgresBackupStale
+        expr: time() - kube_cronjob_status_last_successful_time{namespace="grab-mini", cronjob=~"backup-.*"} > 86400
+        for: 15m
+        labels: {severity: page}
+        annotations:
+          summary: "No successful {{ $labels.cronjob }} for more than 24 hours (it runs every 6)"
+          description: "The backup RPO is being exceeded."
+          runbook: "docs/runbook.md#backup-and-restore"
+
+      - alert: DataOpsJobFailed
+        expr: kube_job_status_failed{namespace="grab-mini", job_name=~"(backup|retention)-.*"} > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Job {{ $labels.job_name }} failed"
+          runbook: "docs/runbook.md#backup-and-restore"

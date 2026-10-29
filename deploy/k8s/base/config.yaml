@@ -18,7 +18,7 @@ data:
   SCHEMA_REGISTRY_URL: https://schema-registry:8081
   JWT_JWKS_URL: https://auth.example.com/.well-known/jwks.json
   REDIS_ADDR: redis:6379
-  REDIS_SENTINEL_ADDRS: ''
+  REDIS_SENTINEL_ADDRS: redis-0.redis-headless:26379,redis-1.redis-headless:26379,redis-2.redis-headless:26379
   REDIS_MASTER_NAME: mymaster
   GEO_SHARD_DEGREES: '0'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4318

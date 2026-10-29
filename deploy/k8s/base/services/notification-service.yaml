@@ -73,6 +73,10 @@ spec:
           value: 'false'
         - name: PORT
           value: '3003'
+        - name: REDIS_PASSWORD_FILE
+          value: /etc/secrets/redis/password
+        - name: REDIS_SENTINEL_PASSWORD_FILE
+          value: /etc/secrets/redis/password
         - name: SCHEMA_REGISTRY_USER_FILE
           value: /etc/secrets/schema-registry/username
         - name: SCHEMA_REGISTRY_PASSWORD_FILE
@@ -90,6 +94,9 @@ spec:
           readOnly: true
         - name: kafka-ca
           mountPath: /etc/kafka/ca
+          readOnly: true
+        - name: redis
+          mountPath: /etc/secrets/redis
           readOnly: true
         - name: schema-registry
           mountPath: /etc/secrets/schema-registry
@@ -143,6 +150,12 @@ spec:
           items:
           - key: ca.crt
             path: ca.crt
+      - name: redis
+        secret:
+          secretName: grab-mini-redis
+          items:
+          - key: password
+            path: password
       - name: schema-registry
         secret:
           secretName: grab-mini-schema-registry

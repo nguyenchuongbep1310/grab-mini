@@ -75,6 +75,10 @@ spec:
           value: '3002'
         - name: DATABASE_URL_FILE
           value: /etc/secrets/db/url
+        - name: REDIS_PASSWORD_FILE
+          value: /etc/secrets/redis/password
+        - name: REDIS_SENTINEL_PASSWORD_FILE
+          value: /etc/secrets/redis/password
         - name: SCHEMA_REGISTRY_USER_FILE
           value: /etc/secrets/schema-registry/username
         - name: SCHEMA_REGISTRY_PASSWORD_FILE
@@ -90,6 +94,9 @@ spec:
           readOnly: true
         - name: db
           mountPath: /etc/secrets/db
+          readOnly: true
+        - name: redis
+          mountPath: /etc/secrets/redis
           readOnly: true
         - name: schema-registry
           mountPath: /etc/secrets/schema-registry
@@ -149,6 +156,12 @@ spec:
           items:
           - key: url
             path: url
+      - name: redis
+        secret:
+          secretName: grab-mini-redis
+          items:
+          - key: password
+            path: password
       - name: schema-registry
         secret:
           secretName: grab-mini-schema-registry

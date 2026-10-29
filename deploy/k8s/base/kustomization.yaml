@@ -5,6 +5,10 @@ namespace: grab-mini
 resources:
 - namespace.yaml
 - config.yaml
+- backup/order-service.yaml
+- backup/rating-service.yaml
+- backup/trip-service.yaml
+- dataops/config.yaml
 - kafka/cluster.yaml
 - kafka/topics.yaml
 - kafka/users.yaml
@@ -14,8 +18,12 @@ resources:
 - monitoring/alerts.yaml
 - monitoring/podmonitors.yaml
 - network/policies.yaml
+- redis/redis.yaml
+- redis/scripts.yaml
+- retention/order-orders.yaml
 - retention/rating-rating-events.yaml
 - retention/trip-processed-events.yaml
+- retention/trip-trips.yaml
 - scaling/keda.yaml
 - services/driver-location-service.yaml
 - services/location-gateway.yaml

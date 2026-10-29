@@ -335,3 +335,113 @@ spec:
     ports:
     - port: 443
       protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-redis
+  labels:
+    app.kubernetes.io/name: allow-ingress-to-redis
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: grab-mini
+      app.kubernetes.io/component: redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values:
+          - driver-location-service
+          - matching-service
+          - notification-service
+          - order-service
+          - pricing-service
+          - trip-service
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: grab-mini
+          app.kubernetes.io/component: redis
+    ports:
+    - port: 6379
+      protocol: TCP
+    - port: 26379
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: 9121
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-redis-peers
+  labels:
+    app.kubernetes.io/name: allow-egress-redis-peers
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: grab-mini
+      app.kubernetes.io/component: redis
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: grab-mini
+          app.kubernetes.io/component: redis
+    ports:
+    - port: 6379
+      protocol: TCP
+    - port: 26379
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-backup
+  labels:
+    app.kubernetes.io/name: allow-egress-backup
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: grab-mini
+      app.kubernetes.io/component: backup
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: postgres
+    - ipBlock:
+        cidr: 10.0.0.0/8
+    - ipBlock:
+        cidr: 172.16.0.0/12
+    - ipBlock:
+        cidr: 192.168.0.0/16
+    ports:
+    - port: 5432
+      protocol: TCP
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 169.254.0.0/16
+    ports:
+    - port: 443
+      protocol: TCP
