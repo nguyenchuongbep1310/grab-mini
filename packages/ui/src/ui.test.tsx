@@ -10,6 +10,8 @@ import {
   PriceTag,
   SegmentedControl,
   StarRating,
+  EtaBadge,
+  formatEta,
   Stat,
   StatusBadge,
   SurgeBadge,
@@ -67,6 +69,22 @@ describe("StatusBadge & SurgeBadge & PriceTag", () => {
 
     rerender(<SurgeBadge multiplier={1.4} />);
     expect(screen.getByRole("status")).toHaveTextContent("x1.4 high demand");
+  });
+
+  it("renders EtaBadge with distance and minutes, or a label, and nothing for a bad estimate", () => {
+    const { container, rerender } = render(<EtaBadge distanceKm={3.24} durationSec={480} />);
+    expect(container).toHaveTextContent("3.2 km · about 8 min");
+
+    rerender(<EtaBadge label="Driver arrives in" durationSec={150} />);
+    expect(container).toHaveTextContent("Driver arrives in about 3 min");
+
+    // Never "about 0 min".
+    expect(formatEta(10)).toBe("about 1 min");
+
+    rerender(<EtaBadge durationSec={Number.NaN} />);
+    expect(container).toBeEmptyDOMElement();
+    rerender(<EtaBadge durationSec={-5} />);
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("formats PriceTag in VND and renders struck-through original fare when changed", () => {

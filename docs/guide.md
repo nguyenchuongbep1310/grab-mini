@@ -39,7 +39,7 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 
 ### Take a ride
 
-1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**.
+1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**. Next to the price the app shows the route length and an estimated time ("3.2 km · about 8 min"), and after the match it shows how long until the driver arrives, then until you reach the destination (from Routing Service, a model without real map data; if that service is down the line is simply hidden).
 2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
 3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
 4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. You can also add a comment and a tip (0, 10k, 20k, 50k or custom VND). A tip is only recorded, there is no payment system: Rating Service keeps a per-driver total and the driver's app shows it in the toast. The driver's app shows a toast and their updated average.

@@ -5,6 +5,7 @@ import {
   Button,
   CancelDialog,
   Card,
+  EtaBadge,
   MapMarker,
   MapView,
   PriceTag,
@@ -35,6 +36,7 @@ import { checkOutcome, findActiveRide } from "./recovery";
 import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
 import { useQuote } from "./useQuote";
+import { useEta, useRoute } from "./useRoute";
 import { useRide, type Phase } from "./useRide";
 
 // Fixed pickup near the seeded drivers (central Ho Chi Minh City).
@@ -84,6 +86,8 @@ export function App() {
   const [ride, dispatch] = useRide();
   // Kept through "booking" so a 409 can hand back the new price to confirm.
   const priceQuote = useQuote(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle" || ride.phase === "booking");
+  // Distance and time before booking. Decoration only: without it the card just has no line.
+  const plannedRoute = useRoute(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle");
   const [cancelling, setCancelling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   // What cancelling costs once a driver is assigned. Loaded when one is, and left null (no
@@ -247,6 +251,15 @@ export function App() {
     [dropoff?.join(","), driverAnchor?.join(",")],
   );
 
+  // Time left, from the driver's last pushed position: to the pickup while they come to us,
+  // to the dropoff once the trip is under way. Throttled, and absent if Routing is unavailable.
+  const eta = useEta(
+    ride.driverPos,
+    phase === "assigned" ? PICKUP_LATLNG : phase === "in_progress" ? ride.dropoff : null,
+    ride.vehicleType,
+    phase === "assigned" || phase === "in_progress",
+  );
+
   const finished = phase === "completed" || phase === "cancelled" || phase === "no_driver";
   const inRide = phase === "assigned" || phase === "in_progress";
 
@@ -297,6 +310,9 @@ export function App() {
                 <SurgeBadge multiplier={priceQuote.quote.multiplier} />
               </div>
             )}
+            {ride.dropoff && plannedRoute && (
+              <EtaBadge distanceKm={plannedRoute.distanceKm} durationSec={plannedRoute.durationSec} />
+            )}
             {ride.dropoff && !priceQuote.quote && priceQuote.status === "error" && (
               <p className="sheet-sub">Price unavailable right now. It will be set when you book.</p>
             )}
@@ -324,6 +340,13 @@ export function App() {
                   <StatusBadge className="driver-row__badge" status={BADGE_STATUS[phase]} />
                 </div>
               </Card>
+            )}
+
+            {inRide && eta && (
+              <EtaBadge
+                label={phase === "assigned" ? "Driver arrives in" : "You'll arrive in"}
+                durationSec={eta.durationSec}
+              />
             )}
 
             {!inRide && <StatusBadge status={BADGE_STATUS[phase]} />}

@@ -8,6 +8,7 @@ export { ToastProvider, useToast } from "./Toast";
 export { Stat, type StatProps } from "./Stat";
 export { PriceTag, type PriceTagProps } from "./PriceTag";
 export { SurgeBadge, type SurgeBadgeProps } from "./SurgeBadge";
+export { EtaBadge, formatEta, type EtaBadgeProps } from "./EtaBadge";
 export { StarRating, type StarRatingProps } from "./StarRating";
 export { SegmentedControl, type SegmentedControlProps, type SegmentedOption } from "./SegmentedControl";
 export { BottomSheet, type BottomSheetProps } from "./BottomSheet";

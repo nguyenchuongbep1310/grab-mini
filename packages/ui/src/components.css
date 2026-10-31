@@ -257,3 +257,14 @@
   white-space: nowrap;
 }
 .gm-surge__mult { font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* ---------- EtaBadge ---------- */
+.gm-eta {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--gm-radius-full);
+  background: var(--gm-info-soft); color: var(--gm-info-text);
+  font: 600 var(--gm-text-xs) / 1.2 var(--gm-font);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

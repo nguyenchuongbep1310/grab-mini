@@ -63,7 +63,7 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 - [x] 8.1 Auth: `admin` role (dev issuer only)
 - [x] 8.2 `routing-service`: `GET /route` (distance, duration, polyline), deterministic model
 - [x] 8.3 Pricing asks Routing for the distance, failing open to its own estimate
-- [ ] 8.4 Rider App: distance and ETA before booking, "driver arrives in N min" after the match
+- [x] 8.4 Rider App: distance and ETA before booking, "driver arrives in N min" after the match
 - [x] 8.5 Infra and docs: dev.sh, k8s, alerts, runbook, design/production-design/guide
 
 ### Phase 9 — Promotions
