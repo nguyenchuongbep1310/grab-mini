@@ -60,3 +60,16 @@ body {
 .rating-summary dt { font-size: 0.875rem; font-weight: 600; }
 .rating-summary dd { margin: 0; font-size: 0.875rem; opacity: 0.9; }
 .rating-summary__note { text-align: right; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.promo { display: flex; flex-direction: column; gap: var(--gm-space-2); }
+.promo__link { align-self: flex-start; padding: 0; border: 0; background: none; font: inherit; font-size: var(--gm-text-sm); font-weight: 600; color: var(--gm-primary); cursor: pointer; text-decoration: underline; }
+.promo__label { font-size: var(--gm-text-sm); font-weight: 600; }
+.promo__row { display: flex; gap: var(--gm-space-2); }
+.promo__input { flex: 1; min-width: 0; box-sizing: border-box; padding: var(--gm-space-2); font: inherit; text-transform: uppercase; border: 1px solid currentColor; border-radius: 8px; background: transparent; color: inherit; }
+.promo__input[aria-invalid="true"] { border-color: var(--gm-danger); }
+.promo__hint { margin: 0; font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
+.promo__message { margin: 0; font-size: var(--gm-text-sm); color: var(--gm-danger-text); }
+.promo__applied { display: flex; align-items: center; justify-content: space-between; gap: var(--gm-space-3); font-size: var(--gm-text-sm); color: var(--gm-success-text); }
+.promo__applied-note { margin: 0; font-size: var(--gm-text-sm); color: var(--gm-success-text); }
+.receipt__discount dd { color: var(--gm-success-text); }
+.promo .gm-price__amount, .promo__applied-note .gm-price__amount { font-size: inherit; }

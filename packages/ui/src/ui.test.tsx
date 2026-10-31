@@ -61,6 +61,11 @@ describe("StatusBadge & SurgeBadge & PriceTag", () => {
 
     rerender(<StatusBadge status="CUSTOM_STATUS" />);
     expect(screen.getByText("CUSTOM_STATUS")).toHaveClass("gm-badge--neutral");
+
+    rerender(<StatusBadge status="ACTIVE" />);
+    expect(screen.getByText("Active")).toHaveClass("gm-badge--success");
+    rerender(<StatusBadge status="DISABLED" />);
+    expect(screen.getByText("Disabled")).toHaveClass("gm-badge--danger");
   });
 
   it("renders SurgeBadge only when multiplier > 1.0", () => {

@@ -23,6 +23,7 @@ import {
   createOrder,
   getCancellationPolicy,
   newQuoteOf,
+  promoBookingErrorOf,
   rateTrip,
   signIn,
   tripAction,
@@ -32,6 +33,8 @@ import {
 import type { CancellationPolicy } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
 import { cancelFeeNote } from "./cancelFee";
+import { PromoField } from "./PromoField";
+import { bookingMessage, usePromo } from "./usePromo";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
@@ -86,6 +89,8 @@ export function App() {
   const [ride, dispatch] = useRide();
   // Kept through "booking" so a 409 can hand back the new price to confirm.
   const priceQuote = useQuote(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle" || ride.phase === "booking");
+  // A promo code for this price and vehicle; it re-checks itself when either changes.
+  const promo = usePromo(priceQuote.quote?.price ?? null, ride.vehicleType);
   // Distance and time before booking. Decoration only: without it the card just has no line.
   const plannedRoute = useRoute(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle");
   const [cancelling, setCancelling] = useState(false);
@@ -172,15 +177,18 @@ export function App() {
     if (!ride.dropoff) return;
     dispatch({ type: "bookStarted" });
     try {
-      const { orderId, price, surgeMultiplier } = await createOrder(
+      const { orderId, price, surgeMultiplier, promoCode, discount } = await createOrder(
         riderId,
         PICKUP_LATLNG,
         ride.dropoff,
         ride.vehicleType,
         priceQuote.quote?.quoteId,
+        undefined,
+        promo.token,
       );
       priceQuote.acknowledge();
-      dispatch({ type: "bookSucceeded", orderId, price, surgeMultiplier });
+      promo.reset();
+      dispatch({ type: "bookSucceeded", orderId, price, surgeMultiplier, promoCode, discount });
     } catch (err) {
       dispatch({ type: "bookFailed" });
       // The price moved since the rider last saw it: show the new one and let them confirm.
@@ -188,6 +196,13 @@ export function App() {
       if (fresh) {
         priceQuote.applyNewQuote(fresh);
         toast.show("The price changed. Please confirm the new price.", "info");
+        return;
+      }
+      // The promo token was refused (expired, used, or for another price): nothing was booked.
+      const refused = promoBookingErrorOf(err);
+      if (refused) {
+        promo.bookingRefused(refused);
+        toast.show(bookingMessage(refused), "error");
         return;
       }
       toast.show(err instanceof Error ? err.message : "Couldn't book the ride", "error");
@@ -306,10 +321,16 @@ export function App() {
             />
             {ride.dropoff && priceQuote.quote && (
               <div className="price-row">
-                <PriceTag size="lg" amount={priceQuote.quote.price} currency={priceQuote.quote.currency} />
+                <PriceTag
+                  size="lg"
+                  amount={promo.applied ? promo.applied.finalPrice : priceQuote.quote.price}
+                  was={promo.applied ? priceQuote.quote.price : undefined}
+                  currency={priceQuote.quote.currency}
+                />
                 <SurgeBadge multiplier={priceQuote.quote.multiplier} />
               </div>
             )}
+            {ride.dropoff && priceQuote.quote && <PromoField promo={promo} canApply />}
             {ride.dropoff && plannedRoute && (
               <EtaBadge distanceKm={plannedRoute.distanceKm} durationSec={plannedRoute.durationSec} />
             )}
@@ -351,9 +372,17 @@ export function App() {
 
             {!inRide && <StatusBadge status={BADGE_STATUS[phase]} />}
 
+            {ride.price !== null && ride.discount > 0 && (
+              <p className="promo__applied-note">
+                {ride.promoCode ? `Promo ${ride.promoCode}` : "Promo"} saves you <PriceTag amount={ride.discount} />
+              </p>
+            )}
             {ride.price !== null && (
               <div className="price-row">
-                <PriceTag amount={ride.price} />
+                <PriceTag
+                  amount={ride.discount > 0 ? Math.max(ride.price - ride.discount, 0) : ride.price}
+                  was={ride.discount > 0 ? ride.price : undefined}
+                />
                 <SurgeBadge multiplier={ride.surgeMultiplier} />
               </div>
             )}
@@ -374,7 +403,7 @@ export function App() {
                 Cancel trip
               </Button>
             )}
-            {phase === "completed" && <Receipt tripId={tripId} rated={rated} tip={tip} />}
+            {phase === "completed" && <Receipt tripId={tripId} rated={rated} tip={tip} discount={ride.discount} promoCode={ride.promoCode} />}
             {phase === "completed" && (
               <Card padding="sm">
                 <div className="rating-box">

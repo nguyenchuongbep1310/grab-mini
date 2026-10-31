@@ -167,6 +167,31 @@ describe("useRide state machine", () => {
     expect(result.current[0].price).toBe(50000);
   });
 
+  it("keeps the promo code and discount an order was booked with, and clears them on reset", () => {
+    const { result } = renderHook(() => useRide());
+    expect(result.current[0]).toMatchObject({ promoCode: "", discount: 0 });
+
+    act(() => {
+      result.current[1]({ type: "bookStarted" });
+      result.current[1]({ type: "bookSucceeded", orderId: "o1", price: 50000, promoCode: "WELCOME10", discount: 5000 });
+    });
+    expect(result.current[0]).toMatchObject({ promoCode: "WELCOME10", discount: 5000 });
+
+    act(() => result.current[1]({ type: "reset" }));
+    expect(result.current[0]).toMatchObject({ promoCode: "", discount: 0 });
+  });
+
+  it("restores the discount of a ride that was already under way", () => {
+    const { result } = renderHook(() => useRide());
+    act(() =>
+      result.current[1]({
+        type: "restored",
+        ride: { orderId: "o1", phase: "searching", vehicleType: "CAR", dropoff: { lat: 1, lng: 2 }, price: 50000, promoCode: "FLAT15K", discount: 15000 },
+      }),
+    );
+    expect(result.current[0]).toMatchObject({ promoCode: "FLAT15K", discount: 15000 });
+  });
+
   it("handles cancellations and no_driver outcomes", () => {
     const { result } = renderHook(() => useRide());
 

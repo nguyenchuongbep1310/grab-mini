@@ -31,6 +31,9 @@ export interface RideState {
   /** What the rider pays (VND), locked at booking; null until booked. */
   price: number | null;
   surgeMultiplier: number;
+  /** The promo code the ride was booked with (empty for none) and the VND it took off `price`. */
+  promoCode: string;
+  discount: number;
 }
 
 export const initialRide: RideState = {
@@ -46,6 +49,8 @@ export const initialRide: RideState = {
   cancelledBy: "",
   price: null,
   surgeMultiplier: 1,
+  promoCode: "",
+  discount: 0,
 };
 
 /** A ride that was already under way when the page opened. */
@@ -58,6 +63,8 @@ export interface ActiveRide {
   tripId?: string;
   price?: number | null;
   surgeMultiplier?: number;
+  promoCode?: string;
+  discount?: number;
 }
 
 /** How a search that was still pending turned out (found by asking, not by a push). */
@@ -72,7 +79,7 @@ type Action =
   | { type: "restored"; ride: ActiveRide }
   | { type: "outcome"; orderId: string; outcome: Outcome }
   | { type: "bookStarted" }
-  | { type: "bookSucceeded"; orderId: string; price?: number | null; surgeMultiplier?: number }
+  | { type: "bookSucceeded"; orderId: string; price?: number | null; surgeMultiplier?: number; promoCode?: string; discount?: number }
   | { type: "bookFailed" }
   | { type: "tripLoaded"; tripId: string }
   | { type: "orderCancelled"; orderId: string }
@@ -113,6 +120,8 @@ function reduce(state: RideState, action: Action): RideState {
         tripId: ride.tripId ?? null,
         price: ride.price ?? null,
         surgeMultiplier: ride.surgeMultiplier ?? 1,
+        promoCode: ride.promoCode ?? "",
+        discount: ride.discount ?? 0,
       });
     }
 
@@ -135,7 +144,12 @@ function reduce(state: RideState, action: Action): RideState {
     case "bookSucceeded":
       // The match can be pushed over the WebSocket before the POST response
       // lands, in which case the ride has already moved past "booking".
-      const priced = { price: action.price ?? null, surgeMultiplier: action.surgeMultiplier ?? 1 };
+      const priced = {
+        price: action.price ?? null,
+        surgeMultiplier: action.surgeMultiplier ?? 1,
+        promoCode: action.promoCode ?? "",
+        discount: action.discount ?? 0,
+      };
       return state.phase === "booking"
         ? moveTo(state, "searching", { orderId: action.orderId, ...priced })
         : { ...state, orderId: state.orderId ?? action.orderId, ...priced };

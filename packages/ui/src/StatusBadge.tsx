@@ -20,6 +20,11 @@ const STATUS_STYLES: Record<string, StatusStyle> = {
   CANCELLED: { label: "Cancelled", tone: "danger" },
   AVAILABLE: { label: "Available", tone: "success" },
   ON_TRIP: { label: "On trip", tone: "success" },
+  // Promotions (Ops dashboard).
+  ACTIVE: { label: "Active", tone: "success" },
+  SCHEDULED: { label: "Scheduled", tone: "info" },
+  EXPIRED: { label: "Expired", tone: "neutral" },
+  DISABLED: { label: "Disabled", tone: "danger" },
 };
 
 export interface StatusBadgeProps {

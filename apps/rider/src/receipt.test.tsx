@@ -57,6 +57,25 @@ describe("Receipt", () => {
     expect(receipt).toHaveTextContent(/Total\s*120\.000đ/);
   });
 
+  it("shows the fare before the promo, the discount, and the total actually charged", async () => {
+    // Payment Service captured the net fare: 100.000 - 10.000.
+    vi.spyOn(client, "getTripPayments").mockResolvedValue(response([pay("FARE", 90000), pay("TIP", 10000)]));
+    render(<Receipt tripId="t1" rated tip={10000} discount={10000} promoCode="WELCOME10" />);
+
+    const receipt = await screen.findByLabelText("Receipt");
+    expect(receipt).toHaveTextContent(/Fare\s*100\.000đ/);
+    expect(receipt).toHaveTextContent(/Promo WELCOME10\s*-10\.000đ/);
+    expect(receipt).toHaveTextContent(/Total\s*100\.000đ/);
+  });
+
+  it("has no discount line without a promo", async () => {
+    vi.spyOn(client, "getTripPayments").mockResolvedValue(response([pay("FARE", 90000)]));
+    render(<Receipt tripId="t1" rated={false} tip={0} discount={0} promoCode="" />);
+    const receipt = await screen.findByLabelText("Receipt");
+    expect(receipt).not.toHaveTextContent("Promo");
+    expect(receipt).toHaveTextContent(/Fare\s*90\.000đ/);
+  });
+
   it("says it is settling until the fare shows up, then shows it", async () => {
     const spy = vi
       .spyOn(client, "getTripPayments")

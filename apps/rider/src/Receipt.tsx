@@ -74,10 +74,13 @@ export interface ReceiptProps {
   tripId: string | null;
   rated: boolean;
   tip: number;
+  /** VND a promo code took off the fare (0 or absent for none), and the code. */
+  discount?: number;
+  promoCode?: string;
 }
 
 /** The receipt a rider sees once a trip completes: fare + tip = total. */
-export function Receipt({ tripId, rated, tip }: ReceiptProps) {
+export function Receipt({ tripId, rated, tip, discount = 0, promoCode }: ReceiptProps) {
   const { lines, gaveUp } = useReceipt(tripId, rated, tip);
   if (!tripId) return null;
 
@@ -89,13 +92,21 @@ export function Receipt({ tripId, rated, tip }: ReceiptProps) {
       </Card>
     );
   }
+  // The captured fare is already net of the promo; show the fare before it and the discount as its own line.
+  const discounted = discount > 0 && lines.fare !== null;
   return (
     <Card padding="sm">
       <dl className="receipt" aria-label="Receipt">
         <div>
           <dt>Fare</dt>
-          <dd>{lines.fare !== null ? vnd(lines.fare) : "Payment declined"}</dd>
+          <dd>{lines.fare !== null ? vnd(lines.fare + (discounted ? discount : 0)) : "Payment declined"}</dd>
         </div>
+        {discounted && (
+          <div className="receipt__discount">
+            <dt>{promoCode ? `Promo ${promoCode}` : "Promo"}</dt>
+            <dd>-{vnd(discount)}</dd>
+          </div>
+        )}
         {lines.tip !== null && (
           <div>
             <dt>Tip</dt>

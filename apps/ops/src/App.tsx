@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { Card, StarRating, Stat, SurgeBadge } from "@grab-mini/ui";
+import { signIn } from "@grab-mini/client";
+import { Promotions } from "./Promotions";
 import { loadSnapshot, type Snapshot } from "./stats";
+
+// Promotion management needs an admin token. In development Auth Service signs one for
+// whoever asks (see @grab-mini/client); a real deployment replaces that sign-in, not this call.
+signIn("admin", new URLSearchParams(location.search).get("admin") ?? "ops-1");
 
 const REFRESH_MS = 3000;
 
@@ -53,6 +59,8 @@ export function App() {
       {error && <Card className="ops__error">{error}</Card>}
 
       {snapshot && <Dashboard s={snapshot} />}
+
+      <Promotions />
     </div>
   );
 }

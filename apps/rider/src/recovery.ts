@@ -20,6 +20,8 @@ export async function findActiveRide(riderId: string): Promise<ActiveRide | null
     dropoff: order.dropoff,
     price: order.price,
     surgeMultiplier: order.surgeMultiplier,
+    promoCode: order.promoCode,
+    discount: order.discount,
   };
 
   if (order.status === "PENDING") return { ...base, phase: "searching" };
