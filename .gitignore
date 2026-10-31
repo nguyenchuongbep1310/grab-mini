@@ -24,3 +24,8 @@ dump.rdb
 /services/*/pricing-service
 test-results/
 playwright-report/
+
+# Local agent skills and review output
+.agents/
+skills-lock.json
+docs/SECURITY-REVIEW.md
