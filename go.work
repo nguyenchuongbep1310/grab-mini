@@ -33,6 +33,7 @@ use (
 	./services/pkg/tracing
 	./services/payment-service
 	./services/pricing-service
+	./services/profile-service
 	./services/promotion-service
 	./services/rating-service
 	./services/routing-service

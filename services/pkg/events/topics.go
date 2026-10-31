@@ -3,16 +3,17 @@ package events
 import "fmt"
 
 const (
-	TopicOrderCreated         = "order.created"
-	TopicOrderMatched         = "order.matched"
-	TopicOrderNoDriverFound   = "order.no_driver_found"
-	TopicOrderCancelled       = "order.cancelled"
-	TopicDriverLocationUpdate = "driver.location.updated"
-	TopicTripStatusChanged    = "trip.status.changed"
-	TopicTripRated            = "trip.rated"
-	TopicPaymentRecorded      = "payment.recorded"
-	TopicPromotionRedeemed    = "promotion.redeemed"
-	TopicChatMessageSent      = "chat.message.sent"
+	TopicOrderCreated              = "order.created"
+	TopicOrderMatched              = "order.matched"
+	TopicOrderNoDriverFound        = "order.no_driver_found"
+	TopicOrderCancelled            = "order.cancelled"
+	TopicDriverLocationUpdate      = "driver.location.updated"
+	TopicTripStatusChanged         = "trip.status.changed"
+	TopicTripRated                 = "trip.rated"
+	TopicPaymentRecorded           = "payment.recorded"
+	TopicPromotionRedeemed         = "promotion.redeemed"
+	TopicChatMessageSent           = "chat.message.sent"
+	TopicDriverApplicationReviewed = "driver.application.reviewed"
 )
 
 func DeadLetterTopic(topic string) string {

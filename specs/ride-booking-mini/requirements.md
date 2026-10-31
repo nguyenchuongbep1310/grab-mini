@@ -133,6 +133,30 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - THE Chat Service SHALL delete messages, and the rows of trips that ended, after `CHAT_RETENTION_DAYS` (default 30).
 - **US-9.6** (`ChatSheet` in both apps, task 10.3, not built yet): As a rider or a driver, I want a chat sheet opened from the trip screen, that loads the history when opened and appends new messages from pushes.
 
+### 10. Profiles and driver onboarding
+- **US-10.1**: As a rider, I want a profile with my name and phone, so drivers and the app know who I am.
+  - WHEN a rider sends `PUT /riders/{id}` with a name (1 to 80 characters) and optionally a phone, THE Profile Service SHALL save it and answer with the saved profile; IF a field is invalid, THE Profile Service SHALL answer 400 with the code `invalid_profile` and the `field`.
+  - THE Profile Service SHALL take whose profile it is from the token alone: IF the id in the path is not the caller's, it SHALL answer 403 whether or not that profile exists; IF the caller is not a rider, 403; IF there is no valid token, 401.
+  - WHEN a rider with no profile asks for theirs, THE Profile Service SHALL answer 200 with empty fields.
+- **US-10.2**: As a driver, I want to apply to drive with my name, vehicle and plate, so I can be offered trips.
+  - WHEN a driver saves a profile, THE Profile Service SHALL store the name, phone, vehicle type (`CAR` or `BIKE`), plate (in capitals), model and colour, and SHALL NOT take the status from the request.
+  - WHEN a driver with a name, vehicle type and plate applies, THE Profile Service SHALL set the status `PENDING` (201); IF they are already `PENDING` or `APPROVED`, it SHALL change nothing and answer 200; IF they are `SUSPENDED`, 409 `suspended`; IF the profile is incomplete, 422 `incomplete_profile`.
+  - THE Profile Service SHALL validate text loosely: trim it, refuse control characters, line separators and bidirectional overrides, count characters rather than bytes, and accept letters of any script.
+- **US-10.3**: As an operator, I want to review driver applications and take a driver out of service.
+  - WHEN an admin lists `GET /driver-applications?status=PENDING`, THE Profile Service SHALL return them oldest first, a page at a time, with a cursor that neither skips nor repeats a driver.
+  - WHEN an admin approves, rejects or suspends a driver, THE Profile Service SHALL change the status and queue `driver.application.reviewed` (key `driverId`) in the same transaction; rejecting and suspending SHALL need a reason of 1 to 500 characters, which the driver can read.
+  - THE Profile Service SHALL allow only `PENDING` to `APPROVED` or `REJECTED`, `APPROVED` to `SUSPENDED`, and `SUSPENDED` to `APPROVED` (and `REJECTED` to `PENDING` through the driver's new application), and SHALL answer any other review with 409 `invalid_transition` naming the status; a non-admin SHALL get 403.
+  - WHEN an approved driver changes the plate or vehicle type, THE Profile Service SHALL set the status `PENDING` and queue a `driver.application.reviewed` with status `SUSPENDED` and `reviewedBy` `system` in the same transaction.
+- **US-10.4**: As an operator, I want the decision to decide who gets trips.
+  - WHEN Matching Service receives an `APPROVED` result for a driver who has no active status, is `OFFLINE`, or whose assignment lease has run out, THE Matching Service SHALL make the driver `AVAILABLE` with the vehicle type, as seeding does; it SHALL NOT change a driver who is `ASSIGNED` or `ON_TRIP`.
+  - WHEN Matching Service receives a `REJECTED` or `SUSPENDED` result, THE Matching Service SHALL stop offering the driver trips; IF the driver is on an order or trip they SHALL finish it and SHALL NOT be made `AVAILABLE` afterwards.
+  - THE Matching Service SHALL ignore a result that is not newer (by `occurredAt`) than the last one applied to that driver, so repeated and out-of-order deliveries converge, and SHALL NOT require a profile to exist for a driver to be matched.
+- **US-10.5**: As a rider, I want to know who is coming.
+  - WHEN a signed-in user asks `GET /drivers/{id}/public` for an `APPROVED` driver, THE Profile Service SHALL return the name, vehicle type, plate, model and colour and SHALL NOT return the phone or status; for any other driver it SHALL answer 404.
+- **US-10.6**: As a person whose data is held, I want my name, phone and plate kept out of logs.
+  - THE Profile Service SHALL NOT write a name, phone or plate to a log, and SHALL send `Cache-Control: no-store` with a profile.
+- **US-10.7** (Rider and Driver Apps and the Ops dashboard, task 11.3, not built yet): As a rider I want a profile screen and to see the matched driver's name, vehicle and plate; as a driver an onboarding form and a status screen (pending, approved, rejected with the reason) and no trips until approved; as an operator a review queue.
+
 ## Technical constraints
 - Kafka runs locally via Docker Compose, with Kafka UI for observing topics/offsets.
 - No two-phase distributed transactions — eventual consistency is acceptable.
@@ -142,5 +166,6 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 - A real payment gateway or card processor (rides are settled through a double-entry ledger against a sandbox provider; no payouts, refunds or reconciliation)
 - Per-user targeting of promotions, stacking several codes on one order, referral credits
 - Chat read receipts, typing indicators, attachments, and moderation beyond length, control characters and a rate limit
+- Document upload, background checks, identity verification, phone verification and deleting or exporting a person's profile
 - Multi-region, high-availability Kafka cluster
 - Full authentication (mock user/driver ids are acceptable initially)

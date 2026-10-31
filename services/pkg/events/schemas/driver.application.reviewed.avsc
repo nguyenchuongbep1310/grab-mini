@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "DriverApplicationReviewed",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "driverId", "type": "string"},
+    {"name": "status", "type": "string"},
+    {"name": "vehicleType", "type": "string"},
+    {"name": "reason", "type": "string", "default": ""},
+    {"name": "reviewedBy", "type": "string", "default": ""}
+  ]
+}

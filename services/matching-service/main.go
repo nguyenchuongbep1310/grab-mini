@@ -184,6 +184,7 @@ func runConsumer(ctx context.Context, env Env) {
 	// and is waited for so the Redis client isn't closed under it.
 	var cancels sync.WaitGroup
 	cancels.Go(func() { runCancelConsumer(ctx, env, rdb, codec) })
+	cancels.Go(func() { runReviewConsumer(ctx, env, rdb, codec) })
 	defer cancels.Wait()
 
 	kafkaconsumer.Run(ctx, kafkaconsumer.Config{

@@ -9,23 +9,33 @@ import {
   chatMessageFromPush,
   chatRetryAfterOf,
   createOrder,
+  applyAsDriver,
   createPromotion,
   disablePromotion,
   getActiveTrip,
+  getDriverProfile,
+  getDriverPublic,
   getDriverRating,
   getDriverReviews,
   getLatestOrder,
   getOrder,
   getQuote,
+  getRiderProfile,
   getRoute,
   listChatMessages,
+  listDriverApplications,
   listPromotions,
   newQuoteOf,
   promoBookingErrorOf,
+  profileErrorOf,
+  profileFieldOf,
   promoRejectionOf,
   rateTrip,
+  reviewDriver,
   sendChatMessage,
   tripAction,
+  updateDriverProfile,
+  updateRiderProfile,
   useNotificationSocket,
   validatePromotion,
   waitForOrder,
@@ -297,6 +307,117 @@ describe("auth & api client", () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "closed", code: "chat_closed" }), { status: 409 }));
     await expect(sendChatMessage("t-1", "late", { retryDelayMs: 1 })).rejects.toMatchObject({ status: 409 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    forgetToken();
+  });
+
+  it("reads and writes the rider's own profile", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const profile = { riderId: "rider-1", name: "Hoàng Gia Bảo", phone: "0900 100 001", updatedAt: "2026-01-02T03:04:05.123456Z" };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-r1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ riderId: "rider-1", name: "", phone: "", updatedAt: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(profile), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "name: is required", code: "invalid_profile", field: "name" }), { status: 400 }));
+
+    expect((await getRiderProfile("rider-1")).updatedAt).toBeNull();
+    expect(fetchMock.mock.calls[1][0]).toBe("/profile-api/riders/rider-1");
+    expect(await updateRiderProfile("rider-1", { name: "Hoàng Gia Bảo", phone: "0900 100 001" })).toEqual(profile);
+    const [url, init] = fetchMock.mock.calls[2];
+    expect(url).toBe("/profile-api/riders/rider-1");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body)).toEqual({ name: "Hoàng Gia Bảo", phone: "0900 100 001" });
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt-r1");
+
+    const err = await updateRiderProfile("rider-1", { name: "" }).catch((e) => e);
+    expect(profileErrorOf(err)).toBe("invalid_profile");
+    expect(profileFieldOf(err)).toBe("name");
+    forgetToken();
+  });
+
+  it("saves a driver's profile, applies, and reads the public view (null when there is none)", async () => {
+    signIn("driver", "driver-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const base = {
+      driverId: "driver-1", name: "Nguyễn Văn An", phone: "0900 000 001", vehicleType: "CAR", plate: "51A-123.45",
+      model: "Toyota Vios", color: "Trắng", reason: "", reviewedAt: null, statusAt: future, updatedAt: future,
+    };
+    const publicView = { driverId: "driver-1", name: "Nguyễn Văn An", vehicleType: "CAR", plate: "51A-123.45", model: "Toyota Vios", color: "Trắng" };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-d1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...base, name: "", vehicleType: "", plate: "", status: "NONE" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...base, status: "NONE" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...base, status: "PENDING" }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "suspended", status: "SUSPENDED" }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(publicView), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "no such driver", code: "not_found" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "slow down", code: "rate_limited", retryAfter: 2 }), { status: 429 }));
+
+    expect((await getDriverProfile("driver-1")).status).toBe("NONE");
+    expect(fetchMock.mock.calls[1][0]).toBe("/profile-api/drivers/driver-1");
+    const input = { name: "Nguyễn Văn An", phone: "0900 000 001", vehicleType: "CAR" as const, plate: "51a-123.45", model: "Toyota Vios", color: "Trắng" };
+    expect((await updateDriverProfile("driver-1", input)).status).toBe("NONE");
+    expect(fetchMock.mock.calls[2][1].method).toBe("PUT");
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual(input);
+
+    expect((await applyAsDriver("driver-1")).status).toBe("PENDING");
+    expect(fetchMock.mock.calls[3][0]).toBe("/profile-api/drivers/driver-1/application");
+    expect(fetchMock.mock.calls[3][1].method).toBe("POST");
+    expect(fetchMock.mock.calls[3][1].body).toBeUndefined();
+    const suspended = await applyAsDriver("driver-1").catch((e) => e);
+    expect(profileErrorOf(suspended)).toBe("suspended");
+    expect(profileFieldOf(suspended)).toBeNull();
+
+    expect(await getDriverPublic("driver-1")).toEqual(publicView);
+    expect(fetchMock.mock.calls[5][0]).toBe("/profile-api/drivers/driver-1/public");
+    expect(await getDriverPublic("driver-9")).toBeNull();
+    // Only a 404 is "no such driver": other failures reject, so a card does not hide an outage.
+    await expect(getDriverPublic("driver-1")).rejects.toMatchObject({ status: 429 });
+    forgetToken();
+  });
+
+  it("lists driver applications and reviews a driver as an admin", async () => {
+    signIn("admin", "ops-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const app = {
+      driverId: "driver-7", name: "Lê Minh", phone: "0900 000 007", vehicleType: "BIKE", plate: "59-X1 123.45", model: "", color: "",
+      status: "PENDING", reason: "", reviewedAt: null, statusAt: future, updatedAt: future, reviewedBy: "",
+    };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-a", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ applications: [app], nextCursor: "1767323045123456.driver-7" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ applications: [], nextCursor: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ applications: [], nextCursor: null }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...app, status: "REJECTED", reason: "Plate unreadable", reviewedBy: "ops-1" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...app, status: "APPROVED", reviewedBy: "ops-1" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "invalid_transition", status: "APPROVED" }), { status: 409 }));
+
+    const page = await listDriverApplications();
+    expect(page.applications).toEqual([app]);
+    expect(fetchMock.mock.calls[1][0]).toBe("/profile-api/driver-applications");
+    await listDriverApplications({ status: "SUSPENDED", limit: 20, cursor: page.nextCursor ?? undefined });
+    const q = new URL(fetchMock.mock.calls[2][0], "http://x");
+    expect(q.pathname).toBe("/profile-api/driver-applications");
+    expect(Object.fromEntries(q.searchParams)).toEqual({ status: "SUSPENDED", limit: "20", cursor: "1767323045123456.driver-7" });
+    await listDriverApplications({ status: "PENDING" });
+    expect(fetchMock.mock.calls[3][0]).toBe("/profile-api/driver-applications?status=PENDING");
+
+    expect((await reviewDriver("driver-7", "reject", "Plate unreadable")).reason).toBe("Plate unreadable");
+    const [url, init] = fetchMock.mock.calls[4];
+    expect(url).toBe("/profile-api/drivers/driver-7/reject");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ reason: "Plate unreadable" });
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt-a");
+
+    expect((await reviewDriver("driver/7", "approve")).status).toBe("APPROVED");
+    expect(fetchMock.mock.calls[5][0]).toBe("/profile-api/drivers/driver%2F7/approve");
+    expect(JSON.parse(fetchMock.mock.calls[5][1].body)).toEqual({});
+    const conflict = await reviewDriver("driver-7", "approve").catch((e) => e);
+    expect(profileErrorOf(conflict)).toBe("invalid_transition");
+    expect(conflict.body.status).toBe("APPROVED");
+    expect(profileErrorOf(new ApiError("x", 400, { code: "invalid_text" }))).toBeNull(); // another service's code
+    expect(profileErrorOf(new Error("other"))).toBeNull();
     forgetToken();
   });
 

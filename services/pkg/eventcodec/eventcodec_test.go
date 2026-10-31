@@ -107,16 +107,17 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 	ctx := context.Background()
 
 	cases := map[string]any{
-		events.TopicOrderCreated:         &events.OrderCreated{},
-		events.TopicOrderMatched:         &events.OrderMatched{OrderID: "o", DriverID: "d"},
-		events.TopicOrderNoDriverFound:   &events.OrderNoDriverFound{OrderID: "o"},
-		events.TopicDriverLocationUpdate: &events.DriverLocationUpdated{DriverID: "d", Lat: 1, Lng: 2, Timestamp: "t"},
-		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
-		events.TopicOrderCancelled:       &events.OrderCancelled{OrderID: "o", RiderID: "r", CancelledBy: "RIDER", Reason: "x"},
-		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
-		events.TopicChatMessageSent:      &events.ChatMessageSent{MessageID: "m", TripID: "t", SenderID: "r", SenderRole: events.ChatRoleRider, RecipientID: "d", RecipientRole: events.ChatRoleDriver, Text: "I am at the gate"},
-		events.TopicPromotionRedeemed:    &events.PromotionRedeemed{OrderID: "o", RiderID: "r", Code: "WELCOME10", Discount: 20000, Status: events.PromotionStatusRedeemed, Currency: "VND"},
-		events.TopicPaymentRecorded:      &events.PaymentRecorded{PaymentID: "p", TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Kind: events.PaymentKindFare, Status: events.PaymentStatusCaptured, Amount: 50000, DriverAmount: 40000, PlatformAmount: 10000, Currency: "VND", LedgerTransactionID: "x"},
+		events.TopicOrderCreated:              &events.OrderCreated{},
+		events.TopicOrderMatched:              &events.OrderMatched{OrderID: "o", DriverID: "d"},
+		events.TopicOrderNoDriverFound:        &events.OrderNoDriverFound{OrderID: "o"},
+		events.TopicDriverLocationUpdate:      &events.DriverLocationUpdated{DriverID: "d", Lat: 1, Lng: 2, Timestamp: "t"},
+		events.TopicTripStatusChanged:         &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
+		events.TopicOrderCancelled:            &events.OrderCancelled{OrderID: "o", RiderID: "r", CancelledBy: "RIDER", Reason: "x"},
+		events.TopicTripRated:                 &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
+		events.TopicChatMessageSent:           &events.ChatMessageSent{MessageID: "m", TripID: "t", SenderID: "r", SenderRole: events.ChatRoleRider, RecipientID: "d", RecipientRole: events.ChatRoleDriver, Text: "I am at the gate"},
+		events.TopicDriverApplicationReviewed: &events.DriverApplicationReviewed{DriverID: "d", Status: events.ReviewSuspended, VehicleType: events.VehicleBike, Reason: "documents expired", ReviewedBy: "ops-1"},
+		events.TopicPromotionRedeemed:         &events.PromotionRedeemed{OrderID: "o", RiderID: "r", Code: "WELCOME10", Discount: 20000, Status: events.PromotionStatusRedeemed, Currency: "VND"},
+		events.TopicPaymentRecorded:           &events.PaymentRecorded{PaymentID: "p", TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Kind: events.PaymentKindFare, Status: events.PaymentStatusCaptured, Amount: 50000, DriverAmount: 40000, PlatformAmount: 10000, Currency: "VND", LedgerTransactionID: "x"},
 	}
 	for topic, in := range cases {
 		data, err := c.Encode(ctx, topic, in)
@@ -415,6 +416,28 @@ func TestChatMessageSurvivesARoundTrip(t *testing.T) {
 	}
 	var out events.ChatMessageSent
 	if err := c.Decode(context.Background(), events.TopicChatMessageSent, data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Errorf("got %+v, want %+v", out, in)
+	}
+}
+
+// A review result survives the codec with its reason (non-ASCII text and emoji included).
+func TestDriverReviewSurvivesARoundTrip(t *testing.T) {
+	_, url := newRegistry(t)
+	c := New(url)
+	in := events.DriverApplicationReviewed{
+		Envelope: events.Envelope{EventID: "e-1", OccurredAt: "2026-01-02T03:04:05.123456Z"},
+		DriverID: "driver-9", Status: events.ReviewRejected, VehicleType: events.VehicleCar,
+		Reason: "Biển số không khớp \U0001F698", ReviewedBy: "ops-1",
+	}
+	data, err := c.Encode(context.Background(), events.TopicDriverApplicationReviewed, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out events.DriverApplicationReviewed
+	if err := c.Decode(context.Background(), events.TopicDriverApplicationReviewed, data, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out != in {

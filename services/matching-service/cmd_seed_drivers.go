@@ -49,10 +49,12 @@ func runSeedDrivers(env Env) {
 		if err := driverstatus.SetVehicle(ctx, rdb, d.ID, string(d.Vehicle)); err != nil {
 			log.Fatalf("failed to set vehicle for %s: %v", d.ID, err)
 		}
+		// A driver Profile Service has suspended (driver:<id>:suspended) is recorded OFFLINE
+		// by Set, not AVAILABLE: re-seeding does not undo a suspension.
 		if err := driverstatus.Set(ctx, rdb, d.ID, driverstatus.Available); err != nil {
 			log.Fatalf("failed to set status for %s: %v", d.ID, err)
 		}
 	}
 
-	log.Printf("Seeded %d AVAILABLE drivers into Redis (driver-1..3 CAR, driver-4..5 BIKE)", len(seedDrivers))
+	log.Printf("Seeded %d drivers into Redis, AVAILABLE unless suspended (driver-1..3 CAR, driver-4..5 BIKE)", len(seedDrivers))
 }

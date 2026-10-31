@@ -39,8 +39,9 @@ groups:
         # Any message at all: a dead letter in the transactional flow is an event
         # that was not processed (an order not matched, a rating not counted).
         # Payment, Promotion and Chat Service have their own, more specific alerts
-        # (PaymentDeadLettered, PromotionDeadLettered, ChatDeadLettered, ChatPushDeadLettered).
-        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!~"driver.location.updated|chat.message.sent", group!~"payment-service-group|promotion-service-group|chat-service-group"}[5m])) > 0
+        # (PaymentDeadLettered, PromotionDeadLettered, ChatDeadLettered, ChatPushDeadLettered), and so does
+        # Matching's driver-review consumer (DriverReviewDeadLettered).
+        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!~"driver.location.updated|chat.message.sent", group!~"payment-service-group|promotion-service-group|chat-service-group|matching-service-driver-review-group"}[5m])) > 0
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.group }} dead-lettered messages from {{ $labels.topic }}"
@@ -320,6 +321,33 @@ groups:
           summary: "{{ $value }} chat messages were rate limited in 10 minutes"
           description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
           runbook: "docs/runbook.md#chat"
+
+  - name: grab-mini.profiles
+    rules:
+      # Profile Service itself consumes nothing: its failures show up as HTTPServerErrorsHigh and, for the review
+      # results it publishes, as OutboxBacklog / OutboxEventQuarantined (source="profile-service"). What can go wrong
+      # for riders is on the consuming side: Matching not applying a result.
+      - alert: DriverReviewConsumerLagHigh
+        # driver.application.reviewed is a trickle (one event per admin decision), so a backlog means the consumer is
+        # stuck, not busy. Until it catches up an admin's decision has no effect on matching: a suspended driver still
+        # gets trips and an approved one gets none. The generic KafkaConsumerLagGrowing still pages at 1000 and growing.
+        expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="matching-service-driver-review-group"}) > 10
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "matching-service-driver-review-group is {{ $value }} messages behind"
+          description: "Driver approvals and suspensions are not reaching Matching: a suspended driver can still be offered trips, and a newly approved one none."
+          runbook: "docs/runbook.md#driver-approval-and-suspension"
+
+      - alert: DriverReviewDeadLettered
+        # A review result that could not be applied will not apply itself: a suspension that never took effect is a
+        # driver who keeps getting trips. This is the one that pages.
+        expr: sum by (topic) (increase(kafka_consumer_messages_total{group="matching-service-driver-review-group", result="dead_lettered"}[5m])) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "matching-service dead-lettered a driver review result"
+          description: "An approval or suspension could not be applied after its retries (no driver id, an unknown status, or an approval without a vehicle type). A suspended driver may still be getting trips. Apply it by hand (runbook), fix the sender, then redrive."
+          runbook: "docs/runbook.md#driver-approval-and-suspension"
 
   - name: grab-mini.workloads
     rules:

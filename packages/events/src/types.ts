@@ -95,3 +95,18 @@ export interface ChatMessageSent extends EventEnvelope {
   recipientRole: ChatRole;
   text: string;
 }
+
+export type ReviewStatus = "APPROVED" | "REJECTED" | "SUSPENDED";
+
+/**
+ * Profile Service publishes it on `driver.application.reviewed` when an admin decides on a driver
+ * (or a driver's vehicle changes after approval: then `SUSPENDED`, reviewed by `system`).
+ * Matching Service consumes it; no app reads it. It carries ids and a reason, never a name, phone or plate.
+ */
+export interface DriverApplicationReviewed extends EventEnvelope {
+  driverId: string;
+  status: ReviewStatus;
+  vehicleType: VehicleType;
+  reason: string;
+  reviewedBy: string;
+}

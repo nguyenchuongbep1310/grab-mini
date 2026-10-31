@@ -125,6 +125,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - profile-service
       - promotion-service
       - rating-service
       - trip-service
@@ -162,6 +163,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - profile-service
       - promotion-service
       - rating-service
       - trip-service
@@ -264,6 +266,7 @@ spec:
       - chat-service
       - order-service
       - payment-service
+      - profile-service
       - promotion-service
       - rating-service
       - trip-service
@@ -341,6 +344,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - profile-service
       - promotion-service
       - rating-service
       - routing-service

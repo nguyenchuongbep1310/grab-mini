@@ -187,7 +187,8 @@ Match time = from when `order.created` is produced to when `order.matched` is pu
 3. **A real driver shortage, or bad data?** Is `rate(location_updates_total{result="applied"}[5m])` steady?
    If locations are not being updated, Driver Location Service or Location Gateway is broken
    (`location_reports_total` by `result`: `published`, `stationary`, `too_fast`, `invalid`, `error`).
-4. **Driver stuck in a state.** Matching only accepts drivers that are `AVAILABLE` (or `ASSIGNED` with an expired lease, default 120 seconds).
+4. **Driver stuck in a state.** Matching only accepts drivers that are `AVAILABLE` (or `ASSIGNED` with an expired lease, default 120 seconds),
+   and never one with a `driver:<id>:suspended` key (an admin rejected or suspended them: see [Driver approval and suspension](#driver-approval-and-suspension)).
    A driver that is `ON_TRIP` with no running trip is stuck. Check both sources:
    ```sql
    -- Trip Service Postgres: does the driver have a running trip?
@@ -200,6 +201,7 @@ Match time = from when `order.created` is produced to when `order.matched` is pu
    If there is **no running trip** but Redis still says `ON_TRIP`, the `trip-driver-release-group` consumer is behind or broken
    (its lag); once that is fixed, it releases the driver by itself. Release by hand only when you are sure no trip remains:
    `redis-cli SET driver:driver-7:status AVAILABLE`, then `redis-cli DEL driver:driver-7:assigned_until`.
+   (A driver who is suspended stays unmatchable whatever the status says; the next release back to `AVAILABLE` records `OFFLINE` for them.)
 5. **Stale locations:** `drivers:geo` keeps each driver's latest location; a driver who stops sending locations stays in the GEO set with the
    old location. There is no TTL: an offline driver can still be matched. (This is a known limitation, see production-design.)
 
@@ -416,6 +418,61 @@ What can go wrong is bookkeeping: a redemption recorded late or not at all, so a
 7. **`ChatRateLimitedSpike`:** more than 100 sends in 10 minutes were refused with 429. The limit is per sender (20 a minute by default, burst 5) and per instance. The service does not log each refusal (that would let a flood fill the logs); find the sender in the gateway or ingress access logs by the 429s on `POST /trips/*/messages`, and look for a client retrying in a loop. `chat_messages_rejected_total{reason}` splits the refusals (`rate_limited`, `chat_closed`, `invalid_text`, `not_participant`, `unknown_trip`, ...). To loosen the limit, set `CHAT_RATE_PER_MINUTE` and restart.
 8. **Messages are not reaching the other person.** The message is in `chat_messages` and in the outbox (`outbox_oldest_pending_age_seconds{source="chat-service"}`, see [Outbox backlog](#outbox-backlog)) before it is published; then Notification Service pushes it only to a recipient with an open socket (`notification_pushes_total`). With no socket the app shows it when the chat is opened or reloaded.
 9. **Retention.** Messages older than `CHAT_RETENTION_DAYS` (default 30) and ended trips that old are deleted hourly by every replica (`chat_pruned_total{table}`, and a log line with counts). To delete sooner for a legal request, `DELETE FROM chat_messages WHERE trip_id = '...'` is safe (history and the cursor just end); the copies listed above are not touched by it.
+
+## Driver approval and suspension
+
+**Alerts:** `DriverReviewConsumerLagHigh` (ticket), `DriverReviewDeadLettered` (page). Also `OutboxBacklog` with `source="profile-service"` and `HTTPServerErrorsHigh` for the API.
+**Meaning:** an admin's decision on a driver reaches Matching Service as `driver.application.reviewed` (group `matching-service-driver-review-group`), which keeps who is eligible in Redis. If it does not arrive, or is not applied, an **approved driver gets no trips** or a **suspended driver still gets trips**. The second is the one that matters. Profile Service consumes nothing.
+**Personal data.** Names, phones and plates are in Profile Service's Postgres only (and its backups). Do not paste them into tickets or chat, and do not look for them in logs, Kafka or Redis: they are not there, only driver ids, statuses and the admin's reason. See [production-design §20](../specs/ride-booking-mini/production-design.md).
+
+What Matching holds for a driver (`redis-cli`):
+```bash
+redis-cli MGET driver:driver-7:status driver:driver-7:vehicle    # AVAILABLE | ASSIGNED | ON_TRIP | OFFLINE | (nil), and CAR | BIKE
+redis-cli EXISTS driver:driver-7:suspended                       # 1 = out of service: every claim refuses them
+redis-cli GET driver:driver-7:review_at                          # microseconds of the last result applied (date -r $((N/1000000)))
+```
+What Profile Service holds (its Postgres; no names or plates needed to answer this):
+```sql
+SELECT driver_id, status, vehicle_type, reviewed_by, reviewed_at, status_at FROM driver_profiles WHERE driver_id = 'driver-7';
+SELECT id, topic, created_at FROM outbox WHERE source = 'profile-service' ORDER BY id;   -- not yet published
+```
+
+### A driver is approved but gets no trips
+
+1. **Is the profile `APPROVED`?** (SQL above.) `PENDING` means nobody approved yet; a vehicle change by an approved driver puts them back to `PENDING` on purpose (the reason says so).
+2. **Did the event leave Profile Service?** `outbox_oldest_pending_age_seconds{source="profile-service"}` and the query above: a row that stays means the relay is stuck ([Outbox backlog](#outbox-backlog)).
+3. **Did Matching apply it?** Lag of `matching-service-driver-review-group` ([Consumer lag](#consumer-lag)), `matching_driver_reviews_total{result}` (`available`, `approved_busy`, `stale`...) and the Matching log line `driver=<id> review APPROVED (event <id>): <result>`:
+   - `available`: they are `AVAILABLE` now. They also need a **location** (`driver.location.updated` from the Driver App) inside the match radius: approval does not give a position.
+   - `approved_busy`: they were `ASSIGNED` or `ON_TRIP`; they are `AVAILABLE` when that ends.
+   - `stale`: a newer result was applied first. Compare `driver:<id>:review_at` with the event's `occurredAt`; if the newer one is a suspension nobody meant, approve again in the Ops dashboard (a new, later result).
+4. **Is the driver already `AVAILABLE` with the right vehicle?** `MGET` above. A driver with a different vehicle type than the order is correctly skipped.
+5. **Last resort, to apply the approval by hand** (only if the profile is `APPROVED` and the driver has no trip): `redis-cli DEL driver:driver-7:suspended`, `redis-cli SET driver:driver-7:vehicle CAR`, `redis-cli SET driver:driver-7:status AVAILABLE`.
+
+### A suspended driver still gets trips
+
+1. **Is the profile `SUSPENDED` (or `REJECTED`, or `PENDING` after a vehicle change)?** If it is `APPROVED`, the suspension never happened: check the admin's click went through (409 `invalid_transition` means the driver was not `APPROVED`).
+2. **Is `driver:<id>:suspended` set?** If not, the event has not been applied: see lag and `DriverReviewDeadLettered` below. **Stop the trips now** with `redis-cli SET driver:driver-7:suspended 1` and, if `driver:driver-7:status` is `AVAILABLE`, `redis-cli SET driver:driver-7:status OFFLINE`. The claim scripts read the key on every claim, so this takes effect at once.
+3. **The key is set and the driver still has a trip.** A suspension never cancels a trip in progress: the driver finishes the one they are on and is then `OFFLINE` (`driver-7` released to `AVAILABLE` records `OFFLINE`). To take them off the road immediately, cancel their trip as the operator (Trip Service), do not edit Redis.
+4. **A different service sets the status.** Only `pkg/driverstatus` honours the key. Anything that writes `driver:<id>:status` itself (a script, a new service) can bypass it: put the key back and find the writer.
+
+### Alerts
+
+- **`DriverReviewConsumerLagHigh`:** more than 10 results waiting for 5 minutes on a topic that normally has none: the consumer is stuck. Look at the Matching pods, Redis ([Redis failover](#redis-failover)) and the handler errors (`kafka_consumer_messages_total{group="matching-service-driver-review-group",result="retried"}`). Applying is idempotent and safe out of order, so waiting is safe; what it costs is described above. Until it clears, apply urgent suspensions by hand (step 2 above).
+- **`DriverReviewDeadLettered` (page):** a result could not be applied after its retries: Matching rejects only results that can never succeed (no `driverId`, a status that is not `APPROVED`, `REJECTED` or `SUSPENDED`, an `APPROVED` without a vehicle type, an `occurredAt` that is not a time); anything else is retried first (Redis down). Inspect with `dlq-redrive -topic driver.application.reviewed -dry-run` (the DLQ holds ids, the status and the reason, no name, phone or plate). **Apply the decision by hand first** (the two procedures above), then fix the sender and redrive only if the event is now valid; redriving a result older than a later one is harmless (it is ignored as `stale`).
+- **`OutboxBacklog` for `profile-service`:** decisions are saved but not published, so nothing downstream changes. See [Outbox backlog](#outbox-backlog).
+
+### Rebuild Matching's view after Redis lost its data
+
+A failover to a replica that missed writes, or a flush, loses `driver:<id>:suspended`, `:status` and `:review_at`: suspended drivers are no longer blocked and nobody is `AVAILABLE` (except drivers seeded in development). Replay the topic into Matching (7 days are kept; see [Replay a topic](#replay-a-topic-reprocess-from-the-beginning), group `matching-service-driver-review-group`, topic `driver.application.reviewed`, KEDA paused for `matching-service`): every result is applied in order, ending in each driver's last decision. Drivers whose last decision is older than the topic's retention must be re-applied by hand from `driver_profiles`: for each `SUSPENDED`, `REJECTED` or `PENDING` driver set the `suspended` key, and for each `APPROVED` driver follow step 5 above. Do the suspensions first.
+
+### Profile Service errors seen by the apps
+
+- **403 `forbidden`:** the id in the path is not the token's subject; the app is calling for someone else.
+- **404 on `/drivers/<id>/public`:** the driver is not `APPROVED` (or unknown): the same answer on purpose. A rider whose driver was suspended mid-trip sees only the id until the trip ends.
+- **409 `invalid_transition`:** the admin acted on a driver who is not in the right status (someone else decided first, or the driver is `PENDING` again after a vehicle change); the body has the current status.
+- **429 `rate_limited` on the public view:** more than `PUBLIC_RATE_PER_MINUTE` (120) lookups a minute from one caller on one instance. `profile_requests_rejected_total{reason}` splits the refusals.
+- **A driver cannot apply (422 `incomplete_profile`, 409 `suspended`):** the first needs a name, vehicle type and plate saved; the second is a decision only an admin can lift (approve).
+- **Development.** `profile-service seed-dev` (run by `scripts/dev.sh`) approved `driver-1..5` and gave `rider-1..3` profiles, once; it published nothing, so these drivers are eligible because `matching-service seed-drivers` put them in Redis. Re-seeding Redis does not undo a suspension (a suspended driver is recorded `OFFLINE`).
 
 ## Pods not ready
 

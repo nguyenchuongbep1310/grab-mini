@@ -80,10 +80,10 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 - [x] 10.4 Infra and docs
 
 ### Phase 11 — Profiles and driver onboarding
-- [ ] 11.1 `profile-service`: rider and driver profiles, driver application and admin review, `driver.application.reviewed`
-- [ ] 11.2 Matching Service reacts to the review result
+- [x] 11.1 `profile-service`: rider and driver profiles, driver application and admin review, `driver.application.reviewed`
+- [x] 11.2 Matching Service reacts to the review result
 - [ ] 11.3 Rider App profile and driver card; Driver App onboarding; Ops review queue (admin)
-- [ ] 11.4 Infra and docs
+- [x] 11.4 Infra and docs
 
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system

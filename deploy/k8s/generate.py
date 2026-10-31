@@ -40,6 +40,10 @@ TOPICS = {
     # to recover from a consumer outage); the source of truth is chat-service's own table, pruned after
     # CHAT_RETENTION_DAYS. Low volume: 6 partitions, keyed by trip.
     "chat.message.sent": (6, 7 * DAY, 2),
+    # Review results (one per admin decision, so a trickle), keyed by driver. 6 partitions like its neighbours;
+    # Matching's copy of the outcome is in Redis, which is lost with Redis, so 7 days is also the window in
+    # which a lost Redis can be rebuilt by replaying this topic (see runbook, "Driver approval and suspension").
+    "driver.application.reviewed": (6, 7 * DAY, 2),
     "driver.location.updated": (48, 1 * DAY, 1),
 }
 
@@ -60,6 +64,9 @@ SERVICES = {
     # Rider and driver chat: participants learned from trip.status.changed, messages published through the
     # outbox as chat.message.sent. No Redis (its rate limit is per instance, in memory).
     "chat-service": dict(port=3011, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
+    # Rider and driver profiles, driver onboarding and admin review; publishes driver.application.reviewed through
+    # the outbox and consumes nothing, so it scales on CPU like the other API that only produces. No Redis.
+    "profile-service": dict(port=3012, kind="api", db=True, redis=False, scale=("cpu", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
@@ -77,7 +84,7 @@ CALLS = {"pricing-service": ["routing-service"]}
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
-MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service", "promotion-service", "chat-service"]
+MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service", "promotion-service", "chat-service", "profile-service"]
 
 # Dedupe tables grow one row per event and are only read for a redelivery, so
 # rows older than anything Kafka or the DLQ can still hand back are dead

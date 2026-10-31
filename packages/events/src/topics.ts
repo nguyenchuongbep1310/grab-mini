@@ -9,6 +9,7 @@ export const Topics = {
   PaymentRecorded: "payment.recorded",
   PromotionRedeemed: "promotion.redeemed",
   ChatMessageSent: "chat.message.sent",
+  DriverApplicationReviewed: "driver.application.reviewed",
 } as const;
 
 export type Topic = (typeof Topics)[keyof typeof Topics];

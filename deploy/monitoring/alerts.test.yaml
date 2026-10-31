@@ -567,6 +567,120 @@ tests:
               description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
               runbook: "docs/runbook.md#chat"
 
+  # ------------------------------------------------------------- driver review
+  - name: a stuck driver-review consumer is a ticket once it persists
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-driver-review-group", topic="driver.application.reviewed", partition="0"}'
+        values: '0 4 4 4 4 4 4 4 4 4 4 4 4 4'
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-driver-review-group", topic="driver.application.reviewed", partition="1"}'
+        values: '0 8 8 8 8 8 8 8 8 8 8 8 8 8'
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-group", topic="order.created", partition="0"}'
+        values: '0 900 900 900 900 900 900 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DriverReviewConsumerLagHigh
+        exp_alerts: []   # behind, but not for five minutes yet
+      - eval_time: 10m
+        alertname: DriverReviewConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: matching-service-driver-review-group}
+            exp_annotations:
+              summary: "matching-service-driver-review-group is 12 messages behind"
+              description: "Driver approvals and suspensions are not reaching Matching: a suspended driver can still be offered trips, and a newly approved one none."
+              runbook: "docs/runbook.md#driver-approval-and-suspension"
+
+  - name: a driver-review group that keeps up is not an alert, and the busy order group's lag is not a review alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-driver-review-group", topic="driver.application.reviewed", partition="0"}'
+        values: '0 3 6 2 0 0 5 0 0 0 0 0 0 0'
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-group", topic="order.created", partition="0"}'
+        values: '0 900 900 900 900 900 900 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: DriverReviewConsumerLagHigh
+        exp_alerts: []
+
+  - name: a huge growing driver-review backlog also trips the generic lag page
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="matching-service-driver-review-group", topic="driver.application.reviewed", partition="0"}'
+        values: '800+200x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: KafkaConsumerLagGrowing
+        exp_alerts:
+          - exp_labels: {severity: page, consumergroup: matching-service-driver-review-group, topic: driver.application.reviewed}
+            exp_annotations:
+              summary: "Consumer group matching-service-driver-review-group is falling behind on driver.application.reviewed"
+              description: "Lag is above 1000 messages and still growing. Riders see late or missing updates."
+              runbook: "docs/runbook.md#consumer-lag"
+
+  - name: a dead-lettered review result pages with the driver-approval runbook, and the generic page stays quiet for it
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="matching-service-driver-review-group", topic="driver.application.reviewed", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DriverReviewDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DriverReviewDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, topic: driver.application.reviewed}
+            exp_annotations:
+              summary: "matching-service dead-lettered a driver review result"
+              description: "An approval or suspension could not be applied after its retries (no driver id, an unknown status, or an approval without a vehicle type). A suspended driver may still be getting trips. Apply it by hand (runbook), fix the sender, then redrive."
+              runbook: "docs/runbook.md#driver-approval-and-suspension"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []   # one page, not two
+      - eval_time: 10m
+        alertname: DriverReviewDeadLettered
+        exp_alerts: []   # resolves once the counter stops moving
+
+  - name: matching's other groups still page through the generic alert, and do not raise the review alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="matching-service-group", topic="order.created", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'kafka_consumer_messages_total{group="matching-service-cancel-group", topic="order.cancelled", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DriverReviewDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, group: matching-service-group, topic: order.created}
+            exp_annotations:
+              summary: "matching-service-group dead-lettered messages from order.created"
+              description: "At least one message could not be processed after its retries. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#dead-letters"
+          - exp_labels: {severity: page, group: matching-service-cancel-group, topic: order.cancelled}
+            exp_annotations:
+              summary: "matching-service-cancel-group dead-lettered messages from order.cancelled"
+              description: "At least one message could not be processed after its retries. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#dead-letters"
+
+  - name: a profile-service review result stuck in its outbox pages through the generic outbox alert
+    interval: 1m
+    input_series:
+      - series: 'outbox_oldest_pending_age_seconds{source="profile-service"}'
+        values: '0 0 45 60 75 90 105 120'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: OutboxBacklog
+        exp_alerts:
+          - exp_labels: {severity: page, source: profile-service}
+            exp_annotations:
+              summary: "profile-service has events waiting 2m 0s to be published"
+              description: "State changes are committed but not announced: riders and other services are not being told."
+              runbook: "docs/runbook.md#outbox-backlog"
+
   # -------------------------------------------------------------------- business
   - name: slow matching breaches the SLO
     interval: 1m

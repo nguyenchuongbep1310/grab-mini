@@ -229,3 +229,29 @@ type ChatMessageSent struct {
 	RecipientRole string `json:"recipientRole" avro:"recipientRole"`
 	Text          string `json:"text" avro:"text"`
 }
+
+// Review results carried by DriverApplicationReviewed.
+const (
+	ReviewApproved  = "APPROVED"
+	ReviewRejected  = "REJECTED"
+	ReviewSuspended = "SUSPENDED"
+)
+
+// DriverApplicationReviewed is published by Profile Service (through its outbox, in the
+// transaction that changes the driver's status) whenever an admin decides on a driver, and
+// when a driver's vehicle changes after approval (then Status is SUSPENDED and ReviewedBy is
+// "system": the driver must be approved again for the new vehicle). Key: driverId.
+//
+// Status is APPROVED, REJECTED or SUSPENDED. Matching Service makes an APPROVED driver
+// eligible for trips (with VehicleType) and takes the other two out; a driver on a trip
+// finishes it first. OccurredAt is strictly increasing per driver, so a consumer applies a
+// result only if it is newer than the last one it applied. Reason is empty for an approval
+// without one. Reason and the ids are the only text here: no name, phone or plate.
+type DriverApplicationReviewed struct {
+	Envelope
+	DriverID    string      `json:"driverId" avro:"driverId"`
+	Status      string      `json:"status" avro:"status"`
+	VehicleType VehicleType `json:"vehicleType" avro:"vehicleType"`
+	Reason      string      `json:"reason" avro:"reason"`
+	ReviewedBy  string      `json:"reviewedBy" avro:"reviewedBy"`
+}

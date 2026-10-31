@@ -166,6 +166,28 @@ spec:
       - Write
       - Describe
       - Create
+    - resource:
+        type: group
+        name: matching-service-driver-review-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: driver.application.reviewed
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: driver.application.reviewed.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
@@ -519,6 +541,26 @@ spec:
       - Write
       - Describe
       - Create
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: profile-service
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+    - resource:
+        type: topic
+        name: driver.application.reviewed
+        patternType: literal
+      operations:
+      - Write
+      - Describe
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser

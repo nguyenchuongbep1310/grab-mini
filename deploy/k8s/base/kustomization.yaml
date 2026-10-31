@@ -8,6 +8,7 @@ resources:
 - backup/chat-service.yaml
 - backup/order-service.yaml
 - backup/payment-service.yaml
+- backup/profile-service.yaml
 - backup/promotion-service.yaml
 - backup/rating-service.yaml
 - backup/trip-service.yaml
@@ -18,6 +19,7 @@ resources:
 - migrations/chat-service.yaml
 - migrations/order-service.yaml
 - migrations/payment-service.yaml
+- migrations/profile-service.yaml
 - migrations/promotion-service.yaml
 - migrations/rating-service.yaml
 - migrations/trip-service.yaml
@@ -43,6 +45,7 @@ resources:
 - services/order-service.yaml
 - services/payment-service.yaml
 - services/pricing-service.yaml
+- services/profile-service.yaml
 - services/promotion-service.yaml
 - services/rating-service.yaml
 - services/routing-service.yaml
