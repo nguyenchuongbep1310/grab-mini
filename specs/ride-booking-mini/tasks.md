@@ -55,6 +55,36 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 - [x] 7.1 Run the full flow: rider books → matched → driver moves → completed, observe end to end via Kafka UI
 - [x] 7.2 Write a README describing how to run locally (docker compose up, seed data, run each app) — plus `pnpm dev:all` / `scripts/dev.sh` to do all of it in one command, and Docker Compose now creates the topics and keeps them across restarts
 
+## Phases 8 to 11: behave like a real app
+
+Design: [realism-design.md](./realism-design.md). Each phase is a service, its infrastructure, its documentation and a screen in the apps.
+
+### Phase 8 — Routing (ETA) and the admin role
+- [ ] 8.1 Auth: `admin` role (dev issuer only)
+- [ ] 8.2 `routing-service`: `GET /route` (distance, duration, polyline), deterministic model
+- [ ] 8.3 Pricing asks Routing for the distance, failing open to its own estimate
+- [ ] 8.4 Rider App: distance and ETA before booking, "driver arrives in N min" after the match
+- [ ] 8.5 Infra and docs: dev.sh, k8s, alerts, runbook, design/production-design/guide
+
+### Phase 9 — Promotions
+- [ ] 9.1 `promotion-service`: promotions, validation with a signed `promoToken`, redemptions, `promotion.redeemed`
+- [ ] 9.2 `order.created` v4 (`promoCode`, `discount`); Order Service verifies the token and locks the discount
+- [ ] 9.3 Payment Service charges the net amount
+- [ ] 9.4 Rider App promo field; Ops dashboard promotion management (admin)
+- [ ] 9.5 Infra and docs
+
+### Phase 10 — Chat
+- [ ] 10.1 `chat-service`: messages, participants from `trip.status.changed`, `chat.message.sent`
+- [ ] 10.2 Notification Service pushes chat messages to the other participant
+- [ ] 10.3 `ChatSheet` in the design system; used by the Rider and Driver apps
+- [ ] 10.4 Infra and docs
+
+### Phase 11 — Profiles and driver onboarding
+- [ ] 11.1 `profile-service`: rider and driver profiles, driver application and admin review, `driver.application.reviewed`
+- [ ] 11.2 Matching Service reacts to the review result
+- [ ] 11.3 Rider App profile and driver card; Driver App onboarding; Ops review queue (admin)
+- [ ] 11.4 Infra and docs
+
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
 - [x] Tip & richer reviews — `trip.rated` gains defaulted `tipAmount`/`currency` (Avro evolution), `trips.tip_amount`, Rating Service `driver_reviews` + tip totals + `GET /drivers/{id}/reviews`, `TipPicker` in the Rider App. The tip is a recorded amount only (no payments)
