@@ -31,7 +31,7 @@ var (
 
 	messagesRejected = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "chat_messages_rejected_total",
-		Help: "POST /trips/{id}/messages that were refused, by reason: unknown_trip, not_participant, invalid_text, chat_closed, rate_limited, key_mismatch, no_recipient, invalid_request.",
+		Help: "POST /trips/{id}/messages that were refused, by reason: unknown_trip, not_participant, invalid_text, chat_closed, rate_limited, key_mismatch, no_recipient, invalid_request, trip_lookup_unavailable.",
 	}, []string{"reason"})
 
 	tripEvents = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -96,6 +96,8 @@ type service struct {
 	limiter *auth.Limiter
 	// grace is how long a finished trip's chat stays writable.
 	grace time.Duration
+	// lookup asks Trip Service about a trip no event has told us of; nil when TRIP_SERVICE_URL is empty.
+	lookup *tripLookup
 }
 
 func newService(db *pgxpool.Pool, enc encoder, relay *outbox.Relay, env Env) *service {

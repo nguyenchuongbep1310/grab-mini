@@ -2,6 +2,9 @@
 // text messages while they meet.
 //
 // It learns who is on a trip, and when the trip ended, from trip.status.changed.
+// Trip Service publishes none when it creates a trip (ASSIGNED), so for a trip it
+// has not heard of this service asks Trip Service once, with the caller's own
+// token, and remembers the answer if it names the caller.
 // POST /trips/{id}/messages saves a message and announces it on chat.message.sent
 // through the outbox, in one transaction; Notification Service pushes it to the
 // other person. GET /trips/{id}/messages is the history, which is also how an app
@@ -62,6 +65,12 @@ func main() {
 	codec := eventcodec.New(env.SchemaRegistryURL)
 	relay := outbox.NewRelay(db, producer, outboxSource)
 	s := newService(db, codec, relay, env)
+	if s.lookup, err = newTripLookup(env.TripServiceURL, env.TripLookupTimeout); err != nil {
+		log.Fatal(err)
+	}
+	if s.lookup == nil {
+		log.Printf("TRIP_SERVICE_URL is empty: a trip is known only from its events")
+	}
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })

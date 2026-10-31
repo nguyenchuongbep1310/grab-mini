@@ -89,37 +89,9 @@ func (s *service) onTripStatusChanged(ctx context.Context, evt events.TripStatus
 		return nil
 	}
 
-	// Create the row if this is the first event of the trip, then lock it: two
-	// events of one trip handled at the same moment are applied one after the other.
-	tag, err := tx.Exec(ctx, `
-		INSERT INTO chat_trips (trip_id, rider_id, driver_id, status, updated_at)
-		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (trip_id) DO NOTHING`,
-		evt.TripID, evt.RiderID, evt.DriverID, string(evt.Status), at)
+	result, status, err := upsertTrip(ctx, tx, evt.TripID, evt.RiderID, evt.DriverID, evt.Status, at)
 	if err != nil {
 		return err
-	}
-	inserted := tag.RowsAffected() == 1
-	var riderID string
-	var status events.TripStatus
-	if err := tx.QueryRow(ctx, `SELECT rider_id, status FROM chat_trips WHERE trip_id = $1 FOR UPDATE`, evt.TripID).Scan(&riderID, &status); err != nil {
-		return err
-	}
-
-	result := "stale"
-	if inserted {
-		result = "applied"
-	}
-	if rank(evt.Status) > rank(status) {
-		if _, err := tx.Exec(ctx, `UPDATE chat_trips SET status = $2, updated_at = $3 WHERE trip_id = $1`, evt.TripID, string(evt.Status), at); err != nil {
-			return err
-		}
-		result = "applied"
-	}
-	if riderID == "" && evt.RiderID != "" {
-		if _, err := tx.Exec(ctx, `UPDATE chat_trips SET rider_id = $2 WHERE trip_id = $1`, evt.TripID, evt.RiderID); err != nil {
-			return err
-		}
-		result = "applied"
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
@@ -129,6 +101,46 @@ func (s *service) onTripStatusChanged(ctx context.Context, evt events.TripStatus
 		log.Printf("trip %s: %s after %s, kept", evt.TripID, evt.Status, status)
 	}
 	return nil
+}
+
+// upsertTrip records what is known of a trip, whether it comes from an event or
+// from a lookup in Trip Service: the row is created if missing, then locked, the
+// stored status only ever moves forward (an end never moves again), and a rider
+// id is filled in if the row had none. result is "applied" if the row changed or
+// was created and "stale" if nothing moved; status is the one held before.
+func upsertTrip(ctx context.Context, tx pgx.Tx, tripID, riderID, driverID string, newStatus events.TripStatus, at time.Time) (result string, status events.TripStatus, err error) {
+	// Create the row if this is the first we hear of the trip, then lock it: two
+	// writers of one trip at the same moment are applied one after the other.
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO chat_trips (trip_id, rider_id, driver_id, status, updated_at)
+		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (trip_id) DO NOTHING`,
+		tripID, riderID, driverID, string(newStatus), at)
+	if err != nil {
+		return "", "", err
+	}
+	inserted := tag.RowsAffected() == 1
+	var heldRider string
+	if err := tx.QueryRow(ctx, `SELECT rider_id, status FROM chat_trips WHERE trip_id = $1 FOR UPDATE`, tripID).Scan(&heldRider, &status); err != nil {
+		return "", "", err
+	}
+
+	result = "stale"
+	if inserted {
+		result = "applied"
+	}
+	if rank(newStatus) > rank(status) {
+		if _, err := tx.Exec(ctx, `UPDATE chat_trips SET status = $2, updated_at = $3 WHERE trip_id = $1`, tripID, string(newStatus), at); err != nil {
+			return "", "", err
+		}
+		result = "applied"
+	}
+	if heldRider == "" && riderID != "" {
+		if _, err := tx.Exec(ctx, `UPDATE chat_trips SET rider_id = $2 WHERE trip_id = $1`, tripID, riderID); err != nil {
+			return "", "", err
+		}
+		result = "applied"
+	}
+	return result, status, nil
 }
 
 // chatTrip is a trip as the chat sees it.

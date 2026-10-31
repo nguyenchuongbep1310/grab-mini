@@ -25,6 +25,8 @@ data:
   CANCELLATION_GRACE_SECONDS: '180'
   GEO_SHARD_DEGREES: '0'
   ROUTING_URL: http://routing-service:3009
+  TRIP_SERVICE_URL: http://trip-service:3002
+  TRIP_LOOKUP_TIMEOUT_MS: '500'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4318
   ALLOWED_ORIGINS: https://app.example.com
 ---

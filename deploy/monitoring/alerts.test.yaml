@@ -567,6 +567,39 @@ tests:
               description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
               runbook: "docs/runbook.md#chat"
 
+  - name: trip lookups that keep failing are a ticket
+    interval: 1m
+    input_series:
+      - series: 'chat_trip_lookups_total{result="error"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 5m   # not for 10 minutes yet
+        alertname: ChatTripLookupFailing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ChatTripLookupFailing
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "chat-service can't look trips up in Trip Service: chat of trips not yet picked up fails with 503"
+              runbook: "docs/runbook.md#chat"
+
+  - name: found, not found and forbidden lookups are not faults, and a brief blip is not a ticket
+    interval: 1m
+    input_series:
+      - series: 'chat_trip_lookups_total{result="found"}'
+        values: '0+10x30'
+      - series: 'chat_trip_lookups_total{result="not_found"}'
+        values: '0+1x30'
+      - series: 'chat_trip_lookups_total{result="forbidden"}'
+        values: '0+1x30'
+      - series: 'chat_trip_lookups_total{result="error"}'
+        values: '0 0 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ChatTripLookupFailing
+        exp_alerts: []
+
   # ------------------------------------------------------------- driver review
   - name: a stuck driver-review consumer is a ticket once it persists
     interval: 1m

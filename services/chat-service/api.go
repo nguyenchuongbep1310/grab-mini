@@ -121,15 +121,30 @@ type messageView struct {
 }
 
 // participant loads the trip and checks that the caller is on it. It writes the
-// refusal itself (404 for a trip this service has not heard of, 403 for a
-// stranger) and reports false.
+// refusal itself (404 for a trip neither the events nor Trip Service know, 503
+// if Trip Service had to be asked and could not answer, 403 for a stranger) and reports false.
 func (s *service) participant(w http.ResponseWriter, r *http.Request) (chatTrip, string, bool) {
 	caller, ok := auth.From(r.Context())
 	if !ok {
 		auth.Deny(w, http.StatusUnauthorized, "missing bearer token")
 		return chatTrip{}, "", false
 	}
-	t, err := findTrip(r.Context(), s.db, r.PathValue("id"))
+	tripID := r.PathValue("id")
+	t, err := findTrip(r.Context(), s.db, tripID)
+	if errors.Is(err, errNoTrip) {
+		// Not known from an event (a trip waiting for its pickup has none): ask Trip Service.
+		t, err = s.learnTrip(r.Context(), caller, r.Header.Get("Authorization"), tripID)
+	}
+	switch {
+	case errors.Is(err, errLookupUnavailable):
+		messagesRejected.WithLabelValues("trip_lookup_unavailable").Inc()
+		apiError(w, http.StatusServiceUnavailable, "trip_lookup_unavailable", "the trip could not be checked right now, try again in a moment")
+		return t, "", false
+	case errors.Is(err, errLookupForbidden):
+		messagesRejected.WithLabelValues("not_participant").Inc()
+		apiError(w, http.StatusForbidden, "not_participant", "you are not on this trip")
+		return t, "", false
+	}
 	if errors.Is(err, errNoTrip) {
 		messagesRejected.WithLabelValues("unknown_trip").Inc()
 		apiError(w, http.StatusNotFound, "unknown_trip", "no such trip")

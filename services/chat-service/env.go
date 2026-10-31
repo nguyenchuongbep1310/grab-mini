@@ -23,6 +23,10 @@ type Env struct {
 	// RatePerMinute is the sustained number of messages one sender may send per
 	// minute (CHAT_RATE_PER_MINUTE), on each instance.
 	RatePerMinute int
+	// TripServiceURL is where an unknown trip is looked up (TRIP_SERVICE_URL); empty turns lookups off.
+	TripServiceURL string
+	// TripLookupTimeout bounds that lookup (TRIP_LOOKUP_TIMEOUT_MS).
+	TripLookupTimeout time.Duration
 }
 
 func loadEnv() Env {
@@ -34,11 +38,21 @@ func loadEnv() Env {
 		Grace:             time.Duration(intEnv("CHAT_GRACE_MINUTES", 10, 0, 24*60)) * time.Minute,
 		RetentionDays:     intEnv("CHAT_RETENTION_DAYS", 30, 1, 3650),
 		RatePerMinute:     intEnv("CHAT_RATE_PER_MINUTE", 20, 1, 6000),
+		TripServiceURL:    envAllowEmpty("TRIP_SERVICE_URL", "http://localhost:3002"),
+		TripLookupTimeout: time.Duration(intEnv("TRIP_LOOKUP_TIMEOUT_MS", 500, 50, 10000)) * time.Millisecond,
 	}
 }
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// envAllowEmpty is getEnv, except that a variable set to the empty string stays empty.
+func envAllowEmpty(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return fallback

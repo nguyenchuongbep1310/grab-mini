@@ -322,6 +322,17 @@ groups:
           description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
           runbook: "docs/runbook.md#chat"
 
+      - alert: ChatTripLookupFailing
+        # A trip waiting for its pickup is known to chat only by asking Trip Service (it publishes no event at
+        # the match). While that fails, riders and drivers get a 503 on the chat of such trips, not a wrong
+        # answer. Not a page: trips already known, and every trip after its pickup, are unaffected.
+        expr: sum(rate(chat_trip_lookups_total{result="error"}[5m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "chat-service can't look trips up in Trip Service: chat of trips not yet picked up fails with 503"
+          runbook: "docs/runbook.md#chat"
+
   - name: grab-mini.profiles
     rules:
       # Profile Service itself consumes nothing: its failures show up as HTTPServerErrorsHigh and, for the review

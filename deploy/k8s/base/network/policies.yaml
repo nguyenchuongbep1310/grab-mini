@@ -423,6 +423,55 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: allow-egress-chat-service-to-trip-service
+  labels:
+    app.kubernetes.io/name: allow-egress-chat-service-to-trip-service
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - chat-service
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: trip-service
+    ports:
+    - port: 3002
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-trip-service-from-chat-service
+  labels:
+    app.kubernetes.io/name: allow-ingress-trip-service-from-chat-service
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: trip-service
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: chat-service
+    ports:
+    - port: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: allow-ingress-to-redis
   labels:
     app.kubernetes.io/name: allow-ingress-to-redis

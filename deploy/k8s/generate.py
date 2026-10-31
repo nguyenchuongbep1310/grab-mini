@@ -80,7 +80,7 @@ SERVICES = {
 
 # Services that call another service over HTTP (they forward the caller's bearer token): caller -> callees.
 # Each pair becomes an egress rule on the caller and an ingress rule on the callee.
-CALLS = {"pricing-service": ["routing-service"]}
+CALLS = {"pricing-service": ["routing-service"], "chat-service": ["trip-service"]}
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
@@ -982,6 +982,11 @@ def config_map():
                 # Pricing Service asks Routing Service for the distance behind a quote (CALLS), with a
                 # 300 ms timeout; empty turns routing off and quotes use the straight line.
                 "ROUTING_URL": f"http://routing-service:{SERVICES['routing-service']['port']}",
+                # Chat Service asks Trip Service (CALLS) who is on a trip no trip.status.changed has told it of
+                # (a trip waiting for its pickup), with the caller's own token and this timeout in ms. Empty
+                # turns the lookup off: a trip is then known only from its events.
+                "TRIP_SERVICE_URL": f"http://trip-service:{SERVICES['trip-service']['port']}",
+                "TRIP_LOOKUP_TIMEOUT_MS": "500",
                 "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector.monitoring:4318",
                 "ALLOWED_ORIGINS": "https://app.example.com",
             }}

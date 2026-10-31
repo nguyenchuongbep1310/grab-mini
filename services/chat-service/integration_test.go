@@ -751,3 +751,143 @@ func TestRetentionDeletesOldMessagesAndFinishedTripsOnly(t *testing.T) {
 		t.Errorf("second run: %d %d %v", m, tr, err)
 	}
 }
+
+// useTripService points the service at a fake Trip Service that knows one trip.
+func (f *fixture) useTripService(h func(http.ResponseWriter, *http.Request)) *fakeTripService {
+	f.t.Helper()
+	fake := newFakeTripService(f.t, h)
+	l, err := newTripLookup(fake.URL, time.Second)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.svc.lookup = l
+	return fake
+}
+
+func TestATripKnownOnlyToTripServiceCanBeReadAndMessaged(t *testing.T) {
+	f := newFixture(t)
+	trip := newID()
+	// Like the real one: only the two people on the trip are answered.
+	fake := f.useTripService(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "{}", 401)
+			return
+		}
+		tripJSON(trip, "rider-1", "driver-1", "ASSIGNED")(w, r)
+	})
+
+	if _, err := f.tripRow(trip); !errors.Is(err, errNoTrip) {
+		t.Fatalf("the trip should be unknown to chat at first: %v", err)
+	}
+	got := f.call("GET", "/trips/"+trip+"/messages", auth.Rider, "rider-1", nil)
+	wantStatus(t, "history of an assigned trip", got, 200)
+	if got.body["open"] != true || got.body["tripStatus"] != "ASSIGNED" {
+		t.Fatalf("body %v", got.body)
+	}
+	if h := <-fake.auth; h == "" || h == "Bearer " {
+		t.Fatalf("no token forwarded: %q", h)
+	}
+	row, err := f.tripRow(trip)
+	if err != nil || row.RiderID != "rider-1" || row.DriverID != "driver-1" || row.Status != events.TripStatusAssigned {
+		t.Fatalf("row %+v, %v", row, err)
+	}
+
+	// Now it is known: no second lookup, from either side.
+	wantStatus(t, "rider sends", f.send(trip, auth.Rider, "rider-1", "I am at the gate"), 201)
+	wantStatus(t, "driver sends", f.send(trip, auth.Driver, "driver-1", "two minutes"), 201)
+	if fake.calls.Load() != 1 {
+		t.Fatalf("Trip Service was asked %d times, want 1", fake.calls.Load())
+	}
+	if len(f.outboxEvents()) != 2 {
+		t.Fatalf("%d events published", len(f.outboxEvents()))
+	}
+
+	// A later event still moves the cached trip, and an older one does not move it back.
+	f.apply(event(trip, "rider-1", "driver-1", events.TripStatusInProgress, f.now))
+	if row, _ = f.tripRow(trip); row.Status != events.TripStatusInProgress {
+		t.Fatalf("status %s after the pickup event", row.Status)
+	}
+	f.apply(event(trip, "rider-1", "driver-1", events.TripStatusAssigned, f.now))
+	if row, _ = f.tripRow(trip); row.Status != events.TripStatusInProgress {
+		t.Fatalf("status %s after a stale ASSIGNED", row.Status)
+	}
+	f.apply(event(trip, "rider-1", "driver-1", events.TripStatusCompleted, f.now))
+	if row, _ = f.tripRow(trip); !finished(row.Status) {
+		t.Fatalf("status %s after completion", row.Status)
+	}
+}
+
+func TestTheLookupOfADriverFirstAndALaterLookupDoNotDowngradeTheTrip(t *testing.T) {
+	f := newFixture(t)
+	trip := newID()
+	status := "IN_PROGRESS"
+	f.useTripService(func(w http.ResponseWriter, r *http.Request) { tripJSON(trip, "rider-1", "driver-1", status)(w, r) })
+	wantStatus(t, "driver lists", f.call("GET", "/trips/"+trip+"/messages", auth.Driver, "driver-1", nil), 200)
+	// An event already got further; a lookup (here, a second one after the row is deleted) never moves it back.
+	f.apply(event(trip, "rider-1", "driver-1", events.TripStatusCompleted, f.now))
+	status = "ASSIGNED"
+	if _, _, err := upsertForTest(f, trip, "ASSIGNED"); err != nil {
+		t.Fatal(err)
+	}
+	if row, _ := f.tripRow(trip); row.Status != events.TripStatusCompleted {
+		t.Fatalf("status %s", row.Status)
+	}
+}
+
+func upsertForTest(f *fixture, trip string, status events.TripStatus) (string, events.TripStatus, error) {
+	tx, err := f.db.Begin(context.Background())
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(context.Background())
+	r, s, err := upsertTrip(context.Background(), tx, trip, "rider-1", "driver-1", status, f.now)
+	if err != nil {
+		return "", "", err
+	}
+	return r, s, tx.Commit(context.Background())
+}
+
+func TestTheLookupRefusesAndCachesNothingForAStranger(t *testing.T) {
+	f := newFixture(t)
+	trip := newID()
+	f.useTripService(tripJSON(trip, "rider-1", "driver-1", "ASSIGNED"))
+	wantCode(t, "another rider", f.call("GET", "/trips/"+trip+"/messages", auth.Rider, "rider-2", nil), 403, "not_participant")
+	wantCode(t, "another driver sends", f.send(trip, auth.Driver, "driver-2", "hi"), 403, "not_participant")
+	if _, err := f.tripRow(trip); !errors.Is(err, errNoTrip) {
+		t.Fatalf("a refused lookup cached the trip: %v", err)
+	}
+	if n := f.count(`SELECT count(*) FROM chat_messages`); n != 0 {
+		t.Fatalf("%d messages", n)
+	}
+}
+
+func TestAnUnknownTripIs404AndADownTripServiceIs503(t *testing.T) {
+	f := newFixture(t)
+	trip := newID()
+	f.useTripService(func(w http.ResponseWriter, r *http.Request) { http.Error(w, `{"error":"trip not found"}`, 404) })
+	wantCode(t, "trip service says 404", f.call("GET", "/trips/"+trip+"/messages", auth.Rider, "rider-1", nil), 404, "unknown_trip")
+	wantCode(t, "trip service says 404 on send", f.send(trip, auth.Rider, "rider-1", "hi"), 404, "unknown_trip")
+
+	f.useTripService(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", 500) })
+	got := f.call("GET", "/trips/"+trip+"/messages", auth.Rider, "rider-1", nil)
+	wantCode(t, "trip service 5xx", got, 503, "trip_lookup_unavailable")
+	wantCode(t, "trip service 5xx on send", f.send(trip, auth.Rider, "rider-1", "hi"), 503, "trip_lookup_unavailable")
+
+	// Down altogether: the connection is refused.
+	fake := f.useTripService(func(w http.ResponseWriter, r *http.Request) {})
+	fake.Close()
+	wantCode(t, "trip service down", f.call("GET", "/trips/"+trip+"/messages", auth.Rider, "rider-1", nil), 503, "trip_lookup_unavailable")
+	if _, err := f.tripRow(trip); !errors.Is(err, errNoTrip) {
+		t.Fatalf("a failed lookup cached the trip: %v", err)
+	}
+}
+
+func TestATripChatKnowsFromEventsNeedsNoTripService(t *testing.T) {
+	f := newFixture(t)
+	fake := f.useTripService(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", 500) })
+	trip := f.startTrip()
+	wantStatus(t, "send", f.send(trip, auth.Rider, "rider-1", "hi"), 201)
+	if fake.calls.Load() != 0 {
+		t.Fatalf("Trip Service was asked %d times for a known trip", fake.calls.Load())
+	}
+}

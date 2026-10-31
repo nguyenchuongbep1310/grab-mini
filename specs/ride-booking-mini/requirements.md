@@ -118,6 +118,8 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 - **US-9.2**: As a rider or a driver, I want my conversation to be private.
   - IF the caller is neither the rider nor the driver of the trip, THE Chat Service SHALL answer 403 (`not_participant`) for sending and for reading; IF the trip is unknown, 404 (`unknown_trip`); IF there is no valid token, 401. An admin token SHALL be refused (403).
   - WHEN Chat Service handles `trip.status.changed`, THE Chat Service SHALL learn the trip's rider and driver, and a redelivered event SHALL change nothing.
+  - WHEN a caller asks about a trip Chat Service has not learned from an event (a trip assigned and not yet picked up), THE Chat Service SHALL ask Trip Service once, with the caller's own token and a short timeout, and SHALL learn the trip from the answer only if it names the caller as the rider or the driver; a trip learned this way SHALL still be updated by later `trip.status.changed` events.
+  - IF Trip Service says the trip does not exist, THE Chat Service SHALL answer 404 (`unknown_trip`); IF the answer does not name the caller, 403 (`not_participant`), storing nothing; IF Trip Service cannot answer in time, 503 (`trip_lookup_unavailable`), storing nothing.
   - THE Chat Service and THE Notification Service SHALL NOT write the text of a message to a log.
 - **US-9.3**: As a rider or a driver, I want the chat to be open while the trip is on and for a short while after, and then to stay readable.
   - WHILE the trip is `ASSIGNED` or `IN_PROGRESS`, THE Chat Service SHALL accept messages.
