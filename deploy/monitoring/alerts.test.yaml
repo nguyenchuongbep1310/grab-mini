@@ -344,6 +344,48 @@ tests:
         alertname: KafkaMessagesDeadLettered
         exp_alerts: []   # one ticket, not a page as well
 
+  - name: a release that cannot be applied (a cancelled trip, no driver) is the same ticket, naming its topic
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="promotion-service-group", topic="trip.status.changed", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'kafka_consumer_messages_total{group="promotion-service-group", topic="order.no_driver_found", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PromotionDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: ticket, topic: order.no_driver_found}
+            exp_annotations:
+              summary: "promotion-service dead-lettered a message from order.no_driver_found"
+              description: "A redemption or release could not be recorded after its retries (an order that used a code this service does not know, say). Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#promotions"
+          - exp_labels: {severity: ticket, topic: trip.status.changed}
+            exp_annotations:
+              summary: "promotion-service dead-lettered a message from trip.status.changed"
+              description: "A redemption or release could not be recorded after its retries (an order that used a code this service does not know, say). Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#promotions"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []
+
+  - name: lag on the topics that release a redemption counts towards the promotion lag alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 400 400 400 400 400 400 400 400 400 400 400 400 400'
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="order.no_driver_found", partition="0"}'
+        values: '0 200 200 200 200 200 200 200 200 200 200 200 200 200'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: PromotionConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: promotion-service-group}
+            exp_annotations:
+              summary: "promotion-service-group is 600 messages behind"
+              description: "Redemptions are recorded late, so usage limits are enforced late and the validation endpoint counts too few uses."
+              runbook: "docs/runbook.md#promotions"
+
   - name: another service's dead letters do not raise the promotion alert
     interval: 1m
     input_series:

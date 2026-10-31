@@ -50,7 +50,8 @@ SERVICES = {
     # Settles rides: fare, tip and cancellation fee into a double-entry ledger. No Redis.
     "payment-service": dict(port=3008, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
     # Vouchers: validation (signs promo tokens, with the secret it shares with order-service), admin
-    # management, and redemptions recorded from order.created / order.cancelled. No Redis.
+    # management, and redemptions recorded from order.created and released by order.cancelled,
+    # trip.status.changed (CANCELLED) and order.no_driver_found. No Redis.
     "promotion-service": dict(port=3010, kind="api", db=True, redis=False, promo=True, scale=("lag", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),

@@ -4,8 +4,9 @@
 // signed promo token. Order Service verifies that token itself when the rider
 // books (it never calls this service on the booking path) and locks the discount
 // on the order. This service then learns of the order from order.created and
-// records the redemption, releases it on order.cancelled, and announces it on
-// promotion.redeemed through the outbox. Admins create and disable promotions.
+// records the redemption, releases it when the order ends without a ride
+// (order.cancelled, a cancelled trip, order.no_driver_found), and announces it
+// on promotion.redeemed through the outbox. Admins create and disable promotions.
 package main
 
 import (

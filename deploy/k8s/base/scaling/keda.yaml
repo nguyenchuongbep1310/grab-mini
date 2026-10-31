@@ -307,6 +307,28 @@ spec:
       offsetResetPolicy: earliest
       sasl: scram_sha512
       tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: promotion-service-group
+      topic: trip.status.changed
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
+  - type: kafka
+    authenticationRef:
+      name: keda-kafka-auth
+    metadata:
+      bootstrapServers: grab-mini-kafka-bootstrap:9093
+      consumerGroup: promotion-service-group
+      topic: order.no_driver_found
+      lagThreshold: '100'
+      offsetResetPolicy: earliest
+      sasl: scram_sha512
+      tls: enable
   - type: cpu
     metricType: Utilization
     metadata:

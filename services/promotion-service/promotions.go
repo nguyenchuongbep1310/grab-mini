@@ -38,7 +38,7 @@ var (
 
 	redemptionsReleased = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "promotion_redemptions_released_total",
-		Help: "Redemptions given back because the order was cancelled (order.cancelled).",
+		Help: "Redemptions given back because the order ended without a ride (order.cancelled, a cancelled trip, order.no_driver_found).",
 	})
 
 	redemptionsDuplicate = promauto.NewCounter(prometheus.CounterOpts{

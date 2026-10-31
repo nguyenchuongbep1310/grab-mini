@@ -133,6 +133,21 @@ func cancelled(orderID, rider string) events.OrderCancelled {
 	}
 }
 
+func tripCancelled(orderID, rider string) events.TripStatusChanged {
+	return events.TripStatusChanged{
+		Envelope: events.Envelope{EventID: newID(), OccurredAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		TripID:   newID(), OrderID: orderID, DriverID: "driver-1", RiderID: rider,
+		Status: events.TripStatusCancelled, CancelledBy: events.CancelledByRider,
+	}
+}
+
+func noDriver(orderID, rider string) events.OrderNoDriverFound {
+	return events.OrderNoDriverFound{
+		Envelope: events.Envelope{EventID: newID(), OccurredAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		OrderID:  orderID, RiderID: rider,
+	}
+}
+
 // ------------------------------------------------------------ redemption ----
 
 func TestAnOrderWithACodeIsRedeemedOnceAndAnnounced(t *testing.T) {
@@ -670,5 +685,219 @@ func TestSeedDevAddsTheDemoCodesOnce(t *testing.T) {
 	}
 	if d := decode(t, f.validate("rider-1", "FLAT15K", "87000", "BIKE"))["discount"]; d != float64(15000) {
 		t.Errorf("FLAT15K on 87,000 = %v", d)
+	}
+}
+
+// ----------------------------------------------- orders that end without a ride ----
+
+// Each way an order ends without a ride releases its redemption, with no
+// promotion.redeemed for the release; the code can be used again afterwards.
+func TestEveryEndWithoutARideReleasesTheRedemption(t *testing.T) {
+	ends := map[string]func(f *fixture, order, rider string) error{
+		"order.cancelled": func(f *fixture, order, rider string) error {
+			return f.svc.onOrderCancelled(context.Background(), cancelled(order, rider))
+		},
+		"trip cancelled by the rider": func(f *fixture, order, rider string) error {
+			return f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, rider))
+		},
+		"trip cancelled by the driver": func(f *fixture, order, rider string) error {
+			evt := tripCancelled(order, rider)
+			evt.CancelledBy = events.CancelledByDriver
+			return f.svc.onTripStatusChanged(context.Background(), evt)
+		},
+		"order.no_driver_found": func(f *fixture, order, rider string) error {
+			return f.svc.onNoDriverFound(context.Background(), noDriver(order, rider))
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			f.promotion("WELCOME10", nil) // once per rider
+			order := newID()
+			f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+			if got := f.statusOf("WELCOME10", order); got != "REDEEMED" {
+				t.Fatalf("before: %s", got)
+			}
+			if rec := f.validate("rider-1", "WELCOME10", "100000", "CAR"); rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("a used-up code validated with %d %s", rec.Code, rec.Body)
+			}
+			before := f.outboxRows()
+
+			if err := end(f, order, "rider-1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
+				t.Fatalf("status = %s, want RELEASED", got)
+			}
+			if n := f.scalar(`SELECT count(*) FROM redemptions WHERE order_id = $1 AND released_at IS NOT NULL`, order); n != 1 {
+				t.Errorf("released_at not set")
+			}
+			if n := f.outboxRows(); n != before {
+				t.Errorf("a release queued %d promotion.redeemed", n-before)
+			}
+			if rec := f.validate("rider-1", "WELCOME10", "100000", "CAR"); rec.Code != http.StatusOK {
+				t.Errorf("after release, validate = %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+func TestAReleaseIsDeduplicatedByEventIDAndAlsoWhenAnotherEventNamesTheSameOrder(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	order := newID()
+	f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+
+	trip := tripCancelled(order, "rider-1")
+	if err := f.svc.onTripStatusChanged(ctx, trip); err != nil {
+		t.Fatal(err)
+	}
+	var releasedAt time.Time
+	f.db.QueryRow(ctx, `SELECT released_at FROM redemptions WHERE order_id = $1`, order).Scan(&releasedAt)
+	dedupeRows := f.scalar(`SELECT count(*) FROM promotion_events`)
+
+	// The same event again, then a different event for the same order (a rider
+	// cancels just as a driver is matched: order.cancelled and the trip's CANCELLED).
+	f.now = f.now.Add(time.Hour)
+	for _, err := range []error{
+		f.svc.onTripStatusChanged(ctx, trip),
+		f.svc.onOrderCancelled(ctx, cancelled(order, "rider-1")),
+		f.svc.onNoDriverFound(ctx, noDriver(order, "rider-1")),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
+		t.Errorf("status = %s", got)
+	}
+	var again time.Time
+	f.db.QueryRow(ctx, `SELECT released_at FROM redemptions WHERE order_id = $1`, order).Scan(&again)
+	if !again.Equal(releasedAt) {
+		t.Errorf("released_at moved from %s to %s", releasedAt, again)
+	}
+	if n := f.scalar(`SELECT count(*) FROM promotion_events`); n != dedupeRows+2 {
+		t.Errorf("%d dedupe rows, want %d (the redelivery adds none, the two new events one each)", n, dedupeRows+2)
+	}
+	if n := f.scalar(`SELECT count(*) FROM redemptions WHERE order_id = $1`, order); n != 1 {
+		t.Errorf("%d redemptions", n)
+	}
+}
+
+func TestOtherTripStatusesLeaveTheRedemptionAlone(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.promotion("WELCOME10", nil)
+	order := newID()
+	f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+
+	for _, status := range []events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress, events.TripStatusCompleted} {
+		evt := tripCancelled(order, "rider-1")
+		evt.Status, evt.CancelledBy = status, ""
+		if err := f.svc.onTripStatusChanged(ctx, evt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.statusOf("WELCOME10", order); got != "REDEEMED" {
+		t.Errorf("status = %s, want REDEEMED", got)
+	}
+	if n := f.scalar(`SELECT count(*) FROM promotion_cancelled_orders`); n != 0 {
+		t.Errorf("%d cancelled-order markers for trips that were not cancelled", n)
+	}
+}
+
+// An over-limit redemption is released too, so it stops counting.
+func TestAnOverLimitRedemptionIsReleasedByACancelledTrip(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 1 })
+	first, second := newID(), newID()
+	f.svc.onOrderCreated(ctx, created(first, "rider-1", "WELCOME10", 10000))
+	f.svc.onOrderCreated(ctx, created(second, "rider-1", "WELCOME10", 10000))
+	if got := f.statusOf("WELCOME10", second); got != "OVER_LIMIT" {
+		t.Fatalf("second = %s", got)
+	}
+	if err := f.svc.onTripStatusChanged(ctx, tripCancelled(second, "rider-1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.statusOf("WELCOME10", second); got != "RELEASED" {
+		t.Errorf("second = %s, want RELEASED", got)
+	}
+	if got := f.statusOf("WELCOME10", first); got != "REDEEMED" {
+		t.Errorf("the other order's redemption = %s, want REDEEMED", got)
+	}
+}
+
+// The release seen before order.created leaves the marker, and the redemption
+// is then recorded as released, for the trip and no-driver events like for
+// order.cancelled.
+func TestATripCancellationOrNoDriverSeenBeforeTheOrderRecordsTheRedemptionAsReleased(t *testing.T) {
+	for name, end := range map[string]func(f *fixture, order string) error{
+		"trip cancelled": func(f *fixture, order string) error {
+			return f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
+		},
+		"no driver": func(f *fixture, order string) error {
+			return f.svc.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.promotion("WELCOME10", nil)
+			order := newID()
+			if err := end(f, order); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
+				t.Errorf("status = %s, want RELEASED", got)
+			}
+			if n := f.outboxRows(); n != 0 {
+				t.Errorf("%d promotion.redeemed for an order that never took effect", n)
+			}
+			next := newID()
+			f.svc.onOrderCreated(context.Background(), created(next, "rider-1", "WELCOME10", 10000))
+			if got := f.statusOf("WELCOME10", next); got != "REDEEMED" {
+				t.Errorf("next order = %s, want REDEEMED", got)
+			}
+		})
+	}
+}
+
+func TestReleasingAndRedeemingAtTheSameTimeNeverLeavesALiveRedemptionForTheNewEvents(t *testing.T) {
+	f := newFixture(t)
+	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 100 })
+	for i := range 20 {
+		order := newID()
+		var wg sync.WaitGroup
+		wg.Go(func() { f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)) })
+		wg.Go(func() {
+			if i%2 == 0 {
+				f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
+			} else {
+				f.svc.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
+			}
+		})
+		wg.Wait()
+		if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
+			t.Fatalf("status = %s, want RELEASED whichever event was handled first", got)
+		}
+	}
+}
+
+func TestReleaseEventsWithoutAnOrderIdArePermanentErrors(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for name, err := range map[string]error{
+		"trip":      f.svc.onTripStatusChanged(ctx, tripCancelled("", "rider-1")),
+		"no driver": f.svc.onNoDriverFound(ctx, noDriver("", "rider-1")),
+	} {
+		var inv *invalidEvent
+		if !errors.As(err, &inv) {
+			t.Errorf("%s: err = %v, want an invalidEvent", name, err)
+		}
 	}
 }

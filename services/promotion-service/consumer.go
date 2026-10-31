@@ -11,7 +11,12 @@ import (
 	"grab-mini/pkg/kafkaconsumer"
 )
 
-var consumedTopics = []string{events.TopicOrderCreated, events.TopicOrderCancelled}
+// order.cancelled, trip.status.changed (CANCELLED) and order.no_driver_found are
+// the three ways an order ends without a ride; each releases its redemption.
+var consumedTopics = []string{
+	events.TopicOrderCreated, events.TopicOrderCancelled,
+	events.TopicTripStatusChanged, events.TopicOrderNoDriverFound,
+}
 
 // decoder reads an event's Avro wire bytes (*eventcodec.Codec).
 type decoder interface {
@@ -37,11 +42,23 @@ func (s *service) handle(ctx context.Context, dec decoder, msg kafka.Message) er
 			return err
 		}
 		return s.onOrderCancelled(ctx, evt)
+	case events.TopicTripStatusChanged:
+		var evt events.TripStatusChanged
+		if err := dec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		return s.onTripStatusChanged(ctx, evt)
+	case events.TopicOrderNoDriverFound:
+		var evt events.OrderNoDriverFound
+		if err := dec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		return s.onNoDriverFound(ctx, evt)
 	}
 	return fmt.Errorf("unexpected topic %q", msg.Topic)
 }
 
-// runConsumer reads both topics under one group; KEDA scales on it and
+// runConsumer reads all the topics under one group; KEDA scales on it and
 // scripts/kafka-acls.sh grants it. groupOverride is for tests, which need a
 // group of their own.
 func (s *service) runConsumer(ctx context.Context, env Env, groupOverride string, dec decoder) {

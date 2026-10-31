@@ -72,7 +72,7 @@ func sharedRegistryURL() string {
 
 func createTopics(t *testing.T, brokers string) {
 	t.Helper()
-	topics := []string{events.TopicOrderCreated, events.TopicOrderCancelled, events.TopicPromotionRedeemed}
+	topics := []string{events.TopicOrderCreated, events.TopicOrderCancelled, events.TopicTripStatusChanged, events.TopicOrderNoDriverFound, events.TopicPromotionRedeemed}
 	var specs []kafka.TopicConfig
 	for _, topic := range topics {
 		specs = append(specs, kafka.TopicConfig{Topic: topic, NumPartitions: 3, ReplicationFactor: 1})
@@ -249,5 +249,32 @@ func TestKafkaRedemptionDecodesTheV4Fields(t *testing.T) {
 	k.db.QueryRow(context.Background(), `SELECT discount FROM redemptions WHERE order_id = $1`, order).Scan(&discount)
 	if discount != 15000 {
 		t.Errorf("discount = %d, want 15000", discount)
+	}
+}
+
+// A trip cancelled after the match and an order that ends NO_DRIVER release the
+// redemption through the one consumer group; other trip statuses do not.
+func TestKafkaTripCancelledAndNoDriverReleaseTheRedemption(t *testing.T) {
+	k := newKafkaFixture(t)
+	k.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	rider := "rider-" + newID()
+	trip, none, done := newID(), newID(), newID()
+	for _, order := range []string{trip, none, done} {
+		k.publish(events.TopicOrderCreated, order, created(order, rider, "WELCOME10", 8700))
+	}
+	for _, order := range []string{trip, none, done} {
+		eventually(t, "the redemption", 30*time.Second, func() bool { return k.status("WELCOME10", order) == "REDEEMED" })
+	}
+
+	completed := tripCancelled(done, rider)
+	completed.Status, completed.CancelledBy = events.TripStatusCompleted, ""
+	k.publish(events.TopicTripStatusChanged, done, completed)
+	k.publish(events.TopicTripStatusChanged, trip, tripCancelled(trip, rider))
+	k.publish(events.TopicOrderNoDriverFound, none, noDriver(none, rider))
+
+	eventually(t, "the release of the cancelled trip", 30*time.Second, func() bool { return k.status("WELCOME10", trip) == "RELEASED" })
+	eventually(t, "the release of the no-driver order", 30*time.Second, func() bool { return k.status("WELCOME10", none) == "RELEASED" })
+	if got := k.status("WELCOME10", done); got != "REDEEMED" {
+		t.Errorf("the completed trip's redemption = %s, want REDEEMED", got)
 	}
 }

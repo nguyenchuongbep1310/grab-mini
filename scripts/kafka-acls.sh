@@ -49,7 +49,7 @@ declare -A CONSUMES=(
   [driver-location-service]="driver-location-service-group=driver.location.updated"
   [rating-service]="rating-service-group=trip.rated"
   [payment-service]="payment-service-group=order.created,order.matched,trip.status.changed,trip.rated"
-  [promotion-service]="promotion-service-group=order.created,order.cancelled"
+  [promotion-service]="promotion-service-group=order.created,order.cancelled,trip.status.changed,order.no_driver_found"
   [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,driver.location.updated,trip.rated"
 )
 

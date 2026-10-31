@@ -377,7 +377,7 @@ What can go wrong is bookkeeping: a redemption recorded late or not at all, so a
 
 1. **Validation fails (riders cannot apply a code).** Look at the `/readyz` of promotion-service (see [Pods not ready](#pods-not-ready)); the 4xx answers are not faults, they carry a `code`:
    `not_found` (also a disabled code), `not_started`, `expired`, `min_fare`, `wrong_vehicle`, `limit_reached`, `already_used`. `promotion_validations_total{result}` counts each.
-2. **`PromotionConsumerLagHigh`:** see [Consumer lag](#consumer-lag), group `promotion-service-group` (one group reads `order.created` and `order.cancelled`). While it lags, redemptions are counted too low, so
+2. **`PromotionConsumerLagHigh`:** see [Consumer lag](#consumer-lag), group `promotion-service-group` (one group reads `order.created`, `order.cancelled`, `trip.status.changed` and `order.no_driver_found`). While it lags, redemptions are counted too low, so
    validation lets more riders through a limit (they will show as `OVER_LIMIT` once recorded). It is safe to wait for it to catch up.
 3. **`PromotionDeadLettered`:** `topic` says which event. An order has its discount and was charged net, but the redemption was not recorded (or not released). Inspect with `dlq-redrive -topic <topic> -dry-run`. Common causes:
    - `order booked with unknown promotion "CODE"`: Promotion Service has no such code. The usual reason is a different `PROMO_SECRET` or database between environments, or promotions restored from an older backup. Re-create the promotion with the same code, then redrive.
@@ -391,8 +391,9 @@ What can go wrong is bookkeeping: a redemption recorded late or not at all, so a
    If a code is being abused, disable it (`POST /promotions/{code}/disable`, admin token): new validations stop at once. Orders that already carry the discount keep it; there is no clawback.
 5. **`PromoTokensRefused`:** Order Service refuses tokens as *invalid* (not merely expired or for another price: those are riders' own doing and never alert). The cause is almost always `PROMO_SECRET` differing between order-service and promotion-service
    (a rotation that reached one of them). Compare the `grab-mini-promo` Secret both Deployments mount and restart both. `orders_promo_total{result}` shows `invalid`, `expired`, `wrong_price`, `wrong_rider`, `wrong_vehicle`, `used` and `unchecked` (Redis down: the discount was still applied).
-6. **Limits look wrong.** Counts are `redemptions` with `status = 'REDEEMED'`. A cancelled order's redemption is `RELEASED` and no longer counts, **but only when `order.cancelled` was published, which happens when a rider cancels a PENDING order.** A cancelled trip after the match, and an order that ended `NO_DRIVER`,
-   keep their redemption and keep using up the rider's limit (a known gap, [production-design §18](../specs/ride-booking-mini/production-design.md)). To give one back by hand:
+6. **Limits look wrong.** Counts are `redemptions` with `status = 'REDEEMED'`. An order that ends without a ride gives its redemption back (`RELEASED`, no longer counted) on any of `order.cancelled` (a rider cancelled a PENDING order), `trip.status.changed` with status CANCELLED
+   (a trip cancelled after the match, by the rider or the driver) and `order.no_driver_found`. A redemption that is still `REDEEMED` for such an order means that event was not applied: check `PromotionDeadLettered` and `PromotionConsumerLagHigh` first (a dead-lettered release is applied when redriven).
+   A release that arrives before the order's `order.created` is remembered in `promotion_cancelled_orders` and applied when the redemption is recorded. To give one back by hand:
    `UPDATE redemptions SET status = 'RELEASED', released_at = now() WHERE code = '...' AND order_id = '...';`.
 7. **Reading the money.** A promo order's payment is `price - discount` (`order_prices.discount` in Payment Service); `payments_skipped_total{reason="zero_amount"}` counts free rides. Rotating `PROMO_SECRET` invalidates only tokens issued in the last 10 minutes.
 

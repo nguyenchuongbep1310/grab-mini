@@ -36,8 +36,9 @@ func markEventProcessed(ctx context.Context, tx pgx.Tx, eventID string) (bool, e
 }
 
 // lockOrder serialises a redemption and a release of one order. order.created and
-// order.cancelled are different topics, so they can be handled at the same moment
-// by different workers; whichever takes the lock second sees what the first did.
+// the events that release it are on different topics, so they can be handled at
+// the same moment by different workers; whichever takes the lock second sees what
+// the first did.
 func lockOrder(ctx context.Context, tx pgx.Tx, orderID string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "promotion-order:"+orderID)
 	return err
@@ -163,20 +164,46 @@ func (s *service) onOrderCreated(ctx context.Context, evt events.OrderCreated) e
 	return nil
 }
 
-// onOrderCancelled gives back the redemption of an order cancelled while it was
-// still PENDING (order.cancelled is published only then; see the gap below).
+// onOrderCancelled gives back the redemption of an order a rider cancelled while
+// it was still PENDING (the only time order.cancelled is published). The other
+// ways an order ends without a ride are onTripStatusChanged and onNoDriverFound.
+func (s *service) onOrderCancelled(ctx context.Context, evt events.OrderCancelled) error {
+	return s.releaseOrder(ctx, evt.EventID, evt.OrderID, "order.cancelled", "cancelled")
+}
+
+// onTripStatusChanged gives back the redemption of an order whose trip was
+// cancelled after the match (by the rider or the driver): Order Service reads it
+// as a CANCELLED order, but publishes no order.cancelled for it. Every other trip
+// status leaves the redemption alone, a COMPLETED trip being the one that used it.
+func (s *service) onTripStatusChanged(ctx context.Context, evt events.TripStatusChanged) error {
+	if evt.Status != events.TripStatusCancelled {
+		return nil
+	}
+	return s.releaseOrder(ctx, evt.EventID, evt.OrderID, "trip.status.changed", "trip cancelled")
+}
+
+// onNoDriverFound gives back the redemption of an order that ended NO_DRIVER: no
+// ride took place, and the rider is not charged.
+func (s *service) onNoDriverFound(ctx context.Context, evt events.OrderNoDriverFound) error {
+	return s.releaseOrder(ctx, evt.EventID, evt.OrderID, "order.no_driver_found", "found no driver")
+}
+
+// releaseOrder is what the three events that end an order without a ride have in
+// common: mark the order's redemption RELEASED, which stops it counting against
+// the limits. It publishes nothing (as with order.cancelled before: promotion.redeemed
+// announces a redemption, not its release).
+//
+// The same order can be named by several of them (a rider cancels just as a driver
+// is matched: order.cancelled, then the trip's CANCELLED), and each has its own
+// eventId, so the release is also idempotent by itself: only REDEEMED and OVER_LIMIT
+// rows move, and a RELEASED one is left as it was (with its original released_at).
 //
 // When no redemption exists yet, the order id is remembered, so that an
-// order.created handled later records the redemption as released. Most cancelled
-// orders have no code, and for them that row is all that happens.
-//
-// Gap: a rider who cancels after a driver was matched cancels the trip, and Trip
-// Service tells Order Service through trip.status.changed; no order.cancelled is
-// published then, so the redemption of such an order is not released. Neither is
-// an order that ends NO_DRIVER. Both stay REDEEMED and count against the limits.
-func (s *service) onOrderCancelled(ctx context.Context, evt events.OrderCancelled) error {
-	if evt.OrderID == "" {
-		return &invalidEvent{"order.cancelled without orderId"}
+// order.created handled later records the redemption as released. Most such orders
+// have no code, and for them that row is all that happens.
+func (s *service) releaseOrder(ctx context.Context, eventID, orderID, topic, what string) error {
+	if orderID == "" {
+		return &invalidEvent{topic + " without orderId"}
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -184,26 +211,26 @@ func (s *service) onOrderCancelled(ctx context.Context, evt events.OrderCancelle
 	}
 	defer tx.Rollback(ctx)
 
-	first, err := markEventProcessed(ctx, tx, evt.EventID)
+	first, err := markEventProcessed(ctx, tx, eventID)
 	if err != nil {
 		return err
 	}
 	if !first {
 		redemptionsDuplicate.Inc()
-		log.Printf("duplicate event %s, skipping", evt.EventID)
+		log.Printf("duplicate event %s, skipping", eventID)
 		return nil
 	}
-	if err := lockOrder(ctx, tx, evt.OrderID); err != nil {
+	if err := lockOrder(ctx, tx, orderID); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE redemptions SET status = 'RELEASED', released_at = now()
-		WHERE order_id = $1 AND status IN ('REDEEMED', 'OVER_LIMIT')`, evt.OrderID)
+		WHERE order_id = $1 AND status IN ('REDEEMED', 'OVER_LIMIT')`, orderID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		if _, err := tx.Exec(ctx, `INSERT INTO promotion_cancelled_orders (order_id) VALUES ($1) ON CONFLICT DO NOTHING`, evt.OrderID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO promotion_cancelled_orders (order_id) VALUES ($1) ON CONFLICT DO NOTHING`, orderID); err != nil {
 			return err
 		}
 	}
@@ -212,7 +239,7 @@ func (s *service) onOrderCancelled(ctx context.Context, evt events.OrderCancelle
 	}
 	if n := tag.RowsAffected(); n > 0 {
 		redemptionsReleased.Add(float64(n))
-		log.Printf("order %s cancelled: %d redemption(s) released", evt.OrderID, n)
+		log.Printf("order %s %s (%s): %d redemption(s) released", orderID, what, topic, n)
 	}
 	return nil
 }

@@ -519,6 +519,38 @@ spec:
       - Write
       - Describe
       - Create
+    - resource:
+        type: topic
+        name: trip.status.changed
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: trip.status.changed.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: order.no_driver_found
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.no_driver_found.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
