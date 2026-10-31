@@ -36,11 +36,13 @@ import {
 import type { CancellationPolicy } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
 import { cancelFeeNote } from "./cancelFee";
+import { ProfileSheet } from "./ProfileSheet";
 import { PromoField } from "./PromoField";
 import { bookingMessage, usePromo } from "./usePromo";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
+import { useDriverCard, useRiderProfile } from "./useRiderProfile";
 import { useQuote } from "./useQuote";
 import { useEta, useRoute } from "./useRoute";
 import { useRide, type Phase } from "./useRide";
@@ -96,6 +98,9 @@ export function App() {
   const promo = usePromo(priceQuote.quote?.price ?? null, ride.vehicleType);
   // Distance and time before booking. Decoration only: without it the card just has no line.
   const plannedRoute = useRoute(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle");
+  // The rider's profile decorates the avatar and has its own sheet; neither is needed to book.
+  const riderProfile = useRiderProfile(riderId);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   // What cancelling costs once a driver is assigned. Loaded when one is, and left null (no
@@ -166,6 +171,10 @@ export function App() {
   useEffect(() => {
     chatPush.current = chat.receive;
   }, [chat.receive]);
+
+  // Name, vehicle and plate of the matched driver, asked once per driver; null falls back to the id.
+  const driverCard = useDriverCard(driverId);
+  const driverName = driverCard?.name || driverId;
 
   const previousPhase = useRef<Phase>(phase);
   useEffect(() => {
@@ -318,7 +327,9 @@ export function App() {
         <span className="app__conn" data-state={socket}>
           {socket === "open" ? "Live" : socket === "connecting" ? "Connecting" : "Offline"}
         </span>
-        <Avatar name={riderId} size="sm" />
+        <button type="button" className="app__avatar" aria-label="Your profile" onClick={() => setProfileOpen(true)}>
+          <Avatar name={riderProfile.profile?.name || riderId} size="sm" />
+        </button>
       </header>
 
       <BottomSheet>
@@ -372,10 +383,21 @@ export function App() {
             {inRide && driverId && (
               <Card padding="sm">
                 <div className="driver-row">
-                  <Avatar name={driverId} />
+                  <Avatar name={driverName ?? driverId} />
                   <div>
-                    <div className="driver-row__name">{driverId}</div>
-                    <div className="driver-row__meta">Your driver · {VEHICLE_NAME[ride.vehicleType]}</div>
+                    <div className="driver-row__name">{driverName}</div>
+                    {driverCard ? (
+                      <>
+                        <div className="driver-row__meta">
+                          {[driverCard.model, driverCard.color, VEHICLE_NAME[driverCard.vehicleType]].filter(Boolean).join(" · ")}
+                        </div>
+                        <div className="driver-row__plate" aria-label="Plate number">
+                          {driverCard.plate}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="driver-row__meta">Your driver · {VEHICLE_NAME[ride.vehicleType]}</div>
+                    )}
                   </div>
                   <StatusBadge className="driver-row__badge" status={BADGE_STATUS[phase]} />
                 </div>
@@ -428,7 +450,7 @@ export function App() {
             {phase === "completed" && (
               <Card padding="sm">
                 <div className="rating-box">
-                  <div className="driver-row__name">{rated ? "Your rating" : `How was your ride with ${driverId}?`}</div>
+                  <div className="driver-row__name">{rated ? "Your rating" : `How was your ride with ${driverName}?`}</div>
                   <StarRating
                     value={stars}
                     size="lg"
@@ -457,7 +479,7 @@ export function App() {
 
       <ChatSheet
         open={chat.sheetOpen && showChat}
-        title={`Chat with ${driverId ?? "your driver"}`}
+        title={`Chat with ${driverName ?? "your driver"}`}
         messages={chat.messages}
         loading={chat.loading}
         closed={chat.closed}
@@ -466,6 +488,16 @@ export function App() {
         onSend={chat.send}
         onRetry={chat.retry}
         onClose={chat.closeSheet}
+      />
+
+      <ProfileSheet
+        open={profileOpen}
+        riderId={riderId}
+        profile={riderProfile.profile}
+        status={riderProfile.status}
+        onRetry={riderProfile.reload}
+        onSaved={riderProfile.saved}
+        onClose={() => setProfileOpen(false)}
       />
 
       <CancelDialog

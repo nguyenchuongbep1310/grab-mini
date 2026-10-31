@@ -18,6 +18,8 @@ body {
   background: var(--gm-surface); border-radius: var(--gm-radius-full);
   box-shadow: var(--gm-shadow-md);
 }
+.app__avatar { padding: 0; border: 0; background: none; border-radius: var(--gm-radius-full); cursor: pointer; line-height: 0; }
+.app__avatar:focus-visible { outline: none; box-shadow: var(--gm-focus-ring); }
 .app__brand { font-weight: 800; letter-spacing: -0.3px; color: var(--gm-primary); }
 .app__spacer { flex: 1; }
 .app__conn { display: flex; align-items: center; gap: 6px; font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
@@ -31,6 +33,7 @@ body {
 .driver-row { display: flex; align-items: center; gap: var(--gm-space-3); }
 .driver-row__name { font-weight: 600; }
 .driver-row__meta { font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
+.driver-row__plate { display: inline-block; margin-top: 2px; padding: 1px 6px; border: 1px solid var(--gm-border); border-radius: var(--gm-radius-sm); font-size: var(--gm-text-xs); font-weight: 700; letter-spacing: 0.5px; }
 .driver-row__badge { margin-left: auto; }
 
 .sheet-stack > .gm-badge { align-self: flex-start; }
@@ -73,3 +76,5 @@ body {
 .promo__applied-note { margin: 0; font-size: var(--gm-text-sm); color: var(--gm-success-text); }
 .receipt__discount dd { color: var(--gm-success-text); }
 .promo .gm-price__amount, .promo__applied-note .gm-price__amount { font-size: inherit; }
+
+.profile__notice { margin: 0; padding: var(--gm-space-2) var(--gm-space-3); border-radius: var(--gm-radius-sm); background: var(--gm-warning-soft); color: var(--gm-warning-text); font-size: var(--gm-text-xs); }

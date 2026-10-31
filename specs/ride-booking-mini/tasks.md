@@ -82,7 +82,7 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 ### Phase 11 — Profiles and driver onboarding
 - [x] 11.1 `profile-service`: rider and driver profiles, driver application and admin review, `driver.application.reviewed`
 - [x] 11.2 Matching Service reacts to the review result
-- [ ] 11.3 Rider App profile and driver card; Driver App onboarding; Ops review queue (admin)
+- [x] 11.3 Rider App profile and driver card; Driver App onboarding; Ops review queue (admin)
 - [x] 11.4 Infra and docs
 
 ## Backlog (after core is done, explore as interested)

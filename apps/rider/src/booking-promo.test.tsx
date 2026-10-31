@@ -44,6 +44,9 @@ beforeEach(() => {
   vi.spyOn(client, "getLatestOrder").mockResolvedValue(null);
   vi.spyOn(client, "getQuote").mockResolvedValue(quote);
   vi.spyOn(client, "getRoute").mockRejectedValue(new Error("no routing"));
+  // The profile and the driver card only decorate; these tests are about something else.
+  vi.spyOn(client, "getRiderProfile").mockRejectedValue(new Error("no profile service"));
+  vi.spyOn(client, "getDriverPublic").mockResolvedValue(null);
 });
 afterEach(() => vi.restoreAllMocks());
 

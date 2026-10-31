@@ -7,6 +7,7 @@ import {
   Card,
   ChatButton,
   ChatSheet,
+  FormSheet,
   MapMarker,
   MapView,
   StarRating,
@@ -28,7 +29,10 @@ import {
   type TripAction,
 } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
+import { DriverForm } from "./DriverForm";
 import { EarningsLine, TripEarnings } from "./Earnings";
+import { StatusScreen } from "./StatusScreen";
+import { useDriverProfile } from "./useDriverProfile";
 import { useDriverTrip, type Phase } from "./useDriverTrip";
 
 // Where the map sits until the first location arrives (central Ho Chi Minh City).
@@ -71,6 +75,9 @@ signIn("driver", driverId);
 export function App() {
   const toast = useToast();
   const [state, dispatch] = useDriverTrip();
+  // Who may drive: only an APPROVED driver sees "You're online" and trips (see onboarding.ts).
+  const profile = useDriverProfile(driverId);
+  const [editingProfile, setEditingProfile] = useState(false);
   const [pending, setPending] = useState<TripAction | null>(null);
   const [rating, setRating] = useState<DriverRating | null>(null);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
@@ -176,6 +183,13 @@ export function App() {
   }, [phase, anchor?.join(","), pickup?.join(","), dropoff?.join(","), phase === "idle" && pos ? "has-pos" : ""]);
 
   const working = phase === "assigned" || phase === "in_progress";
+  const { gate } = profile;
+  const approvedProfile = gate.kind === "app" ? gate.profile : null;
+  // The gate replaces the idle screen. A trip already under way (or just finished) stays visible even if the
+  // driver was suspended or sent back to review meanwhile: Matching lets them finish it, and hiding it would
+  // strand a rider.
+  const gated = gate.kind !== "app";
+  const showGate = gate.kind !== "app" && phase === "idle";
   // While the trip is on, and afterwards for as long as the trip is still shown and there is something to re-read.
   const showChat = !!tripId && (working || ((phase === "completed" || phase === "cancelled") && chat.messages.length > 0));
 
@@ -191,15 +205,40 @@ export function App() {
         <span className="app__brand">grab-mini driver</span>
         <span className="app__spacer" />
         <span className="app__conn" data-state={socket}>
-          {socket === "open" ? "Online" : socket === "connecting" ? "Connecting" : "Offline"}
+          {socket === "open" ? (gated ? "Connected" : "Online") : socket === "connecting" ? "Connecting" : "Offline"}
         </span>
-        <Avatar name={driverId} size="sm" />
+        {approvedProfile ? (
+          <button type="button" className="app__avatar" aria-label="Your driver profile" onClick={() => setEditingProfile(true)}>
+            <Avatar name={approvedProfile.name || driverId} size="sm" />
+          </button>
+        ) : (
+          <Avatar name={driverId} size="sm" />
+        )}
       </header>
 
       <BottomSheet>
         <div className="sheet-stack">
-          {phase === "idle" && (
+          {showGate && (
+            <StatusScreen
+              key={gate.kind}
+              gate={gate}
+              driverId={driverId}
+              onRefresh={profile.refresh}
+              onRetry={profile.retry}
+              onDone={profile.accept}
+            />
+          )}
+
+          {phase === "idle" && !gated && (
             <>
+              {gate.kind === "app" && gate.profile === null && (
+                <p className="onboarding__note" role="status">
+                  Couldn't check your driver profile right now. If you are approved you will still get trips.{" "}
+                  <button type="button" className="onboarding__link" onClick={profile.retry}>
+                    Check again
+                  </button>
+                </p>
+              )}
               <div>
                 <h1 className="sheet-title">You're online</h1>
                 <p className="sheet-sub">
@@ -223,6 +262,11 @@ export function App() {
 
           {phase !== "idle" && (
             <>
+              {gated && gate.kind !== "checking" && (
+                <p className="onboarding__note" role="status">
+                  Your driver account isn't active, so you won't be offered new trips after this one.
+                </p>
+              )}
               <div>
                 <h1 className="sheet-title">{phase === "cancelled" ? cancelledCopy(cancelledBy, cancelReason).title : TITLES[phase]}</h1>
                 <p className="sheet-sub">{phase === "cancelled" ? cancelledCopy(cancelledBy, cancelReason).sub : SUBTITLES[phase]}</p>
@@ -281,6 +325,20 @@ export function App() {
           )}
         </div>
       </BottomSheet>
+
+      <FormSheet open={editingProfile && !!approvedProfile} title="Your driver profile" onClose={() => setEditingProfile(false)}>
+        <DriverForm
+          driverId={driverId}
+          initial={approvedProfile}
+          mode="edit"
+          submitLabel="Save changes"
+          onDone={(saved) => {
+            profile.accept(saved);
+            setEditingProfile(false);
+            toast.show(saved.status === "APPROVED" ? "Profile saved" : "Sent for review. No trips until an admin approves it.", saved.status === "APPROVED" ? "success" : "info");
+          }}
+        />
+      </FormSheet>
 
       <ChatSheet
         open={chat.sheetOpen && showChat}

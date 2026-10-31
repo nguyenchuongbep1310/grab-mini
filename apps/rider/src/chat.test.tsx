@@ -78,6 +78,9 @@ beforeEach(() => {
   });
   vi.spyOn(client, "waitForTripByOrder").mockResolvedValue({ id: "trip-1", orderId: "order-1", driverId: "driver-2", status: "ASSIGNED" });
   vi.spyOn(client, "getRoute").mockRejectedValue(new Error("no routing"));
+  // The profile and the driver card only decorate; these tests are about something else.
+  vi.spyOn(client, "getRiderProfile").mockRejectedValue(new Error("no profile service"));
+  vi.spyOn(client, "getDriverPublic").mockResolvedValue(null);
   vi.spyOn(client, "getCancellationPolicy").mockRejectedValue(new Error("no payment"));
 });
 afterEach(() => vi.restoreAllMocks());

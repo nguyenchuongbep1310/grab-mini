@@ -49,3 +49,13 @@ body { font-family: var(--gm-font); background: var(--gm-bg); color: var(--gm-te
 .promo-form__hint { font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
 .promo-form__error { font-size: var(--gm-text-xs); color: var(--gm-danger-text); }
 .promo-form__actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: var(--gm-space-3); }
+.applications__ok { margin: 0 0 var(--gm-space-3); font-size: var(--gm-text-sm); color: var(--gm-success-text); }
+.applications__actions { white-space: normal; }
+.applications__actions > .gm-btn + .gm-btn { margin-left: var(--gm-space-2); }
+.applications__confirm { display: flex; flex-direction: column; gap: var(--gm-space-2); min-width: 240px; }
+.applications__more { margin-top: var(--gm-space-3); }
+.applications__suspend { margin-top: var(--gm-space-4); padding-top: var(--gm-space-4); border-top: 1px solid var(--gm-border); display: flex; flex-direction: column; gap: var(--gm-space-3); }
+.applications__suspend h3 { margin: 0; font-size: var(--gm-text-md); }
+.applications__suspend p { margin: 0; }
+.applications__suspend-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--gm-space-3); }
+.promotions__head select { padding: var(--gm-space-1) var(--gm-space-2); font: inherit; border: 1px solid var(--gm-border); border-radius: 8px; background: transparent; color: inherit; }

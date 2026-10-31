@@ -15,6 +15,7 @@ export default defineConfig({
       "/routing-api": { target: "http://localhost:3009", rewrite: (p) => p.replace(/^\/routing-api/, "") },
       "/promotion-api": { target: "http://localhost:3010", rewrite: (p) => p.replace(/^\/promotion-api/, "") },
       "/chat-api": { target: "http://localhost:3011", rewrite: (p) => p.replace(/^\/chat-api/, "") },
+      "/profile-api": { target: "http://localhost:3012", rewrite: (p) => p.replace(/^\/profile-api/, "") },
       "/auth-api": { target: "http://localhost:3005", rewrite: (p) => p.replace(/^\/auth-api/, "") },
       "/ws": { target: "ws://localhost:3003", ws: true },
     },

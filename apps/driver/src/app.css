@@ -18,6 +18,8 @@ body {
   background: var(--gm-surface); border-radius: var(--gm-radius-full);
   box-shadow: var(--gm-shadow-md);
 }
+.app__avatar { padding: 0; border: 0; background: none; border-radius: var(--gm-radius-full); cursor: pointer; line-height: 0; }
+.app__avatar:focus-visible { outline: none; box-shadow: var(--gm-focus-ring); }
 .app__brand { font-weight: 800; letter-spacing: -0.3px; color: var(--gm-primary); }
 .app__spacer { flex: 1; }
 .app__conn { display: flex; align-items: center; gap: 6px; font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
@@ -42,3 +44,8 @@ body {
 .sheet-stack > .gm-badge { align-self: flex-start; }
 
 .rating-line { display: flex; align-items: center; gap: var(--gm-space-2); font-size: var(--gm-text-sm); color: var(--gm-text-muted); }
+
+.onboarding__warning { margin: 0; padding: var(--gm-space-2) var(--gm-space-3); border-radius: var(--gm-radius-sm); background: var(--gm-warning-soft); color: var(--gm-warning-text); font-size: var(--gm-text-sm); line-height: 1.4; }
+.onboarding__note { margin: 0; padding: var(--gm-space-2) var(--gm-space-3); border-radius: var(--gm-radius-sm); background: var(--gm-neutral-soft); color: var(--gm-neutral-text); font-size: var(--gm-text-sm); line-height: 1.4; overflow-wrap: anywhere; }
+.onboarding__link { padding: 0; border: 0; background: none; font: inherit; font-weight: 600; color: var(--gm-primary); cursor: pointer; text-decoration: underline; }
+.onboarding__error { margin: 0; font-size: var(--gm-text-sm); color: var(--gm-danger-text); }

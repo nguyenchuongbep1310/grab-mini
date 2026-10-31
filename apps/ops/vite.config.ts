@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       "/ksql-api": { target: "http://localhost:8088", rewrite: (p) => p.replace(/^\/ksql-api/, "") },
       "/promotion-api": { target: "http://localhost:3010", rewrite: (p) => p.replace(/^\/promotion-api/, "") },
+      "/profile-api": { target: "http://localhost:3012", rewrite: (p) => p.replace(/^\/profile-api/, "") },
       "/auth-api": { target: "http://localhost:3005", rewrite: (p) => p.replace(/^\/auth-api/, "") },
     },
   },

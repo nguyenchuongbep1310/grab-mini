@@ -1,0 +1,20 @@
+/* ---------- TextField / SelectField ---------- */
+.gm-field { display: flex; flex-direction: column; gap: 4px; font-family: var(--gm-font); }
+.gm-field__label { font-size: var(--gm-text-sm); font-weight: 600; color: var(--gm-text); }
+.gm-field__control {
+  width: 100%; box-sizing: border-box; padding: var(--gm-space-2) var(--gm-space-3);
+  border: 1px solid var(--gm-border); border-radius: var(--gm-radius-md);
+  background: var(--gm-surface-raised); color: var(--gm-text);
+  font: inherit; font-size: var(--gm-text-sm);
+}
+.gm-field__control:focus-visible { outline: none; box-shadow: var(--gm-focus-ring); }
+.gm-field--invalid .gm-field__control { border-color: var(--gm-danger); }
+.gm-field__hint { font-size: var(--gm-text-xs); color: var(--gm-text-muted); }
+.gm-field__error { font-size: var(--gm-text-xs); color: var(--gm-danger-text); }
+
+/* ---------- FormSheet ---------- */
+.gm-form-sheet { z-index: 1100; max-height: 90%; }
+.gm-form-sheet .gm-sheet__body { display: flex; flex-direction: column; min-height: 0; }
+.gm-form-sheet__panel { display: flex; flex-direction: column; gap: var(--gm-space-3); font-family: var(--gm-font); }
+.gm-form-sheet__head { display: flex; align-items: center; justify-content: space-between; gap: var(--gm-space-3); }
+.gm-form-sheet__title { margin: 0; font-size: var(--gm-text-md); font-weight: 700; }

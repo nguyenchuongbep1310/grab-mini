@@ -17,3 +17,5 @@ export { TripStatusTimeline, type TimelineStep, type TripStatusTimelineProps } f
 export { MapView, type MapViewProps, type LatLngTuple } from "./MapView";
 export { MapMarker, type MapMarkerProps } from "./MapMarker";
 export { ChatSheet, ChatButton, type ChatSheetProps, type ChatSheetMessage, type ChatButtonProps } from "./ChatSheet";
+export { TextField, SelectField, type TextFieldProps, type SelectFieldProps } from "./TextField";
+export { FormSheet, type FormSheetProps } from "./FormSheet";

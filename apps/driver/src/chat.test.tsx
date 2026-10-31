@@ -77,6 +77,11 @@ beforeEach(() => {
     vehicleType: "CAR",
     status: "MATCHED",
   });
+  // An approved driver: the normal app.
+  vi.spyOn(client, "getDriverProfile").mockResolvedValue({
+    driverId: "driver-1", name: "Driver One", phone: "", vehicleType: "CAR", plate: "51A-123.45", model: "", color: "",
+    status: "APPROVED", reason: "", reviewedAt: null, statusAt: null, updatedAt: null,
+  });
   vi.spyOn(client, "getDriverRating").mockRejectedValue(new Error("no rating"));
   vi.spyOn(client, "getDriverEarnings").mockRejectedValue(new Error("no payments"));
 });
