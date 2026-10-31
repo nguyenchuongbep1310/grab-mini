@@ -201,7 +201,7 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 		if err != nil {
 			return err
 		}
-		assignedFor, err := s.assignedFor(ctx, evt.TripID, cancelledAt)
+		assignedFor, err := s.assignedFor(ctx, evt.OrderID, cancelledAt)
 		if err != nil {
 			return err
 		}
@@ -218,20 +218,6 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 			riderID: firstNonEmpty(evt.RiderID, order.riderID), driverID: evt.DriverID, charge: c,
 		})
 
-	case events.TripStatusAssigned:
-		// Only remembered: the cancellation fee needs to know how long the driver
-		// had been committed. The first ASSIGNED wins; a redelivery changes nothing.
-		if evt.TripID == "" {
-			return &invalidEvent{"trip.status.changed without tripId"}
-		}
-		at, err := parseEventTime(evt.OccurredAt)
-		if err != nil {
-			return err
-		}
-		_, err = s.db.Exec(ctx,
-			`INSERT INTO trip_assignments (trip_id, assigned_at) VALUES ($1, $2) ON CONFLICT (trip_id) DO NOTHING`,
-			evt.TripID, at)
-		return err
 	}
 	return nil // IN_PROGRESS: nothing to settle yet
 }
@@ -444,13 +430,30 @@ func parseEventTime(v string) (time.Time, error) {
 	return t, nil
 }
 
-// assignedFor is how long the trip's driver had been assigned at cancelledAt, or
-// nil when the ASSIGNED event was never recorded (this service was not yet
-// consuming when it was published). Events for one trip share a partition, so
-// within a running service the ASSIGNED event is always handled first.
-func (s *service) assignedFor(ctx context.Context, tripID string, cancelledAt time.Time) (*time.Duration, error) {
+// onOrderMatched remembers when an order got its driver: the cancellation fee needs to
+// know how long the driver had been committed. Trip Service publishes no event when it
+// creates the trip, so this is the assignment moment (Matching Service stamps it, and the
+// trip exists a moment later). The first order.matched wins; a redelivery changes nothing.
+func (s *service) onOrderMatched(ctx context.Context, evt events.OrderMatched) error {
+	if evt.OrderID == "" {
+		return &invalidEvent{"order.matched without orderId"}
+	}
+	at, err := parseEventTime(evt.OccurredAt)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO order_assignments (order_id, assigned_at) VALUES ($1, $2) ON CONFLICT (order_id) DO NOTHING`,
+		evt.OrderID, at)
+	return err
+}
+
+// assignedFor is how long the order's driver had been assigned at cancelledAt, or nil when
+// the order.matched event was never recorded (this service was not yet consuming when it was
+// published, or is badly behind).
+func (s *service) assignedFor(ctx context.Context, orderID string, cancelledAt time.Time) (*time.Duration, error) {
 	var assignedAt time.Time
-	err := s.db.QueryRow(ctx, `SELECT assigned_at FROM trip_assignments WHERE trip_id = $1`, tripID).Scan(&assignedAt)
+	err := s.db.QueryRow(ctx, `SELECT assigned_at FROM order_assignments WHERE order_id = $1`, orderID).Scan(&assignedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

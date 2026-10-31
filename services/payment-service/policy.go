@@ -44,7 +44,7 @@ const (
 	skipZeroAmount   = "zero_amount"   // a free ride, or no tip
 	skipFeeDisabled  = "fee_disabled"  // the rider cancelled but the cancellation fee is 0
 	skipWithinGrace  = "within_grace"  // the rider cancelled soon enough after the assignment to pay nothing
-	skipNoAssignment = "no_assignment" // the trip's ASSIGNED event was never seen, so the time held is unknown
+	skipNoAssignment = "no_assignment" // the order's order.matched was never seen, so the time held is unknown
 	skipDriverCancel = "driver_cancel" // the driver cancelled: the rider never pays
 	skipUnknownActor = "unknown_actor" // cancelledBy is empty (an event from before it was recorded)
 )

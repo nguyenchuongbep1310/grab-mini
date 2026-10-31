@@ -11,7 +11,7 @@ import (
 	"grab-mini/pkg/kafkaconsumer"
 )
 
-var consumedTopics = []string{events.TopicOrderCreated, events.TopicTripStatusChanged, events.TopicTripRated}
+var consumedTopics = []string{events.TopicOrderCreated, events.TopicOrderMatched, events.TopicTripStatusChanged, events.TopicTripRated}
 
 // decoder reads an event's Avro wire bytes (*eventcodec.Codec).
 type decoder interface {
@@ -32,6 +32,12 @@ func (s *service) handle(ctx context.Context, dec decoder, msg kafka.Message) er
 			return err
 		}
 		return s.recordOrder(ctx, evt)
+	case events.TopicOrderMatched:
+		var evt events.OrderMatched
+		if err := dec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		return s.onOrderMatched(ctx, evt)
 	case events.TopicTripStatusChanged:
 		var evt events.TripStatusChanged
 		if err := dec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
@@ -48,12 +54,12 @@ func (s *service) handle(ctx context.Context, dec decoder, msg kafka.Message) er
 	return fmt.Errorf("unexpected topic %q", msg.Topic)
 }
 
-// runConsumer reads the three topics under one group. A trip event can reach
+// runConsumer reads the four topics under one group. A trip event can reach
 // this service before the order.created it needs; it is then retried a few
 // seconds later (the first retry tier), by which time the order has been
 // recorded.
 //
-// One group reads all three topics; KEDA scales on it and scripts/kafka-acls.sh
+// One group reads all four topics; KEDA scales on it and scripts/kafka-acls.sh
 // grants it. groupOverride is for tests, which need a group of their own.
 func (s *service) runConsumer(ctx context.Context, env Env, groupOverride string, dec decoder) {
 	cfg := kafkaconsumer.Config{

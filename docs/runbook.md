@@ -341,7 +341,7 @@ transaction, so reprocessing is always safe.
 
 **Check in this order:**
 
-1. **Lag:** see [Consumer lag](#consumer-lag), group `payment-service-group` (one group reads all three topics). The replica count is capped
+1. **Lag:** see [Consumer lag](#consumer-lag), group `payment-service-group` (one group reads all four topics). The replica count is capped
    by the partition count.
 2. **Dead letters:** `PaymentDeadLettered` has a `topic` label. Inspect the contents with `dlq-redrive -topic <topic> -dry-run`.
    Two common causes:
@@ -362,7 +362,7 @@ transaction, so reprocessing is always safe.
    SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;
    ```
 6. **A trip with no payment?** `SELECT * FROM payments WHERE trip_id = '...'`. No rows and nothing in the DLQ:
-   check `payments_skipped_total{reason}` (order with no price, free trip, cancelled by the driver, `CANCELLATION_FEE_VND=0`, a rider cancel within `CANCELLATION_GRACE_SECONDS` of the assignment, or `no_assignment`: the trip's ASSIGNED event was never seen).
+   check `payments_skipped_total{reason}` (order with no price, free trip, cancelled by the driver, `CANCELLATION_FEE_VND=0`, a rider cancel within `CANCELLATION_GRACE_SECONDS` of the assignment, or `no_assignment`: the order's `order.matched` was never seen).
    A `DECLINED` row means the provider declined the rider's card; that row has no ledger entries and the system **does not
    retry it automatically** (collecting the debt is the operator's job).
 

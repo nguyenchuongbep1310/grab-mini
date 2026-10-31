@@ -74,7 +74,7 @@ func sharedRegistryURL() string {
 
 func createTopics(t *testing.T, brokers string) {
 	t.Helper()
-	topics := []string{events.TopicOrderCreated, events.TopicTripStatusChanged, events.TopicTripRated, events.TopicPaymentRecorded}
+	topics := []string{events.TopicOrderCreated, events.TopicOrderMatched, events.TopicTripStatusChanged, events.TopicTripRated, events.TopicPaymentRecorded}
 	var specs []kafka.TopicConfig
 	for _, topic := range topics {
 		specs = append(specs, kafka.TopicConfig{Topic: topic, NumPartitions: 3, ReplicationFactor: 1})

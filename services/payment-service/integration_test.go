@@ -47,7 +47,7 @@ func newFixture(t *testing.T, policy Policy) *fixture {
 	t.Cleanup(db.Close)
 	// TRUNCATE is not a row-level change, so the ledger's append-only triggers allow it.
 	if _, err := db.Exec(ctx, `
-		TRUNCATE payments, payment_events, order_prices, trip_assignments, ledger_entries, ledger_transactions, ledger_accounts;
+		TRUNCATE payments, payment_events, order_prices, order_assignments, ledger_entries, ledger_transactions, ledger_accounts;
 		DELETE FROM outbox WHERE source = 'payment-service'`); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +77,15 @@ func status(orderID, tripID, driver, rider string, s events.TripStatus, by strin
 	return events.TripStatusChanged{
 		Envelope: events.Envelope{EventID: newID()}, TripID: tripID, OrderID: orderID, DriverID: driver,
 		RiderID: rider, Status: s, CancelledBy: by,
+	}
+}
+
+// matched is the order.matched event that records when the driver was assigned: Trip Service
+// publishes no ASSIGNED event, so this is where the cancellation grace period starts.
+func matched(orderID, driver string, t time.Time) events.OrderMatched {
+	return events.OrderMatched{
+		Envelope: events.Envelope{EventID: newID(), OccurredAt: t.UTC().Format(time.RFC3339Nano)},
+		OrderID:  orderID, DriverID: driver,
 	}
 }
 
@@ -315,11 +324,11 @@ func TestZeroTipAndBadTipsChargeNothing(t *testing.T) {
 
 var graceFixturePolicy = Policy{CommissionBps: 2000, CancellationFee: 15000, CancellationGrace: 3 * time.Minute}
 
-// assignedAndCancelled runs a trip through ASSIGNED and then CANCELLED by the rider, held apart as given.
+// assignedAndCancelled matches an order to a driver and then has the rider cancel its trip, held apart as given.
 func (f *fixture) assignedAndCancelled(order, trip, rider string, held time.Duration) error {
 	ctx := context.Background()
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
-	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusAssigned, ""), t0)); err != nil {
+	if err := f.svc.onOrderMatched(ctx, matched(order, "driver-1", t0)); err != nil {
 		return err
 	}
 	return f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusCancelled, events.CancelledByRider), t0.Add(held)))
@@ -368,7 +377,7 @@ func TestRiderCancelWithinTheGracePeriodIsFree(t *testing.T) {
 	}
 }
 
-// A redelivered ASSIGNED event (or a later one) must not restart the clock: the
+// A redelivered order.matched (or a later one) must not restart the clock: the
 // driver has been committed since the first one.
 func TestARedeliveredAssignmentDoesNotRestartTheGraceClock(t *testing.T) {
 	f := newFixture(t, graceFixturePolicy)
@@ -377,7 +386,7 @@ func TestARedeliveredAssignmentDoesNotRestartTheGraceClock(t *testing.T) {
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 
 	for _, when := range []time.Time{t0, t0.Add(10 * time.Minute)} {
-		if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusAssigned, ""), when)); err != nil {
+		if err := f.svc.onOrderMatched(ctx, matched(order, "driver-1", when)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -385,11 +394,11 @@ func TestARedeliveredAssignmentDoesNotRestartTheGraceClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 1 {
-		t.Errorf("%d payments, want the fee: measured from the first assignment (11 minutes), not the second (1 minute)", n)
+		t.Errorf("%d payments, want the fee: measured from the first order.matched (11 minutes), not the second (1 minute)", n)
 	}
 }
 
-// If this service was not consuming when the trip was assigned, it cannot tell
+// If this service was not consuming when the order was matched, it cannot tell
 // how long the rider waited, so it charges nothing rather than guess.
 func TestACancelWithoutAKnownAssignmentIsNotCharged(t *testing.T) {
 	f := newFixture(t, graceFixturePolicy)
@@ -400,6 +409,25 @@ func TestACancelWithoutAKnownAssignmentIsNotCharged(t *testing.T) {
 	}
 	if n := f.payments(trip); n != 0 {
 		t.Errorf("%d payments, want none without an assignment time", n)
+	}
+}
+
+func TestAnOrderMatchedThatCannotBeUsedIsAPermanentError(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
+	ctx := context.Background()
+	bad := map[string]events.OrderMatched{
+		"no orderId":   matched("", "driver-1", time.Now()),
+		"unreadable t": {Envelope: events.Envelope{EventID: newID(), OccurredAt: "later"}, OrderID: newID(), DriverID: "driver-1"},
+	}
+	for name, evt := range bad {
+		err := f.svc.onOrderMatched(ctx, evt)
+		var p interface{ Permanent() bool }
+		if !errors.As(err, &p) || !p.Permanent() {
+			t.Errorf("%s: error = %v, want a permanent one", name, err)
+		}
+	}
+	if n := f.scalar(`SELECT count(*) FROM order_assignments`); n != 0 {
+		t.Errorf("%d assignments recorded from unusable events", n)
 	}
 }
 
@@ -440,7 +468,7 @@ func TestDriverCancelNeverCostsTheRider(t *testing.T) {
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
-	f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusAssigned, ""), t0))
+	f.svc.onOrderMatched(ctx, matched(order, "driver-1", t0))
 	// An hour later, well past any grace period: still the driver's doing.
 	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByDriver), t0.Add(time.Hour))); err != nil {
 		t.Fatal(err)

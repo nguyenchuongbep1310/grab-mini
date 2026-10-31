@@ -279,7 +279,9 @@ func startStack(t *testing.T) *stack {
 
 	// Clean any residual rows after migrations have run
 	// TRUNCATE: the ledger is append-only, so its rows can't be DELETEd.
-	_, _ = db.Exec(ctx, `TRUNCATE payments, payment_events, order_prices, trip_assignments, ledger_entries, ledger_transactions, ledger_accounts`)
+	if _, err := db.Exec(ctx, `TRUNCATE payments, payment_events, order_prices, order_assignments, ledger_entries, ledger_transactions, ledger_accounts`); err != nil {
+		t.Fatalf("clear payment tables: %v", err)
+	}
 	_, _ = db.Exec(ctx, `DELETE FROM outbox; DELETE FROM processed_events; DELETE FROM cancelled_orders; DELETE FROM trips; DELETE FROM orders; DELETE FROM driver_reviews; DELETE FROM rating_events; DELETE FROM driver_ratings`)
 	return st
 }
@@ -338,6 +340,10 @@ func (s *stack) request(role, id, method, url string, payload any, out any) int 
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
+	if res.StatusCode >= 400 {
+		// Shown with the failure (or -v): a bare status code says nothing about why.
+		s.t.Logf("%s %s -> %d %s", method, url, res.StatusCode, strings.TrimSpace(string(raw)))
+	}
 	if out != nil && res.StatusCode < 300 {
 		_ = json.Unmarshal(raw, out)
 	}
@@ -413,6 +419,10 @@ func TestFullSystemEndToEnd(t *testing.T) {
 		t.Fatalf("gateway report = %d, want 202", code)
 	}
 	waitWS(t, driverEvents, "driver.location.updated", 10*time.Second)
+	// That WebSocket event comes from Notification Service. Redis is written by a different
+	// consumer (Driver Location Service), which can be a moment behind; Trip Service reads
+	// the Redis position when it checks the driver is at the pickup, so wait for that one.
+	st.waitFreshLocation("driver-1")
 
 	// 2. Rider gets a signed price quote from Pricing Service
 	var quote struct {
@@ -648,6 +658,20 @@ func (s *stack) skipped(reason string) int {
 		}
 	}
 	return 0
+}
+
+// waitFreshLocation waits until Redis holds a recent position for the driver (the seed has
+// timestamp 0, so a position from the last minute can only be one the fleet wrote).
+func (s *stack) waitFreshLocation(driverID string) {
+	s.t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		if pos, found, err := driverlocation.Get(ctx, s.rdb, driverID); err == nil && found && pos.Age(time.Now()) < time.Minute {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	s.t.Fatalf("Redis never got a fresh location for %s", driverID)
 }
 
 // bookAssignedTrip books another ride for rider-1 with driver-1 and returns its ASSIGNED trip.
