@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,7 +47,7 @@ func newFixture(t *testing.T, policy Policy) *fixture {
 	t.Cleanup(db.Close)
 	// TRUNCATE is not a row-level change, so the ledger's append-only triggers allow it.
 	if _, err := db.Exec(ctx, `
-		TRUNCATE payments, payment_events, order_prices, ledger_entries, ledger_transactions, ledger_accounts;
+		TRUNCATE payments, payment_events, order_prices, trip_assignments, ledger_entries, ledger_transactions, ledger_accounts;
 		DELETE FROM outbox WHERE source = 'payment-service'`); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +78,13 @@ func status(orderID, tripID, driver, rider string, s events.TripStatus, by strin
 		Envelope: events.Envelope{EventID: newID()}, TripID: tripID, OrderID: orderID, DriverID: driver,
 		RiderID: rider, Status: s, CancelledBy: by,
 	}
+}
+
+// at returns the same status event stamped with when it happened, which the
+// cancellation grace period is measured from.
+func at(e events.TripStatusChanged, t time.Time) events.TripStatusChanged {
+	e.OccurredAt = t.UTC().Format(time.RFC3339Nano)
+	return e
 }
 
 func rated(orderID, tripID, driver, rider string, tip int64) events.TripRated {
@@ -305,12 +313,24 @@ func TestZeroTipAndBadTipsChargeNothing(t *testing.T) {
 	}
 }
 
-func TestRiderCancelAfterAssignmentPaysTheConfiguredFee(t *testing.T) {
-	f := newFixture(t, Policy{CommissionBps: 2000, CancellationFee: 15000})
+var graceFixturePolicy = Policy{CommissionBps: 2000, CancellationFee: 15000, CancellationGrace: 3 * time.Minute}
+
+// assignedAndCancelled runs a trip through ASSIGNED and then CANCELLED by the rider, held apart as given.
+func (f *fixture) assignedAndCancelled(order, trip, rider string, held time.Duration) error {
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusAssigned, ""), t0)); err != nil {
+		return err
+	}
+	return f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusCancelled, events.CancelledByRider), t0.Add(held)))
+}
+
+func TestRiderCancelAfterTheGracePeriodPaysTheConfiguredFee(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
 
-	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider)); err != nil {
+	if err := f.assignedAndCancelled(order, trip, "rider-1", 3*time.Minute+time.Second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,6 +349,81 @@ func TestRiderCancelAfterAssignmentPaysTheConfiguredFee(t *testing.T) {
 	f.assertLedgerBalances()
 }
 
+func TestRiderCancelWithinTheGracePeriodIsFree(t *testing.T) {
+	for name, held := range map[string]time.Duration{
+		"well inside the grace period": time.Minute,
+		"exactly at the limit":         3 * time.Minute,
+	} {
+		f := newFixture(t, graceFixturePolicy)
+		order, trip := f.order("rider-1", fl(100000)), newID()
+		if err := f.assignedAndCancelled(order, trip, "rider-1", held); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if n := f.payments(trip); n != 0 {
+			t.Errorf("%s: %d payments, want none", name, n)
+		}
+		if n := f.scalar(`SELECT count(*) FROM ledger_entries`); n != 0 {
+			t.Errorf("%s: %d ledger entries, want none", name, n)
+		}
+	}
+}
+
+// A redelivered ASSIGNED event (or a later one) must not restart the clock: the
+// driver has been committed since the first one.
+func TestARedeliveredAssignmentDoesNotRestartTheGraceClock(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
+	ctx := context.Background()
+	order, trip := f.order("rider-1", fl(100000)), newID()
+	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+
+	for _, when := range []time.Time{t0, t0.Add(10 * time.Minute)} {
+		if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusAssigned, ""), when)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0.Add(11*time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.payments(trip); n != 1 {
+		t.Errorf("%d payments, want the fee: measured from the first assignment (11 minutes), not the second (1 minute)", n)
+	}
+}
+
+// If this service was not consuming when the trip was assigned, it cannot tell
+// how long the rider waited, so it charges nothing rather than guess.
+func TestACancelWithoutAKnownAssignmentIsNotCharged(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
+	order, trip := f.order("rider-1", fl(100000)), newID()
+	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	if err := f.svc.onTripStatus(context.Background(), at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0)); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.payments(trip); n != 0 {
+		t.Errorf("%d payments, want none without an assignment time", n)
+	}
+}
+
+func TestACancelEventWithAnUnreadableTimeIsAPermanentError(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
+	order, trip := f.order("rider-1", fl(100000)), newID()
+	evt := status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider)
+	evt.OccurredAt = "yesterday"
+	err := f.svc.onTripStatus(context.Background(), evt)
+	var p interface{ Permanent() bool }
+	if !errors.As(err, &p) || !p.Permanent() {
+		t.Errorf("error = %v, want a permanent one (a retry cannot fix the time)", err)
+	}
+}
+
+func TestCancellationPolicyIsServedToTheApps(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy)
+	me := auth.Identity{Subject: "rider-1", Role: auth.Rider}
+	code, body := f.get("/cancellation-policy", me, f.svc.handleCancellationPolicy, "")
+	if code != 200 || body["fee"] != float64(15000) || body["graceSeconds"] != float64(180) || body["currency"] != "VND" {
+		t.Errorf("policy = %d %v, want fee 15000, graceSeconds 180, VND", code, body)
+	}
+}
+
 func TestRiderCancelFeeIsOffByDefault(t *testing.T) {
 	f := newFixture(t, defaultPolicy) // CancellationFee 0
 	order, trip := f.order("rider-1", fl(100000)), newID()
@@ -341,9 +436,13 @@ func TestRiderCancelFeeIsOffByDefault(t *testing.T) {
 }
 
 func TestDriverCancelNeverCostsTheRider(t *testing.T) {
-	f := newFixture(t, Policy{CommissionBps: 2000, CancellationFee: 15000})
+	f := newFixture(t, graceFixturePolicy)
+	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	if err := f.svc.onTripStatus(context.Background(), status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByDriver)); err != nil {
+	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusAssigned, ""), t0))
+	// An hour later, well past any grace period: still the driver's doing.
+	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByDriver), t0.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -590,7 +689,7 @@ func TestPaymentsAPIShowsEachSideTheirOwnView(t *testing.T) {
 }
 
 func TestEarningsSummaryAndOwnership(t *testing.T) {
-	f := newFixture(t, Policy{CommissionBps: 2000, CancellationFee: 10000})
+	f := newFixture(t, Policy{CommissionBps: 2000, CancellationFee: 10000, CancellationGrace: 3 * time.Minute})
 	ctx := context.Background()
 	o1, t1 := f.order("rider-1", fl(100000)), newID()
 	o2, t2 := f.order("rider-2", fl(50000)), newID()
@@ -598,7 +697,9 @@ func TestEarningsSummaryAndOwnership(t *testing.T) {
 	f.svc.onTripStatus(ctx, status(o1, t1, "driver-1", "rider-1", events.TripStatusCompleted, ""))
 	f.svc.onTripRated(ctx, rated(o1, t1, "driver-1", "rider-1", 10000))
 	f.svc.onTripStatus(ctx, status(o2, t2, "driver-1", "rider-2", events.TripStatusCompleted, ""))
-	f.svc.onTripStatus(ctx, status(o3, t3, "driver-1", "rider-3", events.TripStatusCancelled, events.CancelledByRider))
+	if err := f.assignedAndCancelled(o3, t3, "rider-3", 5*time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	// Another driver's money must not leak in.
 	o4 := f.order("rider-4", fl(90000))
 	f.svc.onTripStatus(ctx, status(o4, newID(), "driver-2", "rider-4", events.TripStatusCompleted, ""))

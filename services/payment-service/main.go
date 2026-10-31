@@ -36,8 +36,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("payment provider: %s; commission %d bps; cancellation fee %d VND",
-		provider.Name(), env.Policy.CommissionBps, env.Policy.CancellationFee)
+	log.Printf("payment provider: %s; commission %d bps; cancellation fee %d VND after a %s grace period",
+		provider.Name(), env.Policy.CommissionBps, env.Policy.CancellationFee, env.Policy.CancellationGrace)
 
 	db, err := connectDB(ctx, env.DatabaseURL)
 	if err != nil {

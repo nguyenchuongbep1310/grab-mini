@@ -909,6 +909,12 @@ def config_map():
                 "REDIS_ADDR": "redis:6379",
                 "REDIS_SENTINEL_ADDRS": sentinel_addrs(),
                 "REDIS_MASTER_NAME": REDIS_MASTER_NAME,
+                # Payment Service's money rules (read only by it): the platform's cut of a fare in basis
+                # points; the fee a rider pays for cancelling after a driver was assigned, and how many
+                # seconds after the assignment cancelling is still free. Fee 0 makes cancelling free.
+                "PLATFORM_COMMISSION_BPS": "2000",
+                "CANCELLATION_FEE_VND": "10000",
+                "CANCELLATION_GRACE_SECONDS": "180",
                 # Cell size (degrees) to split the driver GEO set into; 0 = one key. Matching and
                 # Driver Location Service must agree: see docs/performance.md before changing it.
                 "GEO_SHARD_DEGREES": "0",

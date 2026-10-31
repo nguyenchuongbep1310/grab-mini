@@ -194,6 +194,7 @@ curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a
 
 # Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
 curl "localhost:3008/payments?tripId=<tripId>" -H "Authorization: Bearer <token>"   # fare, tip and cancellation fee of one trip, plus the captured total
+curl localhost:3008/cancellation-policy -H "Authorization: Bearer <token>"   # {"currency":"VND","fee":10000,"graceSeconds":180}: what cancelling after a driver is assigned costs, and how long it is free
 curl localhost:3008/drivers/driver-1/earnings -H "Authorization: Bearer <driver token>"   # {"total": 98000, "fares": 80000, "tips": 18000, "commission": 20000, "trips": 1, ...}; optional ?from=&to= (RFC 3339)
 ```
 

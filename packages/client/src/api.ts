@@ -337,6 +337,20 @@ export function getTripPayments(
   return request(`${PAYMENT_API}/payments?tripId=${encodeURIComponent(tripId)}`);
 }
 
+/**
+ * What cancelling costs a rider once a driver was assigned: `fee` (VND) applies only when the
+ * cancel comes more than `graceSeconds` after the assignment. A `fee` of 0 means it is free.
+ */
+export interface CancellationPolicy {
+  currency: string;
+  fee: number;
+  graceSeconds: number;
+}
+
+export function getCancellationPolicy(): Promise<CancellationPolicy> {
+  return request(`${PAYMENT_API}/cancellation-policy`);
+}
+
 /** A driver's own earnings summary; optional RFC 3339 `from` (inclusive) and `to` (exclusive). */
 export function getDriverEarnings(driverId: string, range: { from?: string; to?: string } = {}): Promise<DriverEarnings> {
   const q = new URLSearchParams();

@@ -415,9 +415,13 @@ has a default, so future evolution stays BACKWARD compatible.
 - Fare: exactly the locked price, charged when `trip.status.changed` = COMPLETED.
 - Tip: `trip.rated.tipAmount`, a separate charge (`TIP`); the driver receives all of it, no commission.
 - Cancellation: a cancellation while the order is still PENDING has no trip and no event that Payment Service reads (it does not read `order.cancelled`), so it is never
-  charged. A rider who cancels **after** a driver is assigned (`trip.status.changed` CANCELLED, `cancelledBy=RIDER`) pays the `CANCELLATION_FEE_VND` fee,
-  **default 0** to keep the current behaviour (cancelling is still free; enable it through configuration), capped at the trip price. A driver cancellation, or
-  an empty `cancelledBy` (old events), is not charged.
+  charged. A rider who cancels **after** a driver is assigned (`trip.status.changed` CANCELLED, `cancelledBy=RIDER`) pays `CANCELLATION_FEE_VND` (**default 10,000**)
+  unless the cancel comes within `CANCELLATION_GRACE_SECONDS` (**default 180**) of the assignment; exactly at the limit is still free. The fee is capped at the
+  trip price, and 0 makes cancelling free. The time held is measured in this service from the trip's ASSIGNED and CANCELLED events (`occurredAt`, both written by
+  Trip Service) and the first ASSIGNED is kept in `trip_assignments`, so no schema changed. If the ASSIGNED event was never seen (this service was not yet
+  consuming), nothing is charged (`payments_skipped_total{reason="no_assignment"}`): not knowing is not held against the rider. A driver cancellation, or an
+  empty `cancelledBy` (old events), is never charged. `GET /cancellation-policy` returns the fee and grace period so the Rider App can say what cancelling
+  costs before the rider taps it.
 - Platform commission: `PLATFORM_COMMISSION_BPS`, default 2000 (20%) on fares and cancellation fees; rounded down, the driver receives the remainder, so
   not a single dong is created or lost.
 

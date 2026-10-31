@@ -191,17 +191,25 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 	case events.TripStatusCancelled:
 		// Decided on who cancelled and the fee setting alone first, so the
 		// common case (nothing to charge) doesn't depend on the order being known.
-		if _, skip := s.policy.Cancellation(evt.CancelledBy, nil); skip != "" {
+		if skip := s.policy.CancellationApplies(evt.CancelledBy); skip != "" {
 			return s.skip(skip, evt.TripID, "cancellation")
 		}
 		if err := requireTrip(evt.TripID, evt.OrderID, evt.DriverID); err != nil {
+			return err
+		}
+		cancelledAt, err := parseEventTime(evt.OccurredAt)
+		if err != nil {
+			return err
+		}
+		assignedFor, err := s.assignedFor(ctx, evt.TripID, cancelledAt)
+		if err != nil {
 			return err
 		}
 		order, err := s.lookupOrder(ctx, evt.OrderID)
 		if err != nil {
 			return err
 		}
-		c, skip := s.policy.Cancellation(evt.CancelledBy, order.price)
+		c, skip := s.policy.Cancellation(evt.CancelledBy, order.price, assignedFor)
 		if skip != "" {
 			return s.skip(skip, evt.TripID, "cancellation")
 		}
@@ -209,8 +217,23 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 			eventID: evt.EventID, tripID: evt.TripID, orderID: evt.OrderID,
 			riderID: firstNonEmpty(evt.RiderID, order.riderID), driverID: evt.DriverID, charge: c,
 		})
+
+	case events.TripStatusAssigned:
+		// Only remembered: the cancellation fee needs to know how long the driver
+		// had been committed. The first ASSIGNED wins; a redelivery changes nothing.
+		if evt.TripID == "" {
+			return &invalidEvent{"trip.status.changed without tripId"}
+		}
+		at, err := parseEventTime(evt.OccurredAt)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.Exec(ctx,
+			`INSERT INTO trip_assignments (trip_id, assigned_at) VALUES ($1, $2) ON CONFLICT (trip_id) DO NOTHING`,
+			evt.TripID, at)
+		return err
 	}
-	return nil // ASSIGNED, IN_PROGRESS: nothing to settle yet
+	return nil // IN_PROGRESS: nothing to settle yet
 }
 
 // onTripRated charges the rider's tip and pays all of it to the driver. The
@@ -409,4 +432,31 @@ func markEventProcessed(ctx context.Context, tx pgx.Tx, eventID string) (bool, e
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// parseEventTime reads an event's occurredAt. A missing or malformed time is a
+// permanent error: no amount of retrying will make it parse.
+func parseEventTime(v string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return time.Time{}, &invalidEvent{fmt.Sprintf("occurredAt %q is not an RFC 3339 time", v)}
+	}
+	return t, nil
+}
+
+// assignedFor is how long the trip's driver had been assigned at cancelledAt, or
+// nil when the ASSIGNED event was never recorded (this service was not yet
+// consuming when it was published). Events for one trip share a partition, so
+// within a running service the ASSIGNED event is always handled first.
+func (s *service) assignedFor(ctx context.Context, tripID string, cancelledAt time.Time) (*time.Duration, error) {
+	var assignedAt time.Time
+	err := s.db.QueryRow(ctx, `SELECT assigned_at FROM trip_assignments WHERE trip_id = $1`, tripID).Scan(&assignedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	d := cancelledAt.Sub(assignedAt)
+	return &d, nil
 }

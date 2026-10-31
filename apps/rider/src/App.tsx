@@ -20,6 +20,7 @@ import {
   ApiError,
   cancelOrder,
   createOrder,
+  getCancellationPolicy,
   newQuoteOf,
   rateTrip,
   signIn,
@@ -27,7 +28,9 @@ import {
   useNotificationSocket,
   waitForTripByOrder,
 } from "@grab-mini/client";
+import type { CancellationPolicy } from "@grab-mini/client";
 import type { CancelledBy } from "@grab-mini/events";
+import { cancelFeeNote } from "./cancelFee";
 import { checkOutcome, findActiveRide } from "./recovery";
 import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
@@ -83,6 +86,9 @@ export function App() {
   const priceQuote = useQuote(PICKUP_LATLNG, ride.dropoff, ride.vehicleType, ride.phase === "idle" || ride.phase === "booking");
   const [cancelling, setCancelling] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  // What cancelling costs once a driver is assigned. Loaded when one is, and left null (no
+  // sentence) if Payment Service can't be reached: better silent than wrong.
+  const [cancelPolicy, setCancelPolicy] = useState<CancellationPolicy | null>(null);
   const [stars, setStars] = useState(0);
   const [rated, setRated] = useState(false);
   const [comment, setComment] = useState("");
@@ -144,6 +150,19 @@ export function App() {
     if (phase === "cancelled") toast.show(cancelledCopy(cancelledBy).title, "info");
     if (phase === "completed") toast.show("You've arrived. Thanks for riding!", "success");
   }, [phase, driverId, cancelledBy, toast]);
+
+  // Fetched once a driver is assigned (also after a reload into an assigned ride), before the
+  // rider could open the cancel dialog.
+  useEffect(() => {
+    if (phase !== "assigned" || cancelPolicy) return;
+    let stopped = false;
+    getCancellationPolicy()
+      .then((p) => !stopped && setCancelPolicy(p))
+      .catch(() => {});
+    return () => {
+      stopped = true;
+    };
+  }, [phase, cancelPolicy]);
 
   const book = async () => {
     if (!ride.dropoff) return;
@@ -369,7 +388,7 @@ export function App() {
         description={
           phase === "searching"
             ? "We'll stop looking for a driver."
-            : "Your driver is already on the way. Cancel anyway?"
+            : ["Your driver is already on the way. Cancel anyway?", cancelFeeNote(cancelPolicy)].filter(Boolean).join(" ")
         }
         reasons={CANCEL_REASONS}
         confirmLabel={phase === "searching" ? "Cancel ride" : "Cancel trip"}

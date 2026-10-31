@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"grab-mini/pkg/events"
 )
@@ -38,26 +39,32 @@ func TestTipGoesToTheDriverInFull(t *testing.T) {
 }
 
 func TestCancellationFeeRules(t *testing.T) {
+	const grace = 3 * time.Minute
 	cases := []struct {
 		name        string
 		fee         int64
 		cancelledBy string
 		price       *int64
+		assignedFor *time.Duration
 		wantTotal   int64
 		wantSkip    string
 	}{
-		{"rider cancels, fee on", 15000, events.CancelledByRider, ptr(100000), 15000, ""},
-		{"rider cancels, fee off (the default)", 0, events.CancelledByRider, ptr(100000), 0, skipFeeDisabled},
-		{"driver cancels, fee on: never charged", 15000, events.CancelledByDriver, ptr(100000), 0, skipDriverCancel},
-		{"driver cancels, fee off", 0, events.CancelledByDriver, ptr(100000), 0, skipDriverCancel},
-		{"unknown canceller: not charged", 15000, "", ptr(100000), 0, skipUnknownActor},
-		{"fee is capped at the price", 15000, events.CancelledByRider, ptr(10000), 10000, ""},
-		{"free ride, nothing to cap to", 15000, events.CancelledByRider, ptr(0), 0, skipZeroAmount},
-		{"price unknown: the configured fee", 15000, events.CancelledByRider, nil, 15000, ""},
+		{"rider cancels after the grace period", 15000, events.CancelledByRider, ptr(100000), dur(grace + time.Second), 15000, ""},
+		{"rider cancels within the grace period", 15000, events.CancelledByRider, ptr(100000), dur(grace - time.Second), 0, skipWithinGrace},
+		{"exactly at the grace limit is still free", 15000, events.CancelledByRider, ptr(100000), dur(grace), 0, skipWithinGrace},
+		{"immediately after the assignment", 15000, events.CancelledByRider, ptr(100000), dur(0), 0, skipWithinGrace},
+		{"assignment never seen: not held against the rider", 15000, events.CancelledByRider, ptr(100000), nil, 0, skipNoAssignment},
+		{"rider cancels, fee off", 0, events.CancelledByRider, ptr(100000), dur(time.Hour), 0, skipFeeDisabled},
+		{"driver cancels late, fee on: never charged", 15000, events.CancelledByDriver, ptr(100000), dur(time.Hour), 0, skipDriverCancel},
+		{"driver cancels, fee off", 0, events.CancelledByDriver, ptr(100000), dur(time.Hour), 0, skipDriverCancel},
+		{"unknown canceller: not charged", 15000, "", ptr(100000), dur(time.Hour), 0, skipUnknownActor},
+		{"fee is capped at the price", 15000, events.CancelledByRider, ptr(10000), dur(time.Hour), 10000, ""},
+		{"free ride, nothing to cap to", 15000, events.CancelledByRider, ptr(0), dur(time.Hour), 0, skipZeroAmount},
+		{"price unknown: the configured fee", 15000, events.CancelledByRider, nil, dur(time.Hour), 15000, ""},
 	}
 	for _, c := range cases {
-		p := Policy{CommissionBps: 2000, CancellationFee: c.fee}
-		got, skip := p.Cancellation(c.cancelledBy, c.price)
+		p := Policy{CommissionBps: 2000, CancellationFee: c.fee, CancellationGrace: grace}
+		got, skip := p.Cancellation(c.cancelledBy, c.price, c.assignedFor)
 		if skip != c.wantSkip || got.Total != c.wantTotal {
 			t.Errorf("%s: total %d, skip %q; want %d, %q", c.name, got.Total, skip, c.wantTotal, c.wantSkip)
 		}
@@ -69,17 +76,48 @@ func TestCancellationFeeRules(t *testing.T) {
 	}
 }
 
+// With no grace period configured, any positive time held is chargeable and only
+// a cancel in the same instant as the assignment is free.
+func TestZeroGraceChargesAsSoonAsTheDriverIsAssigned(t *testing.T) {
+	p := Policy{CommissionBps: 2000, CancellationFee: 15000}
+	if _, skip := p.Cancellation(events.CancelledByRider, ptr(100000), dur(time.Millisecond)); skip != "" {
+		t.Errorf("1ms after the assignment with no grace: skip %q, want a charge", skip)
+	}
+	if _, skip := p.Cancellation(events.CancelledByRider, ptr(100000), dur(0)); skip != skipWithinGrace {
+		t.Errorf("same instant: skip %q, want %q", skip, skipWithinGrace)
+	}
+}
+
+func dur(d time.Duration) *time.Duration { return &d }
+
 func TestPolicyValidate(t *testing.T) {
-	good := []Policy{{}, {CommissionBps: 2000, CancellationFee: 15000}, {CommissionBps: 10000}}
+	good := []Policy{{}, {CommissionBps: 2000, CancellationFee: 15000, CancellationGrace: 3 * time.Minute}, {CommissionBps: 10000}}
 	for _, p := range good {
 		if err := p.Validate(); err != nil {
 			t.Errorf("%+v: %v", p, err)
 		}
 	}
-	bad := []Policy{{CommissionBps: -1}, {CommissionBps: 10001}, {CancellationFee: -5}, {CancellationFee: maxAmount + 1}}
+	bad := []Policy{{CommissionBps: -1}, {CommissionBps: 10001}, {CancellationFee: -5}, {CancellationFee: maxAmount + 1}, {CancellationGrace: -time.Second}}
 	for _, p := range bad {
 		if err := p.Validate(); err == nil {
 			t.Errorf("%+v: want an error", p)
+		}
+	}
+}
+
+// Trip Service stamps events with whole seconds (time.RFC3339); the cancel timing must read them.
+func TestParseEventTimeReadsWhatTripServiceWrites(t *testing.T) {
+	trip := time.Date(2026, 10, 31, 9, 0, 7, 0, time.UTC).Format(time.RFC3339) // "2026-10-31T09:00:07Z"
+	got, err := parseEventTime(trip)
+	if err != nil || !got.Equal(time.Date(2026, 10, 31, 9, 0, 7, 0, time.UTC)) {
+		t.Errorf("parseEventTime(%q) = %v, %v", trip, got, err)
+	}
+	if _, err := parseEventTime("2026-10-31T09:00:07.250+07:00"); err != nil {
+		t.Errorf("fractional seconds with an offset: %v", err)
+	}
+	for _, bad := range []string{"", "yesterday", "2026-10-31"} {
+		if _, err := parseEventTime(bad); err == nil {
+			t.Errorf("parseEventTime(%q) succeeded", bad)
 		}
 	}
 }

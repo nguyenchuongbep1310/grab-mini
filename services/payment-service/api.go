@@ -20,6 +20,7 @@ func (s *service) routes(verifier *auth.Verifier) *http.ServeMux {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.Handle("GET /payments", verifier.Require(http.HandlerFunc(s.handleGetPayments), auth.Rider, auth.Driver))
+	mux.Handle("GET /cancellation-policy", verifier.Require(http.HandlerFunc(s.handleCancellationPolicy), auth.Rider, auth.Driver))
 	mux.Handle("GET /drivers/{id}/earnings", verifier.Require(http.HandlerFunc(s.handleEarnings), auth.Driver))
 	return mux
 }
@@ -60,6 +61,22 @@ type driverPayout struct {
 	Commission int64     `json:"commission"`
 	Currency   string    `json:"currency"`
 	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// handleCancellationPolicy serves GET /cancellation-policy: what a rider pays for cancelling
+// after a driver was assigned, so the app can say so before the rider taps "cancel". The fee
+// applies only when the rider cancels more than graceSeconds after the assignment; 0 means
+// cancelling is free.
+func (s *service) handleCancellationPolicy(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.From(r.Context()); !ok {
+		auth.Deny(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"currency":     currencyVND,
+		"fee":          s.policy.CancellationFee,
+		"graceSeconds": int64(s.policy.CancellationGrace / time.Second),
+	})
 }
 
 // handleGetPayments serves GET /payments?tripId=. A rider sees the charges of

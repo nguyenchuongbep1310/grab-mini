@@ -337,7 +337,7 @@ transaction, so reprocessing is always safe.
    SELECT COALESCE(SUM(amount), 0) FROM ledger_entries;
    ```
 6. **A trip with no payment?** `SELECT * FROM payments WHERE trip_id = '...'`. No rows and nothing in the DLQ:
-   check `payments_skipped_total{reason}` (order with no price, free trip, cancelled by the driver, `CANCELLATION_FEE_VND=0`).
+   check `payments_skipped_total{reason}` (order with no price, free trip, cancelled by the driver, `CANCELLATION_FEE_VND=0`, a rider cancel within `CANCELLATION_GRACE_SECONDS` of the assignment, or `no_assignment`: the trip's ASSIGNED event was never seen).
    A `DECLINED` row means the provider declined the rider's card; that row has no ledger entries and the system **does not
    retry it automatically** (collecting the debt is the operator's job).
 

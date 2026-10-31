@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"grab-mini/pkg/secret"
 )
@@ -27,8 +28,11 @@ func loadEnv() Env {
 		Policy: Policy{
 			// 20% of a fare is the platform's; tips are the driver's in full.
 			CommissionBps: getInt("PLATFORM_COMMISSION_BPS", 2000),
-			// 0 keeps cancellation free, as it was before payments existed.
-			CancellationFee: getInt("CANCELLATION_FEE_VND", 0),
+			// A rider who cancels after the driver was assigned and the grace period
+			// has passed pays this much (capped at the ride's price); 0 makes
+			// cancelling free.
+			CancellationFee:   getInt("CANCELLATION_FEE_VND", 10000),
+			CancellationGrace: time.Duration(getInt("CANCELLATION_GRACE_SECONDS", 180)) * time.Second,
 		},
 	}
 	if err := env.Policy.Validate(); err != nil {

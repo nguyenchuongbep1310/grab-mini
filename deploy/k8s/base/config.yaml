@@ -20,6 +20,9 @@ data:
   REDIS_ADDR: redis:6379
   REDIS_SENTINEL_ADDRS: redis-0.redis-headless:26379,redis-1.redis-headless:26379,redis-2.redis-headless:26379
   REDIS_MASTER_NAME: mymaster
+  PLATFORM_COMMISSION_BPS: '2000'
+  CANCELLATION_FEE_VND: '10000'
+  CANCELLATION_GRACE_SECONDS: '180'
   GEO_SHARD_DEGREES: '0'
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4318
   ALLOWED_ORIGINS: https://app.example.com
