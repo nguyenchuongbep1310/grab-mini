@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -62,7 +63,7 @@ func handleToken(issuer *auth.Issuer) http.HandlerFunc {
 			return
 		}
 		if !req.Role.Valid() || !idPattern.MatchString(req.ID) {
-			auth.Deny(w, http.StatusBadRequest, `role must be "rider" or "driver" and id letters, digits, - or _ (up to 64)`)
+			auth.Deny(w, http.StatusBadRequest, `role must be "rider", "driver" or "admin" and id letters, digits, - or _ (up to 64)`)
 			return
 		}
 		token, exp, err := issuer.Issue(req.Role, req.ID)
@@ -108,12 +109,21 @@ func newMux(issuer *auth.Issuer, previous ...ed25519.PublicKey) *http.ServeMux {
 	return mux
 }
 
+// mayRun refuses production. This service signs a token for whoever asks,
+// admin included, so it must never be the issuer of a deployed system.
+func mayRun(env Env) error {
+	if secret.Production() && !env.AllowDevTokens {
+		return errors.New("auth-service issues a token to anyone who asks (admin included) and is for development only: " +
+			"refusing to run with APP_ENV=production (set ALLOW_DEV_TOKENS=true to override, or use a real identity provider)")
+	}
+	return nil
+}
+
 func main() {
 	logging.Setup("auth-service")
 	env := loadEnv()
-	if secret.Production() && !env.AllowDevTokens {
-		log.Fatal("auth-service issues a token to anyone who asks and is for development only: " +
-			"refusing to run with APP_ENV=production (set ALLOW_DEV_TOKENS=true to override, or use a real identity provider)")
+	if err := mayRun(env); err != nil {
+		log.Fatal(err)
 	}
 	issuer, err := auth.NewIssuer(env.SigningKey, env.TokenTTL)
 	if err != nil {

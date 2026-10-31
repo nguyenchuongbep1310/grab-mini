@@ -24,6 +24,7 @@ data:
   CANCELLATION_FEE_VND: '10000'
   CANCELLATION_GRACE_SECONDS: '180'
   GEO_SHARD_DEGREES: '0'
+  ROUTING_URL: http://routing-service:3009
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring:4318
   ALLOWED_ORIGINS: https://app.example.com
 ---

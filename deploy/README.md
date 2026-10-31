@@ -17,9 +17,9 @@ docs/runbook.md             what to do when an alert fires
 
 | | |
 |---|---|
-| Services | order, trip, rating, payment, notification, location-gateway, pricing (HTTP) and matching, driver-location (workers). **Auth Service is not deployed**: it hands a token to anyone and refuses to run in production. Put a real identity provider in front and have the services verify its tokens. |
+| Services | order, trip, rating, payment, notification, location-gateway, pricing, routing (HTTP) and matching, driver-location (workers). **Auth Service is not deployed**: it hands a token to anyone and refuses to run in production. Put a real identity provider in front and have the services verify its tokens. |
 | Per pod | non-root, read-only filesystem, no capabilities; probes on a separate **admin port** (`9090`: `/livez`, `/readyz`, `/metrics`) that no ingress should route; `maxUnavailable: 0`; spread over zones and nodes; a PodDisruptionBudget; a 5 s `preStop` sleep so the pod leaves the endpoints before it drains |
-| Scaling | KEDA scales consumers on **Kafka lag** (replicas capped at the partition count) and APIs on CPU; the location gateway scales on CPU only |
+| Scaling | KEDA scales consumers on **Kafka lag** (replicas capped at the partition count) and APIs on CPU; the location gateway and Routing Service (stateless, no Kafka) scale on CPU only |
 | Migrations | one Job per database-owning service (`<service> migrate`); the Deployments run with `RUN_MIGRATIONS=false` |
 | Kafka | a Strimzi cluster: 3 KRaft controllers and 3 brokers across zones, replication factor 3, `min.insync.replicas` 2 (1 for locations), no unclean leader election, no topic auto-creation; the six topics; a `KafkaUser` per service whose ACLs are read from `scripts/kafka-acls.sh`, so the two cannot disagree |
 | Network | ingress **and egress** denied by default; the ingress controller may reach the APIs' public port; Prometheus may reach the admin port; each workload may reach only DNS, Kafka, and the Postgres, Redis, Schema Registry, OTLP collector and JWKS endpoints it uses (see [docs/security.md](../docs/security.md)) |
@@ -60,7 +60,7 @@ is there: with `APP_ENV=production` there are no development defaults.
 
 ```bash
 # 1. set the image of each service
-for s in order-service trip-service rating-service payment-service notification-service location-gateway pricing-service matching-service driver-location-service; do
+for s in order-service trip-service rating-service payment-service notification-service location-gateway pricing-service routing-service matching-service driver-location-service; do
   (cd deploy/k8s/base && kustomize edit set image ghcr.io/example/grab-mini/$s=$REGISTRY/$s:$TAG)
 done
 # 2. the cluster, the topics and the users, and wait for Kafka

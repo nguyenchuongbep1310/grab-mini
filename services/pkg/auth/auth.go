@@ -1,7 +1,7 @@
 // Package auth identifies who is calling, from a signed JWT.
 //
 // A token says who the caller is (Subject: "rider-1") and what kind of caller
-// they are (Role: rider or driver). Services never trust an id sent in a
+// they are (Role: rider, driver or admin). Services never trust an id sent in a
 // request body or URL as proof of identity: they take it from the token and
 // compare, so a rider can't rate someone else's trip by naming their id.
 //
@@ -36,10 +36,14 @@ type Role string
 const (
 	Rider  Role = "rider"
 	Driver Role = "driver"
+	// Admin is an operator (the Ops dashboard, promotion and driver review).
+	// Only the development token issuer signs it; a production identity
+	// provider must put role=admin in the tokens of its operators itself.
+	Admin Role = "admin"
 )
 
 // Valid reports whether r is a role this system issues tokens for.
-func (r Role) Valid() bool { return r == Rider || r == Driver }
+func (r Role) Valid() bool { return r == Rider || r == Driver || r == Admin }
 
 // PrivateKeyFromEnv is the issuer's signing key: a PKCS#8 PEM Ed25519 key in
 // JWT_PRIVATE_KEY or the file JWT_PRIVATE_KEY_FILE. The published development

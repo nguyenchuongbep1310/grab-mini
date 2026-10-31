@@ -9,6 +9,7 @@ const ORDER_API = "/order-api";
 const TRIP_API = "/trip-api";
 const RATING_API = "/rating-api";
 const PRICING_API = "/pricing-api";
+const ROUTING_API = "/routing-api";
 
 export interface LatLng {
   lat: number;
@@ -42,6 +43,19 @@ export interface Quote {
   currency: string;
   /** ISO time. */
   expiresAt: string;
+}
+
+/** A route from Routing Service: a model (great-circle distance x 1.3, speed by hour), not maps data. */
+export interface Route {
+  /** Road distance estimate, km. */
+  distanceKm: number;
+  /** Travel time estimate, seconds. */
+  durationSec: number;
+  /** A rough straight-line path from the origin to the destination. */
+  polyline: LatLng[];
+  vehicle: VehicleType;
+  /** Which version of the model produced this, e.g. "detour-1.3". */
+  model: string;
 }
 
 export interface Trip {
@@ -163,6 +177,21 @@ export function getQuote(pickup: LatLng, dropoff: LatLng, vehicleType: VehicleTy
     vehicleType,
   });
   return request(`${PRICING_API}/quotes?${q}`);
+}
+
+/**
+ * Distance and travel time between two points. A 422 (ApiError) means the trip
+ * is beyond what the model covers (200 km).
+ */
+export function getRoute(from: LatLng, to: LatLng, vehicle: VehicleType): Promise<Route> {
+  const q = new URLSearchParams({
+    fromLat: String(from.lat),
+    fromLng: String(from.lng),
+    toLat: String(to.lat),
+    toLng: String(to.lng),
+    vehicle,
+  });
+  return request(`${ROUTING_API}/route?${q}`);
 }
 
 export function getOrder(orderId: string): Promise<Order> {

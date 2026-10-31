@@ -437,3 +437,44 @@ Card declines (`DECLINED`) are recorded and published, with no ledger entries an
 **Known limitations:** the provider is fake; there are no real payouts to drivers yet (the `DRIVER_PAYABLE` balance is only recorded), no refunds/reversing entries yet,
 no debt collection when a card is declined, and no reconciliation against the provider's reports. Egress Payment Service needs: Postgres, Kafka, Schema
 Registry, the OTLP collector (no Redis); with a real provider, add HTTPS to that provider.
+
+## 17. Routing: Routing Service (done)
+
+Riders now see how far a trip is and how long it takes, and fares are computed on a road distance instead of a straight line. **The numbers are a model, not maps data.**
+
+**The service.** `routing-service` (port 3009) is HTTP only and stateless: no Kafka, no database, no Redis and no call to an outside API, so it has no `KafkaUser`, no migration, no
+lag-based scaling (CPU only, 2 to 12 pods) and nothing to lose in a failover. `GET /route?fromLat&fromLng&toLat&toLng&vehicle=CAR|BIKE` answers `{distanceKm, durationSec, polyline, vehicle, model}`.
+Any valid token may ask (rider, driver or admin); requests are rate limited per caller (10 a second, burst 30).
+
+**The model (`detour-1.3`).** Distance = great-circle distance x 1.3. Speed by vehicle and period, in Vietnam time (a fixed UTC+7 offset: the country has no daylight saving, and a fixed zone
+avoids shipping the tz database in the distroless image):
+
+| km/h | off peak | peak (07:00 to 09:00, 17:00 to 19:00) | night (22:00 to 05:00) |
+|---|---|---|---|
+| CAR | 28 | 16 | 38 |
+| BIKE | 32 | 22 | 40 |
+
+Duration = distance / speed, rounded to the second. The same inputs at the same hour give the same answer (it is unit tested with table tests). Coordinates must be finite and in range
+(400 otherwise); a modelled distance above 200 km is refused (422): a swapped latitude and longitude is the likelier cause, and an intercity trip is not one street grid.
+
+**How Pricing uses it.** Pricing Service asks Routing for the distance behind each quote, with a 300 ms timeout (`ROUTING_TIMEOUT_MS`), and prices the base fare on it. There is no
+service-to-service credential in this system, so Pricing **forwards the rider's own bearer token** (it already holds it on `GET /quotes`); this is why Routing accepts every role.
+The token goes only to `ROUTING_URL`, which is set by the operator. **Fail open:** if `ROUTING_URL` is empty, the request has no token, Routing times out, errors, answers a nonsense
+distance, or refuses the trip (422), the quote is priced on the straight-line distance exactly as before and `pricing_routing_fail_open_total{reason}` is incremented
+(`disabled`, `timeout`, `error`, `unsupported`). The alert `PricingRoutingFailOpen` (ticket) fires on `timeout` and `error` for ten minutes; `disabled` and `unsupported` are not faults.
+`pkg/surge` gained `IssueForDistance`; `Issue` is unchanged. No Avro schema changed.
+
+**Known limitations.**
+- **It is an estimate.** There is no road network, no one-way streets, no rivers or bridges, no live traffic and no incidents. The 1.3 detour and the speeds are rules of thumb for a dense
+  city: a trip across a river can be far longer than the model says. Do not use it to promise a pickup time to the minute; the Rider App says "about".
+- **The polyline is a straight line**, not the road; it is meant for a rough drawing, not turn-by-turn.
+- **Pricing and booking can disagree.** Order Service does not call Routing (it must not add a network hop to the booking path). A booking that carries a valid quote honours the quoted (routed)
+  price. But a booking with no quote or an expired one, and the replacement quote of a 409, are re-priced on the **straight-line** distance, so the locked price can differ from the routed
+  quote the rider saw. Closing this needs Order Service to reuse the base fare of the expired quote (the signed body has it) or to call Routing with its own fail-open; both are left out of this phase.
+- **A fail-open quote is cheaper.** A road distance is longer than the straight line, so while Routing is down fares are lower than they would be. That is the safe direction for riders, and the alert
+  tells operators that revenue is being under-estimated.
+- **Forwarding the rider's token** couples Routing's rate limit to the rider's other calls only loosely (separate limiter, same subject) and makes Pricing a holder of a bearer token for the length of
+  a request. A real deployment should give Pricing a service identity (mTLS or a client-credentials token) and let Routing accept it.
+- **Egress and ingress.** Routing needs only DNS, the OTLP collector and the JWKS endpoint. A NetworkPolicy lets Pricing reach it on its port; the ingress controller may reach it for the Rider App.
+- **Admin role.** `admin` is a valid role everywhere, but only the development issuer (`auth-service`, which refuses to run with `APP_ENV=production`) can sign it. With a real identity provider, the
+  operators' tokens must carry `role=admin` and that provider must be the only one able to mint them. No admin-only route exists yet (promotions and driver review add them).

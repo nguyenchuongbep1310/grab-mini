@@ -161,6 +161,14 @@ spec:
       annotations:
         summary: 'Surge multipliers can''t be read: prices fall back to 1.0'
         runbook: docs/runbook.md#surge-pricing
+    - alert: PricingRoutingFailOpen
+      expr: sum(rate(pricing_routing_fail_open_total{reason=~"timeout|error"}[5m])) > 0
+      for: 10m
+      labels:
+        severity: ticket
+      annotations:
+        summary: 'Routing Service can''t be reached: quotes use the straight-line distance'
+        runbook: docs/runbook.md#routing
     - alert: SurgeSamplerStalled
       expr: sum(rate(pricing_ticks_total[5m])) < 0.05 and on() sum(rate(orders_created_total[10m])) > 0.05
       for: 10m

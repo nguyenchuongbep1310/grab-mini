@@ -391,6 +391,59 @@ tests:
               summary: "Surge multipliers can't be read: prices fall back to 1.0"
               runbook: "docs/runbook.md#surge-pricing"
 
+  - name: a routing service that can't be reached is a ticket
+    interval: 1m
+    input_series:
+      - series: 'pricing_routing_fail_open_total{reason="timeout"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 5m   # not for 10 minutes yet
+        alertname: PricingRoutingFailOpen
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PricingRoutingFailOpen
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Routing Service can't be reached: quotes use the straight-line distance"
+              runbook: "docs/runbook.md#routing"
+
+  - name: routing errors are a ticket too
+    interval: 1m
+    input_series:
+      - series: 'pricing_routing_fail_open_total{reason="error"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PricingRoutingFailOpen
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Routing Service can't be reached: quotes use the straight-line distance"
+              runbook: "docs/runbook.md#routing"
+
+  - name: routing switched off on purpose, or a trip beyond its range, raises nothing
+    interval: 1m
+    input_series:
+      - series: 'pricing_routing_fail_open_total{reason="disabled"}'
+        values: '0+10x30'
+      - series: 'pricing_routing_fail_open_total{reason="unsupported"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PricingRoutingFailOpen
+        exp_alerts: []
+
+  - name: a brief routing blip does not raise a ticket
+    interval: 1m
+    input_series:
+      - series: 'pricing_routing_fail_open_total{reason="timeout"}'
+        values: '0 0 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5'   # one burst of timeouts, then healthy
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: PricingRoutingFailOpen
+        exp_alerts: []
+
   - name: a healthy pricing service raises nothing
     interval: 1m
     input_series:
@@ -402,9 +455,14 @@ tests:
         values: '0+12x30'
       - series: 'orders_created_total'
         values: '0+60x30'
+      - series: 'pricing_routing_fail_open_total{reason="timeout"}'
+        values: '0+0x30'
     alert_rule_test:
       - eval_time: 20m
         alertname: SurgePricingFailOpen
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PricingRoutingFailOpen
         exp_alerts: []
       - eval_time: 20m
         alertname: SurgeSamplerStalled

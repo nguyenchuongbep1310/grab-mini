@@ -16,6 +16,11 @@ type Env struct {
 	Port              string
 	InstanceID        string
 
+	// Routing Service gives the distance a quote is priced on. Empty turns it
+	// off (quotes use the straight line); unset means the local default.
+	RoutingURL     string
+	RoutingTimeout time.Duration
+
 	// Surge model (see package surge).
 	K              float64       // how much each extra unit of demand per driver adds
 	MaxMultiplier  float64       // ceiling on a multiplier
@@ -34,6 +39,9 @@ func loadEnv() Env {
 		Port:              getEnv("PORT", "3007"),
 		InstanceID:        getEnv("INSTANCE_ID", fmt.Sprintf("pricing-%d", os.Getpid())),
 
+		RoutingURL:     getEnvAllowEmpty("ROUTING_URL", "http://localhost:3009"),
+		RoutingTimeout: time.Duration(getEnvInt("ROUTING_TIMEOUT_MS", 300)) * time.Millisecond,
+
 		K:              getEnvFloat("SURGE_K", 0.5),
 		MaxMultiplier:  getEnvFloat("SURGE_MAX", surge.MaxMultiplier),
 		Alpha:          getEnvFloat("SURGE_ALPHA", 0.5),
@@ -46,6 +54,15 @@ func loadEnv() Env {
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// getEnvAllowEmpty is getEnv where an empty value is an answer too: it is how
+// a feature is switched off.
+func getEnvAllowEmpty(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return fallback

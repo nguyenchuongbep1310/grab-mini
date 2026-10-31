@@ -56,10 +56,11 @@ func currentMultiplier(ctx context.Context, rdb *redis.Client, vehicle, cell str
 }
 
 type quoteServer struct {
-	rdb    *redis.Client
-	signer *surge.Signer
-	env    Env
-	now    func() time.Time
+	rdb     *redis.Client
+	signer  *surge.Signer
+	routing *routingClient // nil: routing is off and quotes use the straight-line distance
+	env     Env
+	now     func() time.Time
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -115,7 +116,9 @@ func (s *quoteServer) handleQuote(w http.ResponseWriter, r *http.Request) {
 
 	cell := surge.CellID(s.env.CellDegrees, req.PickupLat, req.PickupLng)
 	mult := currentMultiplier(r.Context(), s.rdb, req.Vehicle, cell)
-	quote := s.signer.Issue(req, mult, s.now())
+	// The rider's own token is forwarded to Routing: there is no service credential.
+	km := s.tripDistanceKm(r.Context(), r.Header.Get("Authorization"), req)
+	quote := s.signer.IssueForDistance(req, km, mult, s.now())
 
 	surged := "false"
 	if mult > 1 {

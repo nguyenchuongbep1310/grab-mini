@@ -176,6 +176,25 @@ func TestQuoteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIssueForDistancePricesTheGivenDistance(t *testing.T) {
+	s := signer(t, "k1")
+	now := time.Unix(1_800_000_000, 0)
+	straight := HaversineKm(req.PickupLat, req.PickupLng, req.DropoffLat, req.DropoffLng)
+
+	// Issue is IssueForDistance on the straight line.
+	if a, b := s.Issue(req, 1.2, now), s.IssueForDistance(req, straight, 1.2, now); a.QuoteID != b.QuoteID {
+		t.Errorf("Issue and IssueForDistance(straight line) differ: %+v vs %+v", a, b)
+	}
+	q := s.IssueForDistance(req, 25, 1.2, now)
+	if q.BaseFare != BaseFare(req.Vehicle, 25) || q.Price != Price(q.BaseFare, 1.2) {
+		t.Errorf("quote %+v is not priced on 25 km", q)
+	}
+	// The quote is for the trip, whatever distance priced it.
+	if got, err := s.Verify(q.QuoteID, req, now.Add(time.Second)); err != nil || got.BaseFare != q.BaseFare {
+		t.Errorf("Verify = %+v, %v", got, err)
+	}
+}
+
 func TestQuoteVerifyFailures(t *testing.T) {
 	s := signer(t, "k1")
 	now := time.Unix(1_800_000_000, 0)

@@ -36,4 +36,5 @@ resources:
 - services/payment-service.yaml
 - services/pricing-service.yaml
 - services/rating-service.yaml
+- services/routing-service.yaml
 - services/trip-service.yaml

@@ -64,11 +64,52 @@ func TestAShortOrWrongKindOfKeyIsRefused(t *testing.T) {
 
 func TestIssueRefusesAnUnknownRoleOrNoSubject(t *testing.T) {
 	i, _ := newPair(t)
-	if _, _, err := i.Issue("admin", "x"); err == nil {
+	if _, _, err := i.Issue("superuser", "x"); err == nil {
 		t.Error("issued a token for an unknown role")
 	}
 	if _, _, err := i.Issue(Rider, ""); err == nil {
 		t.Error("issued a token with no subject")
+	}
+}
+
+func TestAdminIsAValidRoleAndRoundTrips(t *testing.T) {
+	if !Admin.Valid() || !Rider.Valid() || !Driver.Valid() || Role("superuser").Valid() || Role("").Valid() {
+		t.Fatal("Valid() must accept rider, driver and admin only")
+	}
+	pub, priv := newKey(t)
+	i, _ := NewIssuer(priv, time.Hour)
+	v := NewVerifier(NewKeySet(pub))
+	tok, _, err := i.Issue(Admin, "ops-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := v.Verify(tok); err != nil || id.Role != Admin || id.Subject != "ops-1" {
+		t.Errorf("Verify = %+v, %v; want admin ops-1", id, err)
+	}
+}
+
+func TestRequireSeparatesAdminFromRiderAndDriver(t *testing.T) {
+	pub, priv := newKey(t)
+	i, _ := NewIssuer(priv, time.Hour)
+	v := NewVerifier(NewKeySet(pub))
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	call := func(h http.Handler, role Role) int {
+		tok, _, _ := i.Issue(role, "x-1")
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	adminOnly, riderOnly, anyone := v.Require(ok, Admin), v.Require(ok, Rider), v.Require(ok)
+	if call(adminOnly, Admin) != http.StatusNoContent || call(adminOnly, Rider) != http.StatusForbidden || call(adminOnly, Driver) != http.StatusForbidden {
+		t.Error("an admin-only route must admit admin and refuse rider and driver")
+	}
+	if call(riderOnly, Admin) != http.StatusForbidden {
+		t.Error("an admin must not pass a rider-only route")
+	}
+	if call(anyone, Admin) != http.StatusNoContent {
+		t.Error("a route with no roles admits any valid role, admin included")
 	}
 }
 
@@ -119,7 +160,7 @@ func TestVerifyRejectsWhatItShould(t *testing.T) {
 		"wrong audience": sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, wrongAud}),
 		"wrong issuer":   sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, wrongIss}),
 		"no subject":     sign(jwt.SigningMethodEdDSA, priv, kid, claims{Rider, noSub}),
-		"unknown role":   sign(jwt.SigningMethodEdDSA, priv, kid, claims{"admin", good()}),
+		"unknown role":   sign(jwt.SigningMethodEdDSA, priv, kid, claims{"superuser", good()}),
 		"no kid":         sign(jwt.SigningMethodEdDSA, priv, "", claims{Rider, good()}),
 		"unknown kid":    sign(jwt.SigningMethodEdDSA, priv, "not-a-kid", claims{Rider, good()}),
 		"alg none":       sign(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, kid, claims{Rider, good()}),

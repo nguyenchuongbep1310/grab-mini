@@ -130,7 +130,8 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | ksqlDB | 8088 | every topic above | analytics tables (`analytics` section) | Kafka (changelog topics) |
 | Notification Service | 3003 | all of the above | | WebSocket connections (per instance), Redis (routing state and Pub/Sub between instances) |
 | Auth Service | 3005 | | | none (development token issuer) |
-| Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored |
+| Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored; asks Routing Service for the distance (`ROUTING_URL`), falling back to the straight line |
+| Routing Service | 3009 | | | none (stateless; a deterministic distance and travel-time model, no maps data: [production-design §17](../specs/ride-booking-mini/production-design.md)) |
 | Payment Service | 3008 | `order.created` (the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (double-entry ledger, payments); a sandbox `PaymentProvider`, no real card processor ([production-design §16](../specs/ride-booking-mini/production-design.md)) |
 | Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
 | `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
@@ -141,7 +142,7 @@ A message a consumer can't handle right now (a database that is down) is not ret
 
 ### Security
 
-Every API call and every WebSocket carries a JWT, and the services trust the token, not the request: a rider's id comes from their token (a body naming someone else is a 403), a rider sees only their own orders and trips, only a trip's driver can pick up or complete it, and only its rider can rate it. Tokens are Ed25519 (EdDSA) JWTs: only the issuer holds the private key and the services verify with its public keys from `GET /.well-known/jwks.json` (`JWT_JWKS_URL`), so no service can mint a token; see [security.md](security.md). In development (`APP_ENV=development`, which `scripts/dev.sh` sets) [Auth Service](../services/auth-service) signs a token for whoever asks (`curl -X POST localhost:3005/token -d '{"role":"rider","id":"rider-1"}'`), which is why it refuses to start with `APP_ENV=production`; the apps sign in through `@grab-mini/client`. A WebSocket sends its token as a subprotocol (not in the URL) and is only accepted from an origin in `ALLOWED_ORIGINS`.
+Every API call and every WebSocket carries a JWT, and the services trust the token, not the request: a rider's id comes from their token (a body naming someone else is a 403), a rider sees only their own orders and trips, only a trip's driver can pick up or complete it, and only its rider can rate it. Tokens are Ed25519 (EdDSA) JWTs: only the issuer holds the private key and the services verify with its public keys from `GET /.well-known/jwks.json` (`JWT_JWKS_URL`), so no service can mint a token; see [security.md](security.md). In development (`APP_ENV=development`, which `scripts/dev.sh` sets) [Auth Service](../services/auth-service) signs a token for whoever asks (`curl -X POST localhost:3005/token -d '{"role":"rider","id":"rider-1"}'`; the role is `rider`, `driver` or `admin`, the last for the operators' Ops dashboard and admin-only routes), which is why it refuses to start with `APP_ENV=production`; the apps sign in through `@grab-mini/client`. A WebSocket sends its token as a subprotocol (not in the URL) and is only accepted from an origin in `ALLOWED_ORIGINS`.
 
 Drivers' phones never talk to Kafka. [Location Gateway](../services/location-gateway) authenticates the driver, validates the position, limits each driver to one report a second, skips a parked driver's reports, and publishes in batches.
 
@@ -191,6 +192,9 @@ curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/
 # Rating Service
 curl localhost:3004/drivers/driver-1/rating          # {"average": 4.67, "count": 3, "totalTips": 30000, "tipCount": 2}
 curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a driver's own reviews, newest first (driver token only)
+
+# Routing Service (any valid token: rider, driver or admin). Distance by road (great-circle x 1.3) and travel time for the hour in Vietnam
+curl "localhost:3009/route?fromLat=10.776&fromLng=106.700&toLat=10.790&toLng=106.710&vehicle=BIKE" -H "Authorization: Bearer <token>"   # {"distanceKm": 2.47, "durationSec": 405, "polyline": [{"lat":...,"lng":...}, ...], "vehicle": "BIKE", "model": "detour-1.3"}; vehicle is CAR (default) or BIKE; 400 for bad input, 422 beyond 200 km
 
 # Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
 curl "localhost:3008/payments?tripId=<tripId>" -H "Authorization: Bearer <token>"   # fare, tip and cancellation fee of one trip, plus the captured total
@@ -358,7 +362,7 @@ Most Go tests need nothing. A few (including the full-stack system test in [serv
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3000-3007, 5170-5173, 5432, 6379, 8080, 8081, 8088, 9090, 9092, 9101, 9102): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3000-3009, 5170-5173, 5432, 6379, 8080, 8081, 8088, 9090, 9092, 9101, 9102): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The rider app is on a screen that doesn't match the trip**: reload it. It asks Order Service for the rider's latest order and Trip Service for its trip, and resumes searching, assigned or in-progress rides (a missed WebSocket push while searching is also caught by polling every 3s).
 - **The driver app shows no trip**: check the `?driver=` id matches the driver the rider was matched with (the rider's card shows it). A trip already under way is restored when the page opens or reloads.

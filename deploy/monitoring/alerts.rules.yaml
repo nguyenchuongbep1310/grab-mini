@@ -150,6 +150,20 @@ groups:
           summary: "Surge multipliers can't be read: prices fall back to 1.0"
           runbook: "docs/runbook.md#surge-pricing"
 
+      - alert: PricingRoutingFailOpen
+        # Pricing never blocks a quote on Routing Service: when it is down, slow
+        # (300 ms) or answering errors, the fare is computed on the straight-line
+        # distance. Safe for riders, but fares are lower than the routed ones and
+        # the app's distance and ETA (which call Routing directly) are failing too.
+        # "disabled" (ROUTING_URL empty) and "unsupported" (a trip beyond 200 km) are
+        # not faults and are left out.
+        expr: sum(rate(pricing_routing_fail_open_total{reason=~"timeout|error"}[5m])) > 0
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Routing Service can't be reached: quotes use the straight-line distance"
+          runbook: "docs/runbook.md#routing"
+
       - alert: SurgeSamplerStalled
         # Pricing Service samples supply every few seconds. If it stopped while
         # orders keep coming, multipliers expire after 30s and surge silently turns off.

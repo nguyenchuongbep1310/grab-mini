@@ -79,6 +79,14 @@ func sampleRatio() float64 {
 // Tracer is the tracer every package here uses.
 func Tracer() trace.Tracer { return otel.Tracer("grab-mini") }
 
+// Transport makes the HTTP requests a service sends carry the trace it is in
+// (the traceparent header) and records each as a client span, so a call from
+// Pricing to Routing shows up inside the trace of the quote. A nil base means
+// http.DefaultTransport.
+func Transport(base http.RoundTripper) http.RoundTripper {
+	return otelhttp.NewTransport(base)
+}
+
 // HTTP traces every request h serves, continuing the trace the caller sent in
 // traceparent (if any). A span is named by the route pattern the mux matched
 // ("POST /orders"), not the URL, which would give every order id its own name.

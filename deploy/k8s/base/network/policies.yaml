@@ -113,9 +113,19 @@ metadata:
     app.kubernetes.io/component: network
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: grab-mini
-      app.kubernetes.io/component: service
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - driver-location-service
+      - location-gateway
+      - matching-service
+      - notification-service
+      - order-service
+      - payment-service
+      - pricing-service
+      - rating-service
+      - trip-service
   policyTypes:
   - Egress
   egress:
@@ -138,9 +148,19 @@ metadata:
     app.kubernetes.io/component: network
 spec:
   podSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: grab-mini
-      app.kubernetes.io/component: service
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - driver-location-service
+      - location-gateway
+      - matching-service
+      - notification-service
+      - order-service
+      - payment-service
+      - pricing-service
+      - rating-service
+      - trip-service
   policyTypes:
   - Egress
   egress:
@@ -315,6 +335,7 @@ spec:
       - payment-service
       - pricing-service
       - rating-service
+      - routing-service
       - trip-service
   policyTypes:
   - Egress
@@ -336,6 +357,55 @@ spec:
         - 169.254.0.0/16
     ports:
     - port: 443
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-pricing-service-to-routing-service
+  labels:
+    app.kubernetes.io/name: allow-egress-pricing-service-to-routing-service
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - pricing-service
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: routing-service
+    ports:
+    - port: 3009
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-routing-service-from-pricing-service
+  labels:
+    app.kubernetes.io/name: allow-ingress-routing-service-from-pricing-service
+    app.kubernetes.io/part-of: grab-mini
+    app.kubernetes.io/component: network
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: routing-service
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: pricing-service
+    ports:
+    - port: http
       protocol: TCP
 ---
 apiVersion: networking.k8s.io/v1

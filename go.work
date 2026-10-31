@@ -32,5 +32,6 @@ use (
 	./services/payment-service
 	./services/pricing-service
 	./services/rating-service
+	./services/routing-service
 	./services/trip-service
 )

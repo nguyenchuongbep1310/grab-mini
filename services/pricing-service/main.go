@@ -5,7 +5,9 @@
 // short-lived multiplier per vehicle type and cell in Redis, and quotes
 // prices to riders: GET /quotes returns a signed, stateless quote that Order
 // Service honours at booking. It has no database, and if Redis is unavailable
-// every quote is simply priced at 1.0 (see currentMultiplier).
+// every quote is simply priced at 1.0 (see currentMultiplier). The distance a
+// quote is priced on comes from Routing Service, falling back to the straight
+// line if it is off or slow (see tripDistanceKm).
 package main
 
 import (
@@ -52,6 +54,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	routing, err := newRoutingClient(env.RoutingURL, env.RoutingTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
 	codec := eventcodec.New(env.SchemaRegistryURL)
 
 	var background sync.WaitGroup
@@ -75,13 +81,16 @@ func main() {
 		(&sampler{rdb: rdb, env: env, supply: redisSupply(rdb, env.CellDegrees), now: time.Now}).run(ctx)
 	})
 
-	s := &quoteServer{rdb: rdb, signer: signer, env: env, now: time.Now}
+	s := &quoteServer{rdb: rdb, signer: signer, routing: routing, env: env, now: time.Now}
 	mux := s.routes(verifier)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	health.Mount(ctx, mux, health.Redis(rdb), health.Kafka(env.KafkaBrokers))
 
+	if routing == nil {
+		log.Printf("ROUTING_URL is empty: quotes use the straight-line distance")
+	}
 	log.Printf("pricing-service listening on :%s", env.Port)
 	if err := serve.Run(ctx, ":"+env.Port, tracing.HTTP("pricing-service", metrics.HTTP(mux))); err != nil {
 		log.Fatal(err)

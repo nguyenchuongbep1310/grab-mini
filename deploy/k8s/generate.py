@@ -40,6 +40,7 @@ TOPICS = {
 
 # ------------------------------------------------------------- services ----
 # kind: "api" has a public port; "worker" has only the admin port.
+# kafka=False: no Kafka user, Schema Registry or event handling (a stateless HTTP service).
 # secrets: what it mounts besides its Kafka credentials.
 SERVICES = {
     "order-service": dict(port=3001, kind="api", db=True, redis=True, quote=True, scale=("lag", 2, 6)),
@@ -53,7 +54,14 @@ SERVICES = {
     "driver-location-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 3, 24)),
     # Surge pricing: no database; quotes are signed with the secret it shares with order-service.
     "pricing-service": dict(port=3007, kind="api", db=False, redis=True, quote=True, scale=("lag", 2, 6)),
+    # Distance and travel time from a deterministic model: stateless HTTP, no Kafka, database or Redis,
+    # so it has no KafkaUser and nothing to scale on lag (CPU only). Pricing and the Rider App call it.
+    "routing-service": dict(port=3009, kind="api", db=False, redis=False, kafka=False, scale=("cpu", 2, 12)),
 }
+
+# Services that call another service over HTTP (they forward the caller's bearer token): caller -> callees.
+# Each pair becomes an egress rule on the caller and an ingress rule on the callee.
+CALLS = {"pricing-service": ["routing-service"]}
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
@@ -136,23 +144,28 @@ def meta(name, component="service", extra=None):
 # ---------------------------------------------------------- the services ----
 def deployment(name, spec):
     api = spec["kind"] == "api"
-    volumes = [
-        {"name": "kafka-user", "secret": {"secretName": name, "items": [{"key": "password", "path": "password"}]}},
-        {"name": "kafka-ca", "secret": {"secretName": f"{CLUSTER}-cluster-ca-cert", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
-    ]
-    mounts = [
-        {"name": "kafka-user", "mountPath": "/etc/kafka/user", "readOnly": True},
-        {"name": "kafka-ca", "mountPath": "/etc/kafka/ca", "readOnly": True},
-    ]
-    env = [
-        {"name": "KAFKA_USERNAME", "value": name},
-        {"name": "KAFKA_PASSWORD_FILE", "value": "/etc/kafka/user/password"},
-        {"name": "KAFKA_CA_FILE", "value": "/etc/kafka/ca/ca.crt"},
+    kafka = spec.get("kafka", True)
+    volumes, mounts, env = [], [], []
+    if kafka:
+        volumes += [
+            {"name": "kafka-user", "secret": {"secretName": name, "items": [{"key": "password", "path": "password"}]}},
+            {"name": "kafka-ca", "secret": {"secretName": f"{CLUSTER}-cluster-ca-cert", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+        ]
+        mounts += [
+            {"name": "kafka-user", "mountPath": "/etc/kafka/user", "readOnly": True},
+            {"name": "kafka-ca", "mountPath": "/etc/kafka/ca", "readOnly": True},
+        ]
+        env += [
+            {"name": "KAFKA_USERNAME", "value": name},
+            {"name": "KAFKA_PASSWORD_FILE", "value": "/etc/kafka/user/password"},
+            {"name": "KAFKA_CA_FILE", "value": "/etc/kafka/ca/ca.crt"},
+        ]
+    env += [
         {"name": "HEALTH_PORT", "value": str(ADMIN_PORT)},
         {"name": "INSTANCE_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-        # Migrations run in a Job before the rollout, not at every pod's start.
-        {"name": "RUN_MIGRATIONS", "value": "false"},
     ]
+    if kafka:  # migrations run in a Job before the rollout, not at every pod's start
+        env.append({"name": "RUN_MIGRATIONS", "value": "false"})
     if api:
         env.append({"name": "PORT", "value": str(spec["port"])})
     if spec.get("db"):
@@ -169,14 +182,15 @@ def deployment(name, spec):
     # The signing key belongs to the issuer only; see deploy/README.md.
     # Every service talks to the Schema Registry, which wants credentials and
     # (since they travel in a header) https.
-    volumes.append({"name": "schema-registry", "secret": {"secretName": f"{CLUSTER}-schema-registry", "items": [
-        {"key": "username", "path": "username"}, {"key": "password", "path": "password"}, {"key": "ca.crt", "path": "ca.crt"}]}})
-    mounts.append({"name": "schema-registry", "mountPath": "/etc/secrets/schema-registry", "readOnly": True})
-    env += [
-        {"name": "SCHEMA_REGISTRY_USER_FILE", "value": "/etc/secrets/schema-registry/username"},
-        {"name": "SCHEMA_REGISTRY_PASSWORD_FILE", "value": "/etc/secrets/schema-registry/password"},
-        {"name": "SCHEMA_REGISTRY_CA_FILE", "value": "/etc/secrets/schema-registry/ca.crt"},
-    ]
+    if kafka:
+        volumes.append({"name": "schema-registry", "secret": {"secretName": f"{CLUSTER}-schema-registry", "items": [
+            {"key": "username", "path": "username"}, {"key": "password", "path": "password"}, {"key": "ca.crt", "path": "ca.crt"}]}})
+        mounts.append({"name": "schema-registry", "mountPath": "/etc/secrets/schema-registry", "readOnly": True})
+        env += [
+            {"name": "SCHEMA_REGISTRY_USER_FILE", "value": "/etc/secrets/schema-registry/username"},
+            {"name": "SCHEMA_REGISTRY_PASSWORD_FILE", "value": "/etc/secrets/schema-registry/password"},
+            {"name": "SCHEMA_REGISTRY_CA_FILE", "value": "/etc/secrets/schema-registry/ca.crt"},
+        ]
     if spec.get("quote"):  # signs (pricing) or checks (order) surge quotes: the same secret
         volumes.append({"name": "quote", "secret": {"secretName": f"{CLUSTER}-quote", "items": [{"key": "secret", "path": "secret"}]}})
         mounts.append({"name": "quote", "mountPath": "/etc/secrets/quote", "readOnly": True})
@@ -194,7 +208,7 @@ def deployment(name, spec):
         "ports": ports,
         "envFrom": [{"configMapRef": {"name": "grab-mini-config"}}],
         "env": env,
-        "volumeMounts": mounts,
+        **({"volumeMounts": mounts} if mounts else {}),
         # /livez never depends on anything outside the process; /readyz does,
         # and takes the pod out of rotation without restarting it.
         "startupProbe": {"httpGet": {"path": "/livez", "port": "admin"}, "periodSeconds": 2, "failureThreshold": 30},
@@ -239,7 +253,7 @@ def deployment(name, spec):
                          "labelSelector": {"matchLabels": {"app.kubernetes.io/name": name}}},
                     ],
                     "containers": [container],
-                    "volumes": volumes,
+                    **({"volumes": volumes} if volumes else {}),
                 },
             },
         },
@@ -804,6 +818,17 @@ def names_in(names):
     return {"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "In", "values": sorted(names)}]}
 
 
+def service_call_policies():
+    out = []
+    for caller, callees in CALLS.items():
+        for callee in callees:
+            out.append(policy(f"allow-egress-{caller}-to-{callee}", names_in([caller]), egress=[{
+                "to": [in_namespace(callee)], "ports": tcp([SERVICES[callee]["port"]])}]))
+            out.append(policy(f"allow-ingress-{callee}-from-{caller}", in_namespace(callee)["podSelector"], ingress=[{
+                "from": [in_namespace(caller)], "ports": [{"port": "http", "protocol": "TCP"}]}]))
+    return out
+
+
 def network_policies():
     part_of = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini"}}
     services = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini", "app.kubernetes.io/component": "service"}}
@@ -811,6 +836,7 @@ def network_policies():
                                  {"key": "app.kubernetes.io/component", "operator": "In", "values": ["migration", "retention"]}]}
     with_db = [n for n, sp in SERVICES.items() if sp.get("db")]
     with_redis = [n for n, sp in SERVICES.items() if sp.get("redis")]
+    with_kafka = [n for n, sp in SERVICES.items() if sp.get("kafka", True)]
     verifiers = [n for n, sp in SERVICES.items() if sp["kind"] == "api"]  # these check tokens, so they fetch the JWKS
     redis_pods = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini", "app.kubernetes.io/component": "redis"}}
     backups = {"matchLabels": {"app.kubernetes.io/part-of": "grab-mini", "app.kubernetes.io/component": "backup"}}
@@ -832,10 +858,10 @@ def network_policies():
             "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
                     "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
             "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}]),
-        policy("allow-egress-kafka", services, egress=[{
+        policy("allow-egress-kafka", names_in(with_kafka), egress=[{
             "to": [{"podSelector": {"matchLabels": {"strimzi.io/cluster": CLUSTER, "strimzi.io/kind": "Kafka"}}}],
             "ports": tcp([9093])}]),
-        policy("allow-egress-schema-registry", services, egress=[{
+        policy("allow-egress-schema-registry", names_in(with_kafka), egress=[{
             "to": [in_namespace("schema-registry")] + private_ranges(), "ports": tcp(REGISTRY_PORTS)}]),
         policy("allow-egress-otlp", services, egress=[{
             "to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}], "ports": tcp(OTLP_PORTS)}]),
@@ -851,6 +877,9 @@ def network_policies():
         policy("allow-egress-jwks", names_in(verifiers), egress=[
             {"to": [in_namespace("auth-service")], "ports": tcp([AUTH_SERVICE_PORT])},
             {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": PRIVATE_CIDRS + ["169.254.0.0/16"]}}], "ports": tcp([443])}]),
+
+        # Service-to-service HTTP (CALLS): the caller may reach the callee's public port, and only the callers may.
+        *service_call_policies(),
 
         # Redis (redis/): its clients and its own replicas/Sentinels talk to it, monitoring
         # scrapes the exporter, and the pods reach each other for replication and Sentinel.
@@ -918,6 +947,9 @@ def config_map():
                 # Cell size (degrees) to split the driver GEO set into; 0 = one key. Matching and
                 # Driver Location Service must agree: see docs/performance.md before changing it.
                 "GEO_SHARD_DEGREES": "0",
+                # Pricing Service asks Routing Service for the distance behind a quote (CALLS), with a
+                # 300 ms timeout; empty turns routing off and quotes use the straight line.
+                "ROUTING_URL": f"http://routing-service:{SERVICES['routing-service']['port']}",
                 "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector.monitoring:4318",
                 "ALLOWED_ORIGINS": "https://app.example.com",
             }}

@@ -11,6 +11,7 @@ import {
   getLatestOrder,
   getOrder,
   getQuote,
+  getRoute,
   newQuoteOf,
   rateTrip,
   tripAction,
@@ -177,6 +178,7 @@ describe("auth & api client", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "not found" }), { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "not found" }), { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ quoteId: "q-1", price: 30000 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ distanceKm: 3.2, durationSec: 410, polyline: [], vehicle: "CAR", model: "detour-1.3" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ tripId: "t-1", status: "CANCELLED" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: "o-1", status: "CANCELLED" }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ tripId: "t-1", stars: 5, tipAmount: 10000 }), { status: 201 }))
@@ -186,6 +188,7 @@ describe("auth & api client", () => {
     expect(await getActiveTrip("driver-1")).toBeNull();
     expect(await getLatestOrder("rider-1")).toBeNull();
     expect((await getQuote({ lat: 10, lng: 106 }, { lat: 10.1, lng: 106.1 }, "BIKE")).quoteId).toBe("q-1");
+    expect((await getRoute({ lat: 10, lng: 106 }, { lat: 10.1, lng: 106.1 }, "CAR")).distanceKm).toBe(3.2);
     expect((await tripAction("t-1", "cancel", "Emergency")).status).toBe("CANCELLED");
     expect((await cancelOrder("o-1", "Changed plans")).status).toBe("CANCELLED");
     expect((await rateTrip("t-1", "rider-1", 5, "Great", 10000)).stars).toBe(5);

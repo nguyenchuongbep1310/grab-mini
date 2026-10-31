@@ -1,6 +1,6 @@
 // Package e2e_test boots the entire grab-mini backend microservice fleet
 // (dev-registry, auth, pricing, order, matching, trip, driver-location,
-// location-gateway, notification, rating) as child processes against a real
+// location-gateway, notification, rating, payment) as child processes against a real
 // Kafka broker, Postgres database, and Redis instance, then exercises the
 // full ride-booking lifecycle over HTTP and WebSockets.
 //
@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -47,6 +48,7 @@ type stack struct {
 	tripURL     string
 	notifyURL   string
 	ratingURL   string
+	paymentURL  string
 	gatewayURL  string
 }
 
@@ -81,6 +83,7 @@ func createTopics(t *testing.T, brokers string) {
 		events.TopicDriverLocationUpdate,
 		events.TopicTripStatusChanged,
 		events.TopicTripRated,
+		events.TopicPaymentRecorded,
 	}
 
 	var specs []kafka.TopicConfig
@@ -166,6 +169,7 @@ func startStack(t *testing.T) *stack {
 		"driver-location-service",
 		"notification-service",
 		"rating-service",
+		"payment-service",
 		"location-gateway",
 	}
 	for _, svc := range services {
@@ -183,6 +187,7 @@ func startStack(t *testing.T) *stack {
 	tripPort := freePort(t)
 	notifyPort := freePort(t)
 	ratingPort := freePort(t)
+	paymentPort := freePort(t)
 	gatewayPort := freePort(t)
 	matchHealthPort := freePort(t)
 	locHealthPort := freePort(t)
@@ -199,6 +204,7 @@ func startStack(t *testing.T) *stack {
 		tripURL:     "http://127.0.0.1:" + tripPort,
 		notifyURL:   "http://127.0.0.1:" + notifyPort,
 		ratingURL:   "http://127.0.0.1:" + ratingPort,
+		paymentURL:  "http://127.0.0.1:" + paymentPort,
 		gatewayURL:  "http://127.0.0.1:" + gatewayPort,
 	}
 
@@ -243,11 +249,15 @@ func startStack(t *testing.T) *stack {
 	st.waitReady(st.registryURL + "/subjects")
 
 	launch("auth-service", "PORT="+authPort)
-	launch("pricing-service", "PORT="+pricingPort)
+	// Routing Service is not part of this flow: quotes use the straight-line distance.
+	launch("pricing-service", "PORT="+pricingPort, "ROUTING_URL=")
 	launch("order-service", "PORT="+orderPort)
 	launch("trip-service", "PORT="+tripPort)
 	launch("notification-service", "PORT="+notifyPort)
 	launch("rating-service", "PORT="+ratingPort)
+	// A 1 s grace period (the default is 3 minutes) so a late cancel can be tested without
+	// waiting; the fee is the default 10,000 VND.
+	launch("payment-service", "PORT="+paymentPort, "CANCELLATION_GRACE_SECONDS=1", "CANCELLATION_FEE_VND=10000")
 	launch("location-gateway", "PORT="+gatewayPort)
 	launch("matching-service", "HEALTH_PORT="+matchHealthPort, "INSTANCE_ID=matching-e2e")
 	launch("driver-location-service", "HEALTH_PORT="+locHealthPort)
@@ -259,6 +269,7 @@ func startStack(t *testing.T) *stack {
 		st.tripURL + "/readyz",
 		st.notifyURL + "/readyz",
 		st.ratingURL + "/readyz",
+		st.paymentURL + "/readyz",
 		st.gatewayURL + "/readyz",
 		"http://127.0.0.1:" + matchHealthPort + "/readyz",
 		"http://127.0.0.1:" + locHealthPort + "/readyz",
@@ -267,6 +278,8 @@ func startStack(t *testing.T) *stack {
 	}
 
 	// Clean any residual rows after migrations have run
+	// TRUNCATE: the ledger is append-only, so its rows can't be DELETEd.
+	_, _ = db.Exec(ctx, `TRUNCATE payments, payment_events, order_prices, trip_assignments, ledger_entries, ledger_transactions, ledger_accounts`)
 	_, _ = db.Exec(ctx, `DELETE FROM outbox; DELETE FROM processed_events; DELETE FROM cancelled_orders; DELETE FROM trips; DELETE FROM orders; DELETE FROM driver_reviews; DELETE FROM rating_events; DELETE FROM driver_ratings`)
 	return st
 }
@@ -497,4 +510,188 @@ func TestFullSystemEndToEnd(t *testing.T) {
 	if rating.Count != 1 || rating.Average != 5 || rating.TotalTips != 20000 {
 		t.Fatalf("driver rating = %+v, want count=1 average=5 totalTips=20000", rating)
 	}
+
+	// 9. Payment Service settled the ride: the rider paid the locked price plus the tip, and the
+	// driver earned the fare minus the platform's 20% (rounded down) plus the whole tip.
+	fare := int64(math.Round(created.Price))
+	commission := fare * 2000 / 10000
+	receipt := st.waitPayments(trip.ID, func(p []payment) bool { return capturedOf(p, "FARE") > 0 && capturedOf(p, "TIP") > 0 })
+	if got := capturedOf(receipt, "FARE"); got != fare {
+		t.Errorf("fare charged = %d, want the locked price %d", got, fare)
+	}
+	if got := capturedOf(receipt, "TIP"); got != 20000 {
+		t.Errorf("tip charged = %d, want 20000", got)
+	}
+	var earned struct {
+		Total      int64 `json:"total"`
+		Fares      int64 `json:"fares"`
+		Tips       int64 `json:"tips"`
+		Commission int64 `json:"commission"`
+		Trips      int   `json:"trips"`
+	}
+	if code := st.request("driver", "driver-1", http.MethodGet, st.paymentURL+"/drivers/driver-1/earnings", nil, &earned); code != http.StatusOK {
+		t.Fatalf("earnings = %d, want 200", code)
+	}
+	if earned.Fares != fare-commission || earned.Tips != 20000 || earned.Commission != commission || earned.Trips != 1 || earned.Total != fare-commission+20000 {
+		t.Errorf("driver earnings = %+v, want fares %d, tips 20000, commission %d, 1 trip", earned, fare-commission, commission)
+	}
+	st.assertLedgerBalances()
+
+	// 10. A rider who cancels after the grace period pays the cancellation fee.
+	late := st.bookAssignedTrip(riderEvents, driverEvents)
+	time.Sleep(2500 * time.Millisecond) // past the 1 s grace period, whole-second timestamps and all
+	if code := st.request("rider", "rider-1", http.MethodPost, st.tripURL+"/trips/"+late.ID+"/cancel",
+		map[string]string{"reason": "Waited too long"}, nil); code != http.StatusOK {
+		t.Fatalf("late cancel = %d, want 200", code)
+	}
+	fee := st.waitPayments(late.ID, func(p []payment) bool { return capturedOf(p, "CANCELLATION_FEE") > 0 })
+	if got := capturedOf(fee, "CANCELLATION_FEE"); got != 10000 || capturedOf(fee, "FARE") != 0 {
+		t.Errorf("late cancel charges = %+v, want one 10000 cancellation fee and no fare", fee)
+	}
+
+	// 11. Cancelling right after the assignment is free.
+	early := st.bookAssignedTrip(riderEvents, driverEvents)
+	if code := st.request("rider", "rider-1", http.MethodPost, st.tripURL+"/trips/"+early.ID+"/cancel", nil, nil); code != http.StatusOK {
+		t.Fatalf("early cancel = %d, want 200", code)
+	}
+	waitWS(t, riderEvents, "trip.status.changed", 10*time.Second)
+	// Nothing to poll for: wait long enough for Payment Service to have handled the event, then
+	// check that it charged nothing. The skip counter proves the event was seen and judged.
+	time.Sleep(4 * time.Second)
+	if got := st.listPayments(early.ID); len(got) != 0 {
+		t.Errorf("early cancel charges = %+v, want none", got)
+	}
+	if n := st.skipped("within_grace"); n < 1 {
+		t.Errorf("payments_skipped_total{reason=within_grace} = %d, want at least 1: the cancel was never judged", n)
+	}
+
+	// 12. Whatever happened, the ledger still sums to zero.
+	st.assertLedgerBalances()
+}
+
+type payment struct {
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+	Amount int64  `json:"amount"`
+}
+
+// capturedOf is what was actually charged for one kind (0 if nothing was).
+func capturedOf(ps []payment, kind string) int64 {
+	var n int64
+	for _, p := range ps {
+		if p.Kind == kind && p.Status == "CAPTURED" {
+			n += p.Amount
+		}
+	}
+	return n
+}
+
+func (s *stack) listPayments(tripID string) []payment {
+	s.t.Helper()
+	var out struct {
+		Payments []payment `json:"payments"`
+	}
+	if code := s.request("rider", "rider-1", http.MethodGet, s.paymentURL+"/payments?tripId="+tripID, nil, &out); code != http.StatusOK {
+		s.t.Fatalf("payments for trip %s = %d, want 200", tripID, code)
+	}
+	return out.Payments
+}
+
+// waitPayments polls until ready is true for the trip's payments: Payment Service settles a
+// moment after the event, not inside the request that caused it.
+func (s *stack) waitPayments(tripID string, ready func([]payment) bool) []payment {
+	s.t.Helper()
+	var got []payment
+	for i := 0; i < 100; i++ {
+		got = s.listPayments(tripID)
+		if ready(got) {
+			return got
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	s.t.Fatalf("payments for trip %s never reached the expected state: %+v", tripID, got)
+	return nil
+}
+
+// assertLedgerBalances is the double-entry invariant, checked straight on the database: every
+// ledger transaction sums to zero, and so does the whole ledger.
+func (s *stack) assertLedgerBalances() {
+	s.t.Helper()
+	ctx := context.Background()
+	var unbalanced, total int64
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM (SELECT txn_id FROM ledger_entries GROUP BY txn_id HAVING SUM(amount) <> 0) x`).Scan(&unbalanced); err != nil {
+		s.t.Fatal(err)
+	}
+	if err := s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0) FROM ledger_entries`).Scan(&total); err != nil {
+		s.t.Fatal(err)
+	}
+	if unbalanced != 0 || total != 0 {
+		s.t.Errorf("ledger: %d unbalanced transactions, total %d; want 0 and 0", unbalanced, total)
+	}
+}
+
+// skipped reads payments_skipped_total{reason} from Payment Service's /metrics.
+func (s *stack) skipped(reason string) int {
+	s.t.Helper()
+	res, err := s.http.Get(s.paymentURL + "/metrics")
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	prefix := `payments_skipped_total{reason="` + reason + `"} `
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			var v float64
+			fmt.Sscan(strings.TrimPrefix(line, prefix), &v)
+			return int(v)
+		}
+	}
+	return 0
+}
+
+// bookAssignedTrip books another ride for rider-1 with driver-1 and returns its ASSIGNED trip.
+// The driver has to be free again (the previous trip released them) and have a fresh location.
+func (s *stack) bookAssignedTrip(riderEvents, driverEvents <-chan wsMessage) trip {
+	s.t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		if st, _ := driverstatus.Get(ctx, s.rdb, "driver-1"); st == driverstatus.Available {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := driverlocation.Update(ctx, s.rdb, "driver-1", 10.7765, 106.7005, time.Now().UnixMilli()); err != nil {
+		s.t.Fatal(err)
+	}
+	var created struct {
+		OrderID string `json:"orderId"`
+	}
+	if code := s.request("rider", "rider-1", http.MethodPost, s.orderURL+"/orders", map[string]any{
+		"riderId":     "rider-1",
+		"pickup":      map[string]float64{"lat": 10.776, "lng": 106.700},
+		"dropoff":     map[string]float64{"lat": 10.790, "lng": 106.710},
+		"vehicleType": "CAR",
+	}, &created); code != http.StatusCreated || created.OrderID == "" {
+		s.t.Fatalf("create order = %d %+v, want 201", code, created)
+	}
+	waitWS(s.t, riderEvents, "order.matched", 15*time.Second)
+	waitWS(s.t, driverEvents, "order.matched", 15*time.Second)
+	var t trip
+	for i := 0; i < 30; i++ {
+		if s.request("rider", "rider-1", http.MethodGet, s.tripURL+"/trips/by-order/"+created.OrderID, nil, &t) == http.StatusOK {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if t.ID == "" || t.Status != "ASSIGNED" {
+		s.t.Fatalf("trip = %+v, want an ASSIGNED trip", t)
+	}
+	return t
+}
+
+type trip struct {
+	ID       string `json:"id"`
+	DriverID string `json:"driverId"`
+	Status   string `json:"status"`
 }

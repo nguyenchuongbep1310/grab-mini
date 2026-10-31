@@ -10,7 +10,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 ## Actors
 - **Rider** — requests a ride
 - **Driver** — accepts and completes trips
-- (No Admin actor in the initial scope)
+- **Admin** — an operator (the Ops dashboard; admin-only routes arrive with promotions and driver review). Only the development token issuer signs an `admin` token
 
 ## User Stories & Acceptance Criteria (EARS format)
 
@@ -61,6 +61,25 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN a consumer receives a duplicate event (same event id/order id + same target state) it has already processed, THE consumer SHALL skip it without creating a duplicate side effect.
 - **US-6.2**: When a consumer fails to process an event and cannot retry successfully.
   - IF processing an event fails after N retries, THE consumer SHALL publish that event to the corresponding dead-letter topic instead of crashing the consumer.
+
+### 7. Routing and the admin role
+- **US-7.1**: As a rider, I want to know how far my trip is and how long it takes, so I can decide before I book.
+  - WHEN a caller with a valid token of any role asks Routing Service for a route (from, to, vehicle `CAR` or `BIKE`), THE Routing Service SHALL return the distance in km, the duration in seconds, a polyline, the vehicle and the name of the model that produced them.
+  - THE Routing Service SHALL be deterministic: THE distance SHALL be the great-circle distance times a fixed detour factor, AND THE duration SHALL depend only on the distance, the vehicle and the hour of day in Asia/Ho_Chi_Minh (slower at 07:00 to 09:00 and 17:00 to 19:00).
+  - IF a coordinate is missing, not a finite number or out of range, or the vehicle is not `CAR` or `BIKE`, THE Routing Service SHALL answer 400.
+  - IF the modelled distance exceeds 200 km, THE Routing Service SHALL answer 422.
+  - IF the request has no valid token, THE Routing Service SHALL answer 401.
+- **US-7.2**: As a rider, I want my fare to reflect the road distance, but never be blocked because Routing is down.
+  - WHEN Pricing Service issues a quote, THE Pricing Service SHALL ask Routing Service for the distance with the rider's own token and a timeout of 300 ms, and compute the base fare on it.
+  - IF Routing Service is disabled, times out, errors, answers an implausible distance, or refuses the trip as too long, THE Pricing Service SHALL compute the base fare on the straight-line distance, SHALL still issue the quote, and SHALL count it in `pricing_routing_fail_open_total`.
+  - IF Routing Service times out or errors for ten minutes, THE system SHALL raise the ticket alert `PricingRoutingFailOpen`.
+- **US-7.3**: As an operator, I want a distinct admin role, so later admin-only routes cannot be called by riders or drivers.
+  - THE token issuer SHALL be able to sign a token with the role `admin`; a service SHALL treat a role other than `rider`, `driver` or `admin` as invalid.
+  - WHILE `APP_ENV=production`, THE Auth Service (the development issuer) SHALL refuse to start unless `ALLOW_DEV_TOKENS=true`.
+  - A route that names the roles it admits SHALL refuse an `admin` token unless `admin` is among them (403).
+- **US-7.4** (Rider App screens, task 8.4, not built yet): As a rider, I want to see the distance and "about N min" before booking, and "driver arrives in N min" after a match.
+  - WHEN the pickup, dropoff or vehicle changes, THE Rider App SHALL show the distance and the estimated time from Routing Service, and SHALL still allow booking if Routing is unavailable.
+  - WHEN the rider has been matched, THE Rider App SHALL show the driver's estimated arrival, recomputed from the driver's pushed location at a throttled rate.
 
 ## Technical constraints
 - Kafka runs locally via Docker Compose, with Kafka UI for observing topics/offsets.

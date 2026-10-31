@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
 GO_MODULES := $(shell sed -n 's/^[[:space:]]*\(\.\/[^[:space:]]*\)[[:space:]]*$$/\1/p' go.work)
-SERVICES := auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service location-gateway pricing-service driver-app-sim dlq-redrive loadtest dev-registry
+SERVICES := auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service location-gateway routing-service pricing-service driver-app-sim dlq-redrive loadtest dev-registry
 MIGRATE_SERVICES := order-service trip-service rating-service payment-service
 
 BIN_DIR := .dev/bin
@@ -110,6 +110,7 @@ metrics-check: ## Check /readyz and /metrics on all Go services plus Prometheus 
 		"location-gateway:3006" \
 		"pricing-service:3007" \
 		"payment-service:3008" \
+		"routing-service:3009" \
 		"matching-service:9101" \
 		"driver-location-service:9102"; do \
 		svc=$${item%%:*}; port=$${item##*:}; \

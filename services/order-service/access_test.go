@@ -23,7 +23,8 @@ func TestOnlyTheRiderAndTheMatchedDriverMayReadAnOrder(t *testing.T) {
 		{"any driver before a match", auth.Identity{Subject: "driver-1", Role: auth.Driver}, pending, false},
 		{"a driver whose id equals the rider's", auth.Identity{Subject: "rider-1", Role: auth.Driver}, matched, false},
 		{"a rider whose id equals the driver's", auth.Identity{Subject: "driver-1", Role: auth.Rider}, matched, false},
-		{"an unknown role", auth.Identity{Subject: "rider-1", Role: "admin"}, matched, false},
+		{"an admin", auth.Identity{Subject: "rider-1", Role: auth.Admin}, matched, false},
+		{"an unknown role", auth.Identity{Subject: "rider-1", Role: "superuser"}, matched, false},
 	}
 	for _, c := range cases {
 		if got := mayReadOrder(c.who, c.o); got != c.want {

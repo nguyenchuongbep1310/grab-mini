@@ -33,6 +33,13 @@ def name(d):
 
 
 deployments = {name(d): d for d in of("Deployment")}
+
+
+def uses_kafka(dep):
+    """A stateless HTTP service (routing) has neither a Kafka credential nor a KafkaUser."""
+    return any(v["name"] == "kafka-user" for v in dep["spec"]["template"]["spec"].get("volumes", []))
+
+
 users = {name(d) for d in of("KafkaUser")}
 scaled = {d["spec"]["scaleTargetRef"]["name"]: d for d in of("ScaledObject")}
 configmaps = {name(d): d["data"] for d in of("ConfigMap")}
@@ -66,8 +73,11 @@ for dep_name, dep in deployments.items():
             err(f"{dep_name}: mounts the Kafka user secret {dep_name!r} but there is no KafkaUser of that name")
 
     env = {e["name"]: e for e in c.get("env", [])}
-    if env.get("KAFKA_USERNAME", {}).get("value") != dep_name:
-        err(f"{dep_name}: KAFKA_USERNAME must be its own name (one principal per service)")
+    if uses_kafka(dep):
+        if env.get("KAFKA_USERNAME", {}).get("value") != dep_name:
+            err(f"{dep_name}: KAFKA_USERNAME must be its own name (one principal per service)")
+    elif dep_name in users or any(n.startswith("KAFKA_") for n in env):
+        err(f"{dep_name}: has no Kafka volume but sets Kafka env or has a KafkaUser")
 
     for name_ in env:
         base = name_[:-5] if name_.endswith("_FILE") else name_
@@ -142,8 +152,8 @@ for g in sorted(groups_in_code - acl_groups):
     err(f"consumer group {g!r} is used in the code but no KafkaUser may read it: the service would be refused")
 for g in sorted(acl_groups - groups_in_code):
     err(f"a KafkaUser may read group {g!r}, which no code uses")
-for dep_name in deployments:
-    if dep_name not in users:
+for dep_name, dep in deployments.items():
+    if uses_kafka(dep) and dep_name not in users:
         err(f"{dep_name}: no KafkaUser")
 
 for t in of("KafkaTopic"):
@@ -198,12 +208,15 @@ for pod_name, labels in pods().items():
     if not may(53, "UDP") or not may(53, "TCP"):
         err(f"{pod_name}: no egress to DNS")
     if pod_name in deployments:
-        if not may(9093):
+        kafka = uses_kafka(deployments[pod_name])
+        if kafka and not may(9093):
             err(f"{pod_name}: no egress to Kafka")
+        if not kafka and (may(9093) or may(8081)):
+            err(f"{pod_name}: has no Kafka credentials but may reach Kafka or the Schema Registry")
         for port, why in ((4318, "the OTLP collector"), (8081, "the Schema Registry")):
-            if not may(port):
+            if (kafka or port != 8081) and not may(port):
                 err(f"{pod_name}: no egress to {why}")
-        volumes = {v["name"] for v in deployments[pod_name]["spec"]["template"]["spec"]["volumes"]}
+        volumes = {v["name"] for v in deployments[pod_name]["spec"]["template"]["spec"].get("volumes", [])}
         if "db" in volumes and not may(5432):
             err(f"{pod_name}: has a database but no egress to Postgres")
         if labels.get("grab-mini/public") == "true" and not may(443):
@@ -223,6 +236,36 @@ for pod_name, labels in pods().items():
     elif labels.get("app.kubernetes.io/component") == "redis":
         if not may(6379) or not may(26379):
             err(f"{pod_name}: Redis pods can't reach each other (replication, Sentinel)")
+
+# Service-to-service HTTP: a service whose code reads ROUTING_URL calls the Service named in it, so it must
+# be allowed out to that port, the callee must be allowed in from it, and the Service must exist.
+from urllib.parse import urlparse
+
+route_url = urlparse(config.get("ROUTING_URL", ""))
+callee = route_url.hostname
+callers = sorted(n for n in deployments
+                 if any('"ROUTING_URL"' in p.read_text() for p in (ROOT / "services" / n).glob("*.go") if not p.name.endswith("_test.go")))
+if callers and callee not in deployments:
+    err(f"ROUTING_URL points at {callee!r}, which is not a Deployment")
+elif callers:
+    svc_ports = [p["port"] for s_ in of("Service") if name(s_) == callee for p in s_["spec"]["ports"]]
+    if route_url.port not in svc_ports:
+        err(f"ROUTING_URL uses port {route_url.port}, but Service {callee} serves {svc_ports}")
+    callee_labels = deployments[callee]["spec"]["template"]["metadata"]["labels"]
+    for caller in callers:
+        caller_labels = deployments[caller]["spec"]["template"]["metadata"]["labels"]
+        out_ok = any(selects(p["spec"]["podSelector"], caller_labels)
+                     and any(selects(t.get("podSelector", {"matchLabels": {"x": "y"}}), callee_labels) and route_url.port in [q["port"] for q in r.get("ports", [])]
+                             for r in p["spec"].get("egress", []) for t in r.get("to", []))
+                     for p in egress_policies)
+        in_ok = any(selects(p["spec"]["podSelector"], callee_labels)
+                    and any(selects(f.get("podSelector", {"matchLabels": {"x": "y"}}), caller_labels)
+                            for r in p["spec"].get("ingress", []) for f in r.get("from", []))
+                    for p in policies.values() if "Ingress" in p["spec"].get("policyTypes", []))
+        if not out_ok:
+            err(f"{caller}: calls {callee} but no NetworkPolicy lets it out to port {route_url.port}")
+        if not in_ok:
+            err(f"{callee}: is called by {caller} but no NetworkPolicy lets {caller} in")
 
 # Nothing may mount a token-signing key except the issuer, which this base doesn't deploy.
 for dep_name, dep in deployments.items():

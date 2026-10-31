@@ -244,6 +244,31 @@ Surge **never blocks booking**: any Redis read error yields a multiplier of 1.0,
    set `SURGE_MAX=1` for pricing-service and restart, or `redis-cli DEL` the `surge:mult:*` keys (they are recreated at the next sampling if the configuration has not changed).
 6. **Old data:** orders created before migration 00006 have `price` NULL and `surge_multiplier` 1.0. Old `order.created` messages (schema v2) are read with `surgeMultiplier` 1.0.
 
+## Routing
+
+**Alert:** `PricingRoutingFailOpen` (ticket: `pricing_routing_fail_open_total{reason="timeout"|"error"}` has been increasing for 10 minutes).
+
+Pricing asks Routing Service for the distance of each quote and **never blocks a quote on it**: when Routing is down or slow (300 ms), the fare is computed on the straight-line distance,
+which is shorter than the road distance, so **fares are lower than they should be** while this lasts, and the Rider App's distance and ETA (which call Routing directly) do not show.
+Bookings and matching are not affected. Routing has no Kafka, database or Redis: the usual causes are the pods, the network or tokens.
+
+1. **Which reason?**
+   ```bash
+   kubectl -n grab-mini port-forward deploy/pricing-service 9090 &
+   curl -s localhost:9090/metrics | grep pricing_routing        # fail_open_total by reason, and the duration histogram
+   ```
+   `timeout`: Routing is up but slower than 300 ms (look at its CPU and `http_request_duration_seconds` for `GET /route`). `error`: it is down, refusing connections, or answering 401/429/5xx.
+   `disabled` means `ROUTING_URL` is empty or the request had no token (not a fault, never alerts). `unsupported` is a trip above 200 km (422), also not a fault.
+2. **Is Routing running?** `kubectl -n grab-mini get pods -l app.kubernetes.io/name=routing-service`, then its `/readyz` through the admin port (see [Pods not ready](#pods-not-ready)).
+   It has no dependency, so `/readyz` fails only while it drains. Check `ROUTING_URL` in the `grab-mini-config` ConfigMap (`http://routing-service:3009`).
+3. **Can Pricing reach it?** The NetworkPolicies `allow-egress-pricing-service-to-routing-service` and `allow-ingress-routing-service-from-pricing-service` must exist.
+   From a pricing pod: a request to `$ROUTING_URL/health` should answer `{"status":"ok"}`.
+4. **401s:** Routing verifies the rider's own token with the JWKS (`JWT_JWKS_URL`); if the identity provider is unreachable from Routing the error is a 401 for everyone. See the egress policy `allow-egress-jwks`.
+   **429s:** a single caller is over 10 requests a second (see `http_requests_total{route="GET /route",code="429"}`). `routing_refused_total{reason}` counts the 400s and 422s.
+5. **Overloaded?** It scales on CPU (2 to 12 pods); `kubectl -n grab-mini get scaledobject routing-service`. The model is a few arithmetic operations, so sustained saturation means a loop of requests: look at who calls (`routing_routes_total`).
+6. **Switching it off on purpose:** set `ROUTING_URL` to an empty string for pricing-service and restart; quotes then use the straight line, the counter rises with `reason="disabled"` and nothing alerts.
+7. **The numbers look wrong, not missing:** the model is `detour-1.3`, an estimate (no map, no traffic): see [production-design §17](../specs/ride-booking-mini/production-design.md). It is not a fault to fix here.
+
 ## Redis failover
 
 **Alerts:** `RedisNotExactlyOneMaster` (0 masters for more than 1 minute: failover did not complete; 2 masters: split brain), `RedisMemoryNearLimit`.

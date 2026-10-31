@@ -95,9 +95,17 @@ func (s *Signer) mac(payload string) string {
 }
 
 // Issue prices a trip at multiplier and signs the result, valid for QuoteTTL
-// from now. The distance comes from the request's own pickup and dropoff.
+// from now. The distance is the straight line between the request's own
+// pickup and dropoff.
 func (s *Signer) Issue(req QuoteRequest, multiplier float64, now time.Time) Quote {
-	base := BaseFare(req.Vehicle, HaversineKm(req.PickupLat, req.PickupLng, req.DropoffLat, req.DropoffLng))
+	return s.IssueForDistance(req, HaversineKm(req.PickupLat, req.PickupLng, req.DropoffLat, req.DropoffLng), multiplier, now)
+}
+
+// IssueForDistance is Issue with a distance the caller measured (Pricing
+// Service takes it from Routing Service). The distance is not part of what a
+// quote is bound to: only the fare it produced is signed.
+func (s *Signer) IssueForDistance(req QuoteRequest, distanceKm, multiplier float64, now time.Time) Quote {
+	base := BaseFare(req.Vehicle, distanceKm)
 	exp := now.Add(QuoteTTL).Truncate(time.Second)
 	b := body{Base: base, Mult: multiplier, Price: Price(base, multiplier), Exp: exp.Unix(), Route: req.route()}
 	raw, _ := json.Marshal(b)

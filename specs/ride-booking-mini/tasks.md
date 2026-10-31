@@ -60,11 +60,11 @@ Convention: each task should be a small commit/PR, with at least minimal tests b
 Design: [realism-design.md](./realism-design.md). Each phase is a service, its infrastructure, its documentation and a screen in the apps.
 
 ### Phase 8 — Routing (ETA) and the admin role
-- [ ] 8.1 Auth: `admin` role (dev issuer only)
-- [ ] 8.2 `routing-service`: `GET /route` (distance, duration, polyline), deterministic model
-- [ ] 8.3 Pricing asks Routing for the distance, failing open to its own estimate
+- [x] 8.1 Auth: `admin` role (dev issuer only)
+- [x] 8.2 `routing-service`: `GET /route` (distance, duration, polyline), deterministic model
+- [x] 8.3 Pricing asks Routing for the distance, failing open to its own estimate
 - [ ] 8.4 Rider App: distance and ETA before booking, "driver arrives in N min" after the match
-- [ ] 8.5 Infra and docs: dev.sh, k8s, alerts, runbook, design/production-design/guide
+- [x] 8.5 Infra and docs: dev.sh, k8s, alerts, runbook, design/production-design/guide
 
 ### Phase 9 — Promotions
 - [ ] 9.1 `promotion-service`: promotions, validation with a signed `promoToken`, redemptions, `promotion.redeemed`

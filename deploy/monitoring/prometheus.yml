@@ -64,6 +64,12 @@ scrape_configs:
         labels:
           service: pricing-service
 
+  - job_name: routing-service
+    static_configs:
+      - targets: ["host.docker.internal:3009"]
+        labels:
+          service: routing-service
+
   - job_name: matching-service
     static_configs:
       - targets: ["host.docker.internal:9101"]

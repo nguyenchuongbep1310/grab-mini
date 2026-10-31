@@ -40,11 +40,26 @@ func TestIssuesATokenTheServicesAccept(t *testing.T) {
 	}
 }
 
+func TestIssuesAnAdminToken(t *testing.T) {
+	rec := post(t, `{"role":"admin","id":"ops-1"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var resp tokenResponse
+	if err := jsonDecode(rec, &resp); err != nil {
+		t.Fatal(err)
+	}
+	v := auth.NewVerifier(auth.NewKeySet(testPub))
+	if id, err := v.Verify(resp.Token); err != nil || id.Subject != "ops-1" || id.Role != auth.Admin {
+		t.Errorf("Verify = %+v, %v", id, err)
+	}
+}
+
 func TestRejectsBadRequests(t *testing.T) {
 	for name, body := range map[string]string{
 		"not JSON":     `nope`,
 		"no role":      `{"id":"rider-1"}`,
-		"unknown role": `{"role":"admin","id":"x"}`,
+		"unknown role": `{"role":"superuser","id":"x"}`,
 		"no id":        `{"role":"rider"}`,
 		"odd id":       `{"role":"rider","id":"../etc"}`,
 		"id too long":  `{"role":"rider","id":"` + strings.Repeat("a", 65) + `"}`,
@@ -95,5 +110,25 @@ func TestATokenVerifiesAgainstThePublishedJWKS(t *testing.T) {
 	v := auth.NewVerifier(auth.NewJWKSClient(srv.URL + "/.well-known/jwks.json"))
 	if id, err := v.Verify(tok); err != nil || id.Subject != "rider-9" {
 		t.Errorf("Verify via JWKS = %+v, %v", id, err)
+	}
+}
+
+func TestRefusesToRunInProduction(t *testing.T) {
+	for _, c := range []struct {
+		appEnv string
+		allow  bool
+		ok     bool
+	}{
+		{"production", false, false},
+		{"PRODUCTION", false, false},
+		{"production", true, true}, // the explicit override, for a demo environment
+		{"development", false, true},
+		{"", false, true},
+	} {
+		t.Setenv("APP_ENV", c.appEnv)
+		err := mayRun(Env{AllowDevTokens: c.allow})
+		if (err == nil) != c.ok {
+			t.Errorf("APP_ENV=%q ALLOW_DEV_TOKENS=%v: mayRun = %v, want ok=%v", c.appEnv, c.allow, err, c.ok)
+		}
 	}
 }
