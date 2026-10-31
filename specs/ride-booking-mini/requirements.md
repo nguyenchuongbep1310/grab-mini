@@ -5,7 +5,7 @@ Build a mini ride-booking app (Grab-like) to learn:
 - Kafka: producer/consumer, partitioning, consumer groups, event ordering, idempotency
 - Design system: a shared component library used across multiple apps (rider, driver)
 
-Non-goals: production-grade scaling, real payments, enterprise-level security.
+Non-goals: production-grade scaling, a real payment processor, enterprise-level security.
 
 ## Actors
 - **Rider** — requests a ride
@@ -68,7 +68,7 @@ Non-goals: production-grade scaling, real payments, enterprise-level security.
 - The design system must be shared by at least 2 apps (rider app, driver app) — no per-app one-off components.
 
 ## Out of scope
-- Real payments, payment gateway integration
-- Detailed ratings, promotions, surge pricing
+- A real payment gateway or card processor (rides are settled through a double-entry ledger against a sandbox provider; no payouts, refunds or reconciliation)
+- Promotions
 - Multi-region, high-availability Kafka cluster
 - Full authentication (mock user/driver ids are acceptable initially)

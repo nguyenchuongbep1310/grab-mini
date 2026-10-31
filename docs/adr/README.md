@@ -13,6 +13,7 @@ Each record states the problem, what was chosen, what was given up, and what wou
 | [0007](0007-avro-and-schema-registry.md) | Event contracts | Avro in Schema Registry, `BACKWARD` compatibility, defaults for new fields |
 | [0008](0008-notification-fan-out-and-recovery.md) | Realtime delivery | WebSocket pushes fanned out through Redis pub/sub; push is best-effort, REST is the recovery path |
 | [0009](0009-location-gateway-and-telemetry-stream.md) | Location telemetry | Drivers never write to Kafka; a gateway rate-limits and drops redundant reports |
+| [0010](0010-payment-ledger-and-provider-idempotency.md) | Payments | Double-entry ledger in Postgres; the card provider sits behind an idempotent interface; no float money |
 
 See also [scaling.md](../scaling.md) (what breaks first at 10x) and [performance.md](../performance.md) (what was measured).
 

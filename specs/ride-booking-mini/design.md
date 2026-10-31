@@ -38,6 +38,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | Driver Location Service | Receives & stores driver location | `driver.location.updated` | — | Redis (geo, TTL) |
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
 | Notification Service | Pushes realtime updates to clients | `order.matched`, `order.no_driver_found`, `trip.status.changed`, `driver.location.updated` | — | (stateless, in-memory socket map) |
+| Payment Service | Settles rides: charges the rider through a pluggable provider (sandbox fake only) and books a balanced double-entry ledger entry for the fare, tip and optional cancellation fee | `order.created` (local copy of the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (ledger, payments, outbox) |
 | Rating Service | Averages each driver's ratings | `trip.rated` | | Postgres (`driver_ratings` with tip totals, `driver_reviews`, deduped by eventId in the same transaction) |
 | ksqlDB (replaces the planned Analytics Service) | Stream processing: per-minute counts, a stream-stream join for match latency, ratings, throughput | all topics | analytics tables | Kafka (changelog topics) |
 
@@ -52,6 +53,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | `driver.location.updated` | `driverId` | 3 | Highest throughput; keyed by driver to preserve per-driver ordering |
 | `trip.status.changed` | `tripId` | 3 | On `CANCELLED` also carries `cancelledBy` (`RIDER`/`DRIVER`) and `reason`; Order Service consumes it to move a `MATCHED` order to `CANCELLED` |
 | `trip.rated` | `driverId` | 3 | Published by Trip Service when a rider rates a COMPLETED trip (once per trip); carries `comment`, `tipAmount` (whole VND, 0 to 1,000,000, recorded only) and `currency` (`VND`), both added as defaulted Avro fields |
+| `payment.recorded` | `tripId` | 3 | Published by Payment Service (via the outbox) for every charge it records: fare, tip or cancellation fee, captured or declined. Amounts are whole VND; the split between driver and platform is included. See [production-design.md](./production-design.md#16-payments-payment-service-done) |
 | `*.DLQ` | same as source topic | 1 | Dead-letter topic per topic above |
 
 Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so each service scales independently without reading each other's events.

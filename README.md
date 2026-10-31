@@ -9,9 +9,10 @@ A ride-hailing backend in Go built around Apache Kafka, with a React design syst
 
 ## What it demonstrates
 
-- **Event-driven services on Kafka.** Order, Matching, Trip, Pricing, Rating, Driver Location and Notification services communicate only through Avro events. ksqlDB reads the same topics for live analytics.
+- **Event-driven services on Kafka.** Order, Matching, Trip, Pricing, Payment, Rating, Driver Location and Notification services communicate only through Avro events. ksqlDB reads the same topics for live analytics.
 - **No lost or phantom events.** State and event are committed in one Postgres transaction (transactional outbox); every consumer is idempotent, so at-least-once delivery is safe.
 - **No double-booked drivers.** Matching claims a driver with one atomic Redis script and a lease that expires if the matcher dies.
+- **Money done carefully.** Payment Service settles each ride in a double-entry ledger: entries must sum to zero (checked in code and by a database trigger), amounts are integers, and a charge is unique per trip and kind, so a replay or crash never charges twice.
 - **Failure handling.** Retry topics (5 s, 1 min, 10 min), dead-letter topics, permanent errors that skip retries, and a redrive tool for operators.
 - **Evolvable contracts.** Avro in Schema Registry with `BACKWARD` compatibility; three schema versions shipped without breaking consumers.
 - **Operable.** Prometheus alerts with a runbook, Grafana and Loki, traces carried through the outbox and Kafka, Kubernetes manifests with KEDA autoscaling, ACLs, and a disaster-recovery guide.

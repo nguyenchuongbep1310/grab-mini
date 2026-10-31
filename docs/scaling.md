@@ -25,6 +25,8 @@ The list is ordered by what I expect to hurt first. Each item says why, what I w
 
 **Do.** Pool and batch writes, keep the outbox table narrow, tune autovacuum for the outbox table, and put reads on replicas. If one primary is still not enough, shard orders by rider or region. Postgres is not deployed by the manifests (a managed service is assumed), so failover and sizing are outside this repository.
 
+**Payment Service** adds to this: each completed trip, tip and late cancellation is a transaction with a payment row, two or more ledger entries and an outbox row, plus a provider call made outside it. The ledger is append-only and checked by a deferred trigger, so write cost grows with trips, not orders. The provider call is the likely limit: a real processor has its own latency and rate limits, and its timeouts push events into the retry tiers ([ADR 0010](adr/0010-payment-ledger-and-provider-idempotency.md)). Nothing here was measured with a real provider; the load test used the sandbox fake. Measure ledger insert latency and provider call latency separately before sizing.
+
 ## 3. The outbox relay: one publisher per source
 
 **Why.** Per source, one relay publishes at a time (an advisory lock), polling every second in batches of 100. The ceiling is roughly batch size × polls per second if rows are always waiting, plus Kafka round-trip time, and it adds up to a second of latency to every event. This guarantees commit order for a key but caps throughput and makes one relay a bottleneck.

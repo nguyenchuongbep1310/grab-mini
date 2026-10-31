@@ -14,6 +14,7 @@ How each consumer is idempotent (all tested):
 
 - **Trip Service**: `INSERT INTO processed_events (event_id) ... ON CONFLICT DO NOTHING` in the same transaction as the state change; a conflict means "already done".
 - **Rating Service**: dedupes by `eventId` in the same transaction as the rating.
+- **Payment Service**: events are deduped by `eventId` in the same transaction as the payment, the ledger entries and the outbox row; a charge is also unique per `(trip, kind)`; the provider call is outside the transaction but idempotent on a key (`fare:<tripId>`), so a crash between charging and recording retries safely ([ADR 0010](0010-payment-ledger-and-provider-idempotency.md)).
 - **Matching Service**: the claim is keyed by order (`order:{id}:match`, 24 h), so re-processing `order.created` returns the same driver instead of claiming another.
 - **State machines**: transitions are guarded by the current status (a second `COMPLETED` is a no-op).
 - **Driver location**: an update older than the stored one is dropped, so replays cannot move a driver backwards.
