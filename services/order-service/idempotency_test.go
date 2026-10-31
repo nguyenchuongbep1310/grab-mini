@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/outbox"
+	"grab-mini/pkg/promo"
 )
 
 // ---- unit: key validation and fingerprinting (no database) ----
@@ -178,10 +180,37 @@ func TestWithRedisDownABookingIsRepricedNotRejected(t *testing.T) {
 
 // ---- integration: the API over a real database ----
 
+// fakeRegistryCodec is a codec over an in-process Schema Registry that keeps
+// the schemas it is given, so a test can decode what the service queued.
 func fakeRegistryCodec(t *testing.T) *eventcodec.Codec {
 	t.Helper()
+	var mu sync.Mutex
+	var schemas []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]int{"id": 1})
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost:
+			var body struct{ Schema string }
+			json.NewDecoder(r.Body).Decode(&body)
+			for i, s := range schemas {
+				if s == body.Schema {
+					json.NewEncoder(w).Encode(map[string]int{"id": i + 1})
+					return
+				}
+			}
+			schemas = append(schemas, body.Schema)
+			json.NewEncoder(w).Encode(map[string]int{"id": len(schemas)})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/schemas/ids/"):
+			id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/schemas/ids/"))
+			if id < 1 || id > len(schemas) {
+				http.NotFound(w, r)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"schema": schemas[id-1]})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return eventcodec.New(srv.URL)
@@ -191,6 +220,8 @@ type api struct {
 	t      *testing.T
 	db     *pgxpool.Pool
 	pricer *pricer
+	promos *promoChecker
+	codec  *eventcodec.Codec
 	mux    *http.ServeMux
 	issuer *auth.Issuer
 }
@@ -199,9 +230,15 @@ func newAPI(t *testing.T) *api {
 	t.Helper()
 	db := testDB(t)
 	p, _ := claimingPricer(t, 1.0)
-	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: fakeRegistryCodec(t), pricer: p}
+	codec := fakeRegistryCodec(t)
+	promoSigner, err := promo.NewSigner("test-promo-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := &promoChecker{signer: promoSigner, claims: p.claims, now: func() time.Time { return t0 }}
+	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: codec, pricer: p, promos: pc}
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	return &api{t: t, db: db, pricer: p, mux: s.routes(verifier), issuer: issuer}
+	return &api{t: t, db: db, pricer: p, promos: pc, codec: codec, mux: s.routes(verifier), issuer: issuer}
 }
 
 const bookingBody = `{"pickup":{"lat":10.776,"lng":106.72},"dropoff":{"lat":10.82,"lng":106.75}}`

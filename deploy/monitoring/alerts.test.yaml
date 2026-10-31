@@ -290,6 +290,116 @@ tests:
         alertname: LedgerUnbalancedTransactionRejected
         exp_alerts: []   # resolves once the counter stops moving
 
+  # ------------------------------------------------------------------ promotions
+  - name: promotion-service falling behind is a ticket once it persists
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="order.created", partition="0"}'
+        values: '0 300 300 300 300 300 300 300 300 300 300 300 300 300'
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="order.cancelled", partition="1"}'
+        values: '0 300 300 300 300 300 300 300 300 300 300 300 300 300'
+      - series: 'kafka_consumergroup_lag{consumergroup="rating-service-group", topic="trip.rated", partition="0"}'
+        values: '0 900 900 900 900 900 900 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PromotionConsumerLagHigh
+        exp_alerts: []   # high, but not for ten minutes yet
+      - eval_time: 13m
+        alertname: PromotionConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: promotion-service-group}
+            exp_annotations:
+              summary: "promotion-service-group is 600 messages behind"
+              description: "Redemptions are recorded late, so usage limits are enforced late and the validation endpoint counts too few uses."
+              runbook: "docs/runbook.md#promotions"
+
+  - name: a small promotion backlog is not an alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="order.created", partition="0"}'
+        values: '0 100 300 400 300 100 50 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: PromotionConsumerLagHigh
+        exp_alerts: []
+
+  - name: a dead-lettered promotion event is a ticket with the promotions runbook, and the generic page stays quiet for it
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="promotion-service-group", topic="order.created", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PromotionDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PromotionDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: ticket, topic: order.created}
+            exp_annotations:
+              summary: "promotion-service dead-lettered a message from order.created"
+              description: "A redemption or release could not be recorded after its retries (an order that used a code this service does not know, say). Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#promotions"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []   # one ticket, not a page as well
+
+  - name: another service's dead letters do not raise the promotion alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="trip-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PromotionDeadLettered
+        exp_alerts: []
+
+  - name: a steady stream of over-limit redemptions is a ticket, an occasional one is not
+    interval: 1m
+    input_series:
+      # 15 over the per-rider limit within the hour; the usage limit saw 3.
+      - series: 'promotion_redemptions_total{status="OVER_LIMIT", reason="per_rider_limit"}'
+        values: '0+1x70'
+      - series: 'promotion_redemptions_total{status="OVER_LIMIT", reason="usage_limit"}'
+        values: '0 1 2 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
+      - series: 'promotion_redemptions_total{status="REDEEMED", reason=""}'
+        values: '0+20x70'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PromotionRedeemedOverLimit
+        exp_alerts: []   # five so far
+      - eval_time: 30m
+        alertname: PromotionRedeemedOverLimit
+        exp_alerts:
+          - exp_labels: {severity: ticket, reason: per_rider_limit}
+            exp_annotations:
+              summary: "More than 10 orders in an hour used a promotion past its per_rider_limit"
+              description: "These orders keep the discount they were booked with. Check promotion_redemptions_total and the redemptions table for the code involved, and disable it if it is being abused."
+              runbook: "docs/runbook.md#promotions"
+
+  - name: invalid promo tokens at booking are a ticket, a refused expired token is the rider's own doing
+    interval: 1m
+    input_series:
+      - series: 'orders_promo_total{result="invalid"}'
+        values: '0 0 0 2 4 6 8 10 10 10 10 10 10 10 10 10 10 10 10 10'
+      - series: 'orders_promo_total{result="expired"}'
+        values: '0+5x19'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PromoTokensRefused
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PromoTokensRefused
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "Order Service refused 10 promo tokens as invalid in 10 minutes"
+              description: "A rider cannot forge one by accident. Check that order-service and promotion-service have the same PROMO_SECRET."
+              runbook: "docs/runbook.md#promotions"
+      - eval_time: 19m
+        alertname: PromoTokensRefused
+        exp_alerts: []   # resolves once they stop
+
   # -------------------------------------------------------------------- business
   - name: slow matching breaches the SLO
     interval: 1m

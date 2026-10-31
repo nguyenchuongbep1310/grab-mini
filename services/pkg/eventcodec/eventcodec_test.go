@@ -114,6 +114,7 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
 		events.TopicOrderCancelled:       &events.OrderCancelled{OrderID: "o", RiderID: "r", CancelledBy: "RIDER", Reason: "x"},
 		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
+		events.TopicPromotionRedeemed:    &events.PromotionRedeemed{OrderID: "o", RiderID: "r", Code: "WELCOME10", Discount: 20000, Status: events.PromotionStatusRedeemed, Currency: "VND"},
 		events.TopicPaymentRecorded:      &events.PaymentRecorded{PaymentID: "p", TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Kind: events.PaymentKindFare, Status: events.PaymentStatusCaptured, Amount: 50000, DriverAmount: 40000, PlatformAmount: 10000, Currency: "VND", LedgerTransactionID: "x"},
 	}
 	for topic, in := range cases {
@@ -326,6 +327,94 @@ func TestSurgeFieldsSurviveARoundTrip(t *testing.T) {
 	}
 	if out.SurgeMultiplier != 1.4 || out.Price == nil || *out.Price != 87000 {
 		t.Errorf("got multiplier %v price %v", out.SurgeMultiplier, out.Price)
+	}
+}
+
+// order.created as it was at schema v3 (surge fields, no promotion fields).
+const orderCreatedV3 = `{"type":"record","name":"OrderCreated","namespace":"grabmini.events","fields":[
+ {"name":"eventId","type":"string"},{"name":"occurredAt","type":"string"},{"name":"orderId","type":"string"},{"name":"riderId","type":"string"},
+ {"name":"pickup","type":{"type":"record","name":"LatLng","fields":[{"name":"lat","type":"double"},{"name":"lng","type":"double"}]}},
+ {"name":"dropoff","type":"LatLng"},{"name":"vehicleType","type":"string","default":"CAR"},
+ {"name":"surgeMultiplier","type":"double","default":1.0},{"name":"price","type":["null","double"],"default":null}]}`
+
+// v3 messages (written before promotions) are still in Kafka after the
+// upgrade: they must decode with no promo code and a zero discount, so Payment
+// Service charges their full price.
+func TestCurrentOrderCreatedReadsV3MessagesWithPromotionDefaults(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+
+	type v3Order struct {
+		events.Envelope
+		OrderID         string             `avro:"orderId"`
+		RiderID         string             `avro:"riderId"`
+		Pickup          events.LatLng      `avro:"pickup"`
+		Dropoff         events.LatLng      `avro:"dropoff"`
+		VehicleType     events.VehicleType `avro:"vehicleType"`
+		SurgeMultiplier float64            `avro:"surgeMultiplier"`
+		Price           *float64           `avro:"price"`
+	}
+	price := 87000.0
+	old := v3Order{sampleOrder.Envelope, "o-3", "rider-1", sampleOrder.Pickup, sampleOrder.Dropoff, events.VehicleCar, 1.4, &price}
+	data, err := New(url, WithSchemaSource(func(string) (string, error) { return orderCreatedV3, nil })).
+		Encode(ctx, events.TopicOrderCreated, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got events.OrderCreated
+	if err := New(url).Decode(ctx, events.TopicOrderCreated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OrderID != "o-3" || got.SurgeMultiplier != 1.4 || got.Price == nil || *got.Price != 87000 {
+		t.Errorf("v3 fields lost: %+v", got)
+	}
+	if got.PromoCode != "" || got.Discount != 0 {
+		t.Errorf("promoCode = %q discount = %d, want the defaults \"\" and 0", got.PromoCode, got.Discount)
+	}
+}
+
+// And the other way round: a v3 consumer still reads v4 messages.
+func TestV3ReaderIgnoresPromotionFields(t *testing.T) {
+	_, url := newRegistry(t)
+	ctx := context.Background()
+
+	price := 87000.0
+	in := sampleOrder
+	in.Price, in.PromoCode, in.Discount = &price, "WELCOME10", 8700
+	data, err := New(url).Encode(ctx, events.TopicOrderCreated, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		OrderID string   `avro:"orderId"`
+		Price   *float64 `avro:"price"`
+	}
+	oldConsumer := New(url, WithSchemaSource(func(string) (string, error) { return orderCreatedV3, nil }))
+	if err := oldConsumer.Decode(ctx, events.TopicOrderCreated, data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OrderID != "o-1" || got.Price == nil || *got.Price != 87000 {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestPromotionFieldsSurviveARoundTrip(t *testing.T) {
+	_, url := newRegistry(t)
+	c := New(url)
+	in := sampleOrder
+	in.PromoCode, in.Discount = "FLAT15K", 15000
+
+	data, err := c.Encode(context.Background(), events.TopicOrderCreated, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out events.OrderCreated
+	if err := c.Decode(context.Background(), events.TopicOrderCreated, data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.PromoCode != "FLAT15K" || out.Discount != 15000 {
+		t.Errorf("got promoCode %q discount %d", out.PromoCode, out.Discount)
 	}
 }
 

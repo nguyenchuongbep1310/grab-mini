@@ -87,6 +87,8 @@ spec:
           value: /etc/secrets/schema-registry/ca.crt
         - name: QUOTE_SECRET_FILE
           value: /etc/secrets/quote/secret
+        - name: PROMO_SECRET_FILE
+          value: /etc/secrets/promo/secret
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user
@@ -105,6 +107,9 @@ spec:
           readOnly: true
         - name: quote
           mountPath: /etc/secrets/quote
+          readOnly: true
+        - name: promo
+          mountPath: /etc/secrets/promo
           readOnly: true
         startupProbe:
           httpGet:
@@ -180,6 +185,12 @@ spec:
       - name: quote
         secret:
           secretName: grab-mini-quote
+          items:
+          - key: secret
+            path: secret
+      - name: promo
+        secret:
+          secretName: grab-mini-promo
           items:
           - key: secret
             path: secret

@@ -7,6 +7,7 @@ export const Topics = {
   TripStatusChanged: "trip.status.changed",
   TripRated: "trip.rated",
   PaymentRecorded: "payment.recorded",
+  PromotionRedeemed: "promotion.redeemed",
 } as const;
 
 export type Topic = (typeof Topics)[keyof typeof Topics];

@@ -465,6 +465,64 @@ spec:
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
 metadata:
+  name: promotion-service
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+    - resource:
+        type: topic
+        name: promotion.redeemed
+        patternType: literal
+      operations:
+      - Write
+      - Describe
+    - resource:
+        type: group
+        name: promotion-service-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: order.created
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.created.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: order.cancelled
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: order.cancelled.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
   name: rating-service
   labels:
     strimzi.io/cluster: grab-mini

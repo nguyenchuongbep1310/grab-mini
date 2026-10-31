@@ -80,6 +80,35 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 - **US-7.4** (Rider App screens, task 8.4, not built yet): As a rider, I want to see the distance and "about N min" before booking, and "driver arrives in N min" after a match.
   - WHEN the pickup, dropoff or vehicle changes, THE Rider App SHALL show the distance and the estimated time from Routing Service, and SHALL still allow booking if Routing is unavailable.
   - WHEN the rider has been matched, THE Rider App SHALL show the driver's estimated arrival, recomputed from the driver's pushed location at a throttled rate.
+- **US-7.5**: As a rider, I want the price I pay to match the routed quote I saw, even if I book late.
+  - WHEN a booking carries an expired quote, a quote that was already used, or one whose single-use check could not be made (Redis down), THE Order Service SHALL keep the base fare in that quote's signed body and apply only the current multiplier; the replacement quote of a 409 SHALL carry the same base fare.
+  - WHEN a booking carries no quote, THE Order Service SHALL price it on the straight-line distance.
+
+### 8. Promotions
+- **US-8.1**: As a rider, I want to check a promo code against my trip before booking, and be told clearly why it does not apply.
+  - WHEN a rider asks Promotion Service to validate a code for a price and vehicle type, THE Promotion Service SHALL return the discount, the final price and a promo token bound to that rider, code, price and vehicle type, valid for 10 minutes.
+  - THE discount SHALL be a whole number of VND, never negative and never more than the price; a PERCENT discount SHALL be capped at the promotion's maximum.
+  - IF the code does not exist or is disabled, THE Promotion Service SHALL answer 404 with the code `not_found`; IF it is not yet valid, expired, below the minimum fare, for another vehicle type, fully redeemed or already used by this rider up to the per-rider limit, it SHALL answer 422 with the code `not_started`, `expired`, `min_fare`, `wrong_vehicle`, `limit_reached` or `already_used`.
+  - IF the caller is not a rider, THE Promotion Service SHALL answer 403; IF there is no valid token, 401.
+- **US-8.2**: As a rider, I want the discount I was shown locked on my order.
+  - WHEN a booking carries a promo token, THE Order Service SHALL verify it locally, without calling Promotion Service, against the rider, the settled price and the vehicle type, and SHALL store the code and the discount on the order and publish them in `order.created`.
+  - IF the token is forged, expired, issued to another rider or for another price or vehicle type, THE Order Service SHALL answer 400 with a code (`promo_invalid`, `promo_expired`, `promo_wrong_rider`, `promo_wrong_price`, `promo_wrong_vehicle`) and SHALL not create the order.
+  - WHEN a token has already been used for a booking, THE Order Service SHALL answer 409 `promo_used`.
+  - WHEN a booking is retried with the same Idempotency-Key, THE Order Service SHALL replay the stored response and SHALL not use the token twice.
+- **US-8.3**: As the business, I want redemptions recorded and limits enforced as far as the design allows.
+  - WHEN Promotion Service consumes an `order.created` with a promo code, THE Promotion Service SHALL record one redemption per `(code, order)` and publish `promotion.redeemed`, in one transaction with the event's dedupe row; a redelivery SHALL change nothing.
+  - IF a per-rider or global usage limit has already been reached when the order is recorded, THE Promotion Service SHALL record the redemption as `OVER_LIMIT` and SHALL not fail the order.
+  - WHEN Promotion Service consumes `order.cancelled`, THE Promotion Service SHALL release the order's redemption, so the code can be used again.
+  - The global limit MAY be exceeded by the number of orders in flight at the same time; this is documented, not hidden.
+- **US-8.4**: As a rider, I want to pay the discounted price, and as a driver and the platform, I want commission on what was actually paid.
+  - WHEN a trip completes, THE Payment Service SHALL charge the order's price less its discount, take the platform commission on that net amount, and publish `payment.recorded` with the net amounts.
+  - IF the net amount is 0, THE Payment Service SHALL charge nothing and count the ride in `payments_skipped_total{reason="zero_amount"}`.
+  - IF the discount is negative or more than the price, THE Payment Service SHALL dead-letter the order event rather than guess.
+- **US-8.5**: As an operator, I want to create, list and disable promotions.
+  - WHEN a caller with an `admin` token posts a valid promotion, THE Promotion Service SHALL create it (201); IF the code exists, 409; IF a field is invalid, 400 with the code `invalid_promotion`.
+  - WHEN an admin disables a promotion, THE Promotion Service SHALL stop validating it; orders that already carry its discount SHALL keep it.
+  - IF the caller is a rider or a driver, THE Promotion Service SHALL answer 403.
+- **US-8.6** (Rider App and Ops dashboard screens, task 9.4, not built yet): As a rider, I want a promo-code field next to the price, showing the discount and the new total; as an operator, I want to list, create and disable promotions from the Ops dashboard.
 
 ## Technical constraints
 - Kafka runs locally via Docker Compose, with Kafka UI for observing topics/offsets.
@@ -88,6 +117,6 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 
 ## Out of scope
 - A real payment gateway or card processor (rides are settled through a double-entry ledger against a sandbox provider; no payouts, refunds or reconciliation)
-- Promotions
+- Per-user targeting of promotions, stacking several codes on one order, referral credits
 - Multi-region, high-availability Kafka cluster
 - Full authentication (mock user/driver ids are acceptable initially)

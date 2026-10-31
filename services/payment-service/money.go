@@ -55,6 +55,18 @@ func checkAmount(amount int64) error {
 	return nil
 }
 
+// checkDiscount validates the discount carried by an order against its price:
+// whole VND, not negative, and not more than the price (the rider is never paid to ride).
+func checkDiscount(discount, price int64) error {
+	switch {
+	case discount < 0:
+		return &amountError{fmt.Sprintf("discount %d is negative", discount)}
+	case discount > price:
+		return &amountError{fmt.Sprintf("discount %d is above the price %d", discount, price)}
+	}
+	return nil
+}
+
 // split divides amount between the platform and the driver. The platform's
 // commission is amount * bps / 10000 rounded down, and the driver gets the
 // remainder, so platform + driver == amount exactly: no minor unit is ever

@@ -35,6 +35,7 @@ TOPICS = {
     "trip.status.changed": (12, 7 * DAY, 2),
     "trip.rated": (6, 7 * DAY, 2),
     "payment.recorded": (6, 7 * DAY, 2),
+    "promotion.redeemed": (6, 7 * DAY, 2),
     "driver.location.updated": (48, 1 * DAY, 1),
 }
 
@@ -43,11 +44,14 @@ TOPICS = {
 # kafka=False: no Kafka user, Schema Registry or event handling (a stateless HTTP service).
 # secrets: what it mounts besides its Kafka credentials.
 SERVICES = {
-    "order-service": dict(port=3001, kind="api", db=True, redis=True, quote=True, scale=("lag", 2, 6)),
+    "order-service": dict(port=3001, kind="api", db=True, redis=True, quote=True, promo=True, scale=("lag", 2, 6)),
     "trip-service": dict(port=3002, kind="api", db=True, redis=True, scale=("lag", 2, 12)),
     "rating-service": dict(port=3004, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
     # Settles rides: fare, tip and cancellation fee into a double-entry ledger. No Redis.
     "payment-service": dict(port=3008, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
+    # Vouchers: validation (signs promo tokens, with the secret it shares with order-service), admin
+    # management, and redemptions recorded from order.created / order.cancelled. No Redis.
+    "promotion-service": dict(port=3010, kind="api", db=True, redis=False, promo=True, scale=("lag", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
@@ -65,7 +69,7 @@ CALLS = {"pricing-service": ["routing-service"]}
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
-MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service"]
+MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service", "promotion-service"]
 
 # Dedupe tables grow one row per event and are only read for a redelivery, so
 # rows older than anything Kafka or the DLQ can still hand back are dead
@@ -79,6 +83,11 @@ RETENTION = {
     # Safe to prune: a payment is unique per (trip, kind), so a very late redelivery is still refused.
     # The ledger, payments and order_prices (a late DLQ redrive still needs the price) are never pruned.
     "payment-payment-events": ("payment-service", "payment_events", "processed_at"),
+    # Same reasoning: a redemption is unique per (code, order_id). A cancelled-order marker is only read
+    # until its order.created has been handled, which Kafka's 7 days of retention bound.
+    # The promotions and redemptions themselves are never pruned.
+    "promotion-promotion-events": ("promotion-service", "promotion_events", "processed_at"),
+    "promotion-cancelled-orders": ("promotion-service", "promotion_cancelled_orders", "cancelled_at"),
 }
 POSTGRES_IMAGE = "postgres:16-alpine"
 REDIS_IMAGE = "redis:7.4.12-alpine"
@@ -195,6 +204,10 @@ def deployment(name, spec):
         volumes.append({"name": "quote", "secret": {"secretName": f"{CLUSTER}-quote", "items": [{"key": "secret", "path": "secret"}]}})
         mounts.append({"name": "quote", "mountPath": "/etc/secrets/quote", "readOnly": True})
         env.append({"name": "QUOTE_SECRET_FILE", "value": "/etc/secrets/quote/secret"})
+    if spec.get("promo"):  # signs (promotion) or checks (order) promo tokens: the same secret, apart from the quote one
+        volumes.append({"name": "promo", "secret": {"secretName": f"{CLUSTER}-promo", "items": [{"key": "secret", "path": "secret"}]}})
+        mounts.append({"name": "promo", "mountPath": "/etc/secrets/promo", "readOnly": True})
+        env.append({"name": "PROMO_SECRET_FILE", "value": "/etc/secrets/promo/secret"})
     if spec.get("origins"):
         env.append({"name": "ALLOWED_ORIGINS", "valueFrom": {"configMapKeyRef": {"name": "grab-mini-config", "key": "ALLOWED_ORIGINS"}}})
 

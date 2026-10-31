@@ -24,6 +24,7 @@ use (
 	./services/pkg/metrics
 	./services/pkg/migrate
 	./services/pkg/outbox
+	./services/pkg/promo
 	./services/pkg/redisconn
 	./services/pkg/secret
 	./services/pkg/serve
@@ -31,6 +32,7 @@ use (
 	./services/pkg/tracing
 	./services/payment-service
 	./services/pricing-service
+	./services/promotion-service
 	./services/rating-service
 	./services/routing-service
 	./services/trip-service

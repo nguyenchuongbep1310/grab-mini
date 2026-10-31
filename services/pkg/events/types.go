@@ -60,6 +60,12 @@ type OrderCreated struct {
 	// messages. Price is in VND, locked when the order was booked.
 	SurgeMultiplier float64  `json:"surgeMultiplier" avro:"surgeMultiplier"`
 	Price           *float64 `json:"price" avro:"price"`
+	// Added in schema v4. PromoCode is the voucher the rider booked with ("" for
+	// none, and on older messages) and Discount the VND it takes off Price,
+	// locked on the order together with the price. Payment Service charges
+	// Price - Discount; Promotion Service records the redemption.
+	PromoCode string `json:"promoCode" avro:"promoCode"`
+	Discount  int64  `json:"discount" avro:"discount"`
 }
 
 type OrderMatched struct {
@@ -176,4 +182,29 @@ type PaymentRecorded struct {
 	Currency       string `json:"currency" avro:"currency"`
 	// The ledger transaction that booked it; empty when DECLINED.
 	LedgerTransactionID string `json:"ledgerTransactionId" avro:"ledgerTransactionId"`
+}
+
+// Redemption outcomes carried by PromotionRedeemed.
+const (
+	// PromotionRedeemed: the order uses the code and counts against its limits.
+	PromotionStatusRedeemed = "REDEEMED"
+	// PromotionStatusOverLimit: the order was booked with the discount but a limit
+	// (the code's usage limit or the per-rider limit) was already reached by the time
+	// Promotion Service saw it. Orders in flight at the same moment can all pass
+	// validation, and an order that exists is never failed for it, so it is recorded.
+	PromotionStatusOverLimit = "OVER_LIMIT"
+)
+
+// PromotionRedeemed is published by Promotion Service (through its outbox) once
+// for every order.created that carried a promoCode. Key: orderId. Analytics only:
+// nothing in the booking or payment path waits for it. Discount is whole VND.
+type PromotionRedeemed struct {
+	Envelope
+	OrderID  string `json:"orderId" avro:"orderId"`
+	RiderID  string `json:"riderId" avro:"riderId"`
+	Code     string `json:"code" avro:"code"`
+	Discount int64  `json:"discount" avro:"discount"`
+	// REDEEMED or OVER_LIMIT.
+	Status   string `json:"status" avro:"status"`
+	Currency string `json:"currency" avro:"currency"`
 }

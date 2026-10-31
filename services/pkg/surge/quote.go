@@ -105,7 +105,14 @@ func (s *Signer) Issue(req QuoteRequest, multiplier float64, now time.Time) Quot
 // Service takes it from Routing Service). The distance is not part of what a
 // quote is bound to: only the fare it produced is signed.
 func (s *Signer) IssueForDistance(req QuoteRequest, distanceKm, multiplier float64, now time.Time) Quote {
-	base := BaseFare(req.Vehicle, distanceKm)
+	return s.IssueForBase(req, BaseFare(req.Vehicle, distanceKm), multiplier, now)
+}
+
+// IssueForBase is IssueForDistance with the fare before surge already worked out.
+// Order Service uses it to re-quote a trip at a new multiplier while keeping the
+// base fare an earlier quote carried, which Pricing Service computed from the
+// routed distance that Order Service does not have.
+func (s *Signer) IssueForBase(req QuoteRequest, base, multiplier float64, now time.Time) Quote {
 	exp := now.Add(QuoteTTL).Truncate(time.Second)
 	b := body{Base: base, Mult: multiplier, Price: Price(base, multiplier), Exp: exp.Unix(), Route: req.route()}
 	raw, _ := json.Marshal(b)

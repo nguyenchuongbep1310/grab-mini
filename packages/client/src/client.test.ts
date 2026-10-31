@@ -5,6 +5,8 @@ import {
   ApiError,
   cancelOrder,
   createOrder,
+  createPromotion,
+  disablePromotion,
   getActiveTrip,
   getDriverRating,
   getDriverReviews,
@@ -12,10 +14,14 @@ import {
   getOrder,
   getQuote,
   getRoute,
+  listPromotions,
   newQuoteOf,
+  promoBookingErrorOf,
+  promoRejectionOf,
   rateTrip,
   tripAction,
   useNotificationSocket,
+  validatePromotion,
   waitForOrder,
   waitForTripByOrder,
 } from "./index";
@@ -138,6 +144,96 @@ describe("auth & api client", () => {
       createOrder("rider-1", { lat: 10.77, lng: 106.7 }, { lat: 10.78, lng: 106.71 }, "CAR", "q-1", 0),
     ).rejects.toBeInstanceOf(ApiError);
     expect(fetchMock.mock.calls.filter(([url]) => url === "/order-api/orders")).toHaveLength(1);
+  });
+
+  it("sends the promoToken with a booking, and only when there is one", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ orderId: "o-1", price: 87000, discount: 8700, finalPrice: 78300, promoCode: "WELCOME10" }), { status: 201 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: "o-2" }), { status: 201 }));
+    const pickup = { lat: 10.77, lng: 106.7 };
+    const dropoff = { lat: 10.78, lng: 106.71 };
+
+    const booked = await createOrder("rider-1", pickup, dropoff, "CAR", "q-1", 0, "tok.sig");
+    expect(booked).toMatchObject({ discount: 8700, finalPrice: 78300, promoCode: "WELCOME10" });
+    await createOrder("rider-1", pickup, dropoff, "CAR", undefined, 0);
+
+    const bodies = fetchMock.mock.calls.filter(([url]) => url === "/order-api/orders").map(([, init]) => JSON.parse(init.body));
+    expect(bodies[0]).toMatchObject({ quoteId: "q-1", promoToken: "tok.sig" });
+    expect(bodies[1]).not.toHaveProperty("promoToken");
+  });
+
+  it("explains a refused promo token on booking", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "the promo code has expired", code: "promo_expired" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "used", code: "promo_used" }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "the price has changed", newQuote: {} }), { status: 409 }));
+    const book = () => createOrder("rider-1", { lat: 10.77, lng: 106.7 }, { lat: 10.78, lng: 106.71 }, "CAR", undefined, 0, "t");
+
+    expect(promoBookingErrorOf(await book().catch((e) => e))).toBe("promo_expired");
+    expect(promoBookingErrorOf(await book().catch((e) => e))).toBe("promo_used");
+    expect(promoBookingErrorOf(await book().catch((e) => e))).toBeNull(); // a re-quote is not a promo problem
+    expect(promoBookingErrorOf(new Error("other"))).toBeNull();
+  });
+
+  it("validates a promo code and names the reason it is refused", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const ok = { code: "WELCOME10", discount: 8700, price: 87000, finalPrice: 78300, currency: "VND", promoToken: "tok.sig", expiresAt: future };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(ok), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "needs 40000", code: "min_fare" }), { status: 422 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "no such code", code: "not_found" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "price must be above 0 VND", code: "invalid_request" }), { status: 400 }));
+
+    expect(await validatePromotion(" welcome10 ", 87000.4, "CAR")).toEqual(ok);
+    const url = new URL(fetchMock.mock.calls[1][0], "http://x");
+    expect(url.pathname).toBe("/promotion-api/promotions/validate");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ code: "welcome10", price: "87000", vehicleType: "CAR" });
+
+    expect(promoRejectionOf(await validatePromotion("X", 1000, "CAR").catch((e) => e))).toBe("min_fare");
+    expect(promoRejectionOf(await validatePromotion("X", 1000, "CAR").catch((e) => e))).toBe("not_found");
+    expect(promoRejectionOf(await validatePromotion("X", 0, "CAR").catch((e) => e))).toBeNull(); // a bad request, not a refusal
+    expect(promoRejectionOf(new Error("other"))).toBeNull();
+  });
+
+  it("lists, creates and disables promotions as an admin", async () => {
+    signIn("admin", "ops-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const promotion = {
+      code: "SUMMER20", kind: "PERCENT", value: 20, maxDiscount: 30000, minFare: 0, vehicleType: null,
+      validFrom: future, validTo: future, usageLimit: null, perRiderLimit: 1, disabledAt: null, status: "active",
+      redeemed: 0, overLimit: 0, createdBy: "ops-1", createdAt: future,
+    };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-a", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ promotions: [promotion] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(promotion), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...promotion, status: "disabled" }), { status: 200 }));
+
+    expect(await listPromotions()).toEqual([promotion]);
+    const created = await createPromotion({ code: "summer20", kind: "PERCENT", value: 20, maxDiscount: 30000, validTo: future });
+    expect(created.code).toBe("SUMMER20");
+    expect((await disablePromotion("SUMMER20")).status).toBe("disabled");
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ role: "admin", id: "ops-1" });
+    const [listCall, createCall, disableCall] = fetchMock.mock.calls.slice(1);
+    expect(listCall[0]).toBe("/promotion-api/promotions");
+    expect(createCall[0]).toBe("/promotion-api/promotions");
+    expect(createCall[1].method).toBe("POST");
+    expect(JSON.parse(createCall[1].body)).toEqual({ code: "summer20", kind: "PERCENT", value: 20, maxDiscount: 30000, validTo: future });
+    expect(disableCall[0]).toBe("/promotion-api/promotions/SUMMER20/disable");
+    expect(disableCall[1].method).toBe("POST");
+    for (const [, init] of fetchMock.mock.calls.slice(1)) expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt-a");
+    forgetToken();
   });
 
   it("retries 404 in waitForTripByOrder until the trip exists", async () => {

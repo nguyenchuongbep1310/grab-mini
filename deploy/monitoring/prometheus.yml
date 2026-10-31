@@ -46,6 +46,12 @@ scrape_configs:
         labels:
           service: payment-service
 
+  - job_name: promotion-service
+    static_configs:
+      - targets: ["host.docker.internal:3010"]
+        labels:
+          service: promotion-service
+
   - job_name: auth-service
     static_configs:
       - targets: ["host.docker.internal:3005"]

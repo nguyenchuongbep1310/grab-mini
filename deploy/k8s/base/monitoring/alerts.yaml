@@ -45,7 +45,7 @@ spec:
         runbook: docs/runbook.md#consumer-lag
     - alert: KafkaMessagesDeadLettered
       expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!="driver.location.updated",
-        group!="payment-service-group"}[5m])) > 0
+        group!~"payment-service-group|promotion-service-group"}[5m])) > 0
       labels:
         severity: page
       annotations:
@@ -232,6 +232,45 @@ spec:
         description: The transaction was refused (nothing was written), which means a bug in how charges are split. The affected
           events are dead-lettered.
         runbook: docs/runbook.md#payments
+  - name: grab-mini.promotions
+    rules:
+    - alert: PromotionConsumerLagHigh
+      expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="promotion-service-group"}) > 500
+      for: 10m
+      labels:
+        severity: ticket
+      annotations:
+        summary: promotion-service-group is {{ $value }} messages behind
+        description: Redemptions are recorded late, so usage limits are enforced late and the validation endpoint counts too
+          few uses.
+        runbook: docs/runbook.md#promotions
+    - alert: PromotionDeadLettered
+      expr: sum by (topic) (increase(kafka_consumer_messages_total{group="promotion-service-group", result="dead_lettered"}[5m]))
+        > 0
+      labels:
+        severity: ticket
+      annotations:
+        summary: promotion-service dead-lettered a message from {{ $labels.topic }}
+        description: A redemption or release could not be recorded after its retries (an order that used a code this service
+          does not know, say). Fix the cause, then redrive with dlq-redrive.
+        runbook: docs/runbook.md#promotions
+    - alert: PromotionRedeemedOverLimit
+      expr: sum by (reason) (increase(promotion_redemptions_total{status="OVER_LIMIT"}[1h])) > 10
+      labels:
+        severity: ticket
+      annotations:
+        summary: More than 10 orders in an hour used a promotion past its {{ $labels.reason }}
+        description: These orders keep the discount they were booked with. Check promotion_redemptions_total and the redemptions
+          table for the code involved, and disable it if it is being abused.
+        runbook: docs/runbook.md#promotions
+    - alert: PromoTokensRefused
+      expr: sum(increase(orders_promo_total{result="invalid"}[10m])) > 3
+      labels:
+        severity: ticket
+      annotations:
+        summary: Order Service refused {{ $value }} promo tokens as invalid in 10 minutes
+        description: A rider cannot forge one by accident. Check that order-service and promotion-service have the same PROMO_SECRET.
+        runbook: docs/runbook.md#promotions
   - name: grab-mini.workloads
     rules:
     - alert: DeploymentReplicasUnavailable

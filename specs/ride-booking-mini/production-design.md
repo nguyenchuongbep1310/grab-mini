@@ -469,9 +469,11 @@ distance, or refuses the trip (422), the quote is priced on the straight-line di
 - **It is an estimate.** There is no road network, no one-way streets, no rivers or bridges, no live traffic and no incidents. The 1.3 detour and the speeds are rules of thumb for a dense
   city: a trip across a river can be far longer than the model says. Do not use it to promise a pickup time to the minute; the Rider App says "about".
 - **The polyline is a straight line**, not the road; it is meant for a rough drawing, not turn-by-turn.
-- **Pricing and booking can disagree.** Order Service does not call Routing (it must not add a network hop to the booking path). A booking that carries a valid quote honours the quoted (routed)
-  price. But a booking with no quote or an expired one, and the replacement quote of a 409, are re-priced on the **straight-line** distance, so the locked price can differ from the routed
-  quote the rider saw. Closing this needs Order Service to reuse the base fare of the expired quote (the signed body has it) or to call Routing with its own fail-open; both are left out of this phase.
+- **Pricing and booking mostly agree.** Order Service does not call Routing (it must not add a network hop to the booking path). A booking that carries a valid quote honours the quoted (routed)
+  price. A booking with an **expired** quote (or a reused one, or one whose single-use check failed) and the replacement quote of a 409 keep the **base fare in the quote's signed body**, which
+  Pricing computed from the routed distance, and change only the multiplier (`pricer.repriced`, `Signer.IssueForBase`). Only a booking with **no quote at all** is priced on the straight line, so its price can
+  differ from a routed quote the rider never asked for; closing that needs Order Service to call Routing with its own fail-open, left out. The base fare of an old quote is kept however old the quote is, which is fine while the tariff is a constant in code
+  and would need an age limit if tariffs became configurable.
 - **A fail-open quote is cheaper.** A road distance is longer than the straight line, so while Routing is down fares are lower than they would be. That is the safe direction for riders, and the alert
   tells operators that revenue is being under-estimated.
 - **Forwarding the rider's token** couples Routing's rate limit to the rider's other calls only loosely (separate limiter, same subject) and makes Pricing a holder of a bearer token for the length of
@@ -479,3 +481,40 @@ distance, or refuses the trip (422), the quote is priced on the straight-line di
 - **Egress and ingress.** Routing needs only DNS, the OTLP collector and the JWKS endpoint. A NetworkPolicy lets Pricing reach it on its port; the ingress controller may reach it for the Rider App.
 - **Admin role.** `admin` is a valid role everywhere, but only the development issuer (`auth-service`, which refuses to run with `APP_ENV=production`) can sign it. With a real identity provider, the
   operators' tokens must carry `role=admin` and that provider must be the only one able to mint them. No admin-only route exists yet (promotions and driver review add them).
+
+## 18. Promotions: Promotion Service (done)
+
+Riders can apply a voucher to a trip. The discount is worked out and signed by Promotion Service, locked on the order by Order Service, and charged net by Payment Service.
+
+**The service.** `promotion-service` (port 3010) has Postgres and the outbox, consumes `order.created` and `order.cancelled` (group `promotion-service-group`, retry tiers and DLQ from `pkg/kafkaconsumer`), publishes `promotion.redeemed` (key `orderId`), and has no Redis.
+Tables: `promotions`, `redemptions` (primary key `(code, order_id)`), `promotion_events` (eventId dedupe) and `promotion_cancelled_orders` (see below). Migrations run in a Job (`promotion-service migrate`); the dedupe and cancelled-order tables are pruned after 30 days like the other dedupe tables, while promotions and redemptions are never pruned.
+`promotion-service seed-dev` adds the demo codes `WELCOME10` (10% off, at most 20,000 VND, fare 40,000 or more, once per rider), `FLAT15K` (15,000 VND off a fare of 40,000 or more, 5 times per rider) and `BIKE5K` (5,000 VND off a BIKE trip); it refuses to run unless `APP_ENV=development`, and `scripts/dev.sh` runs it. It is a command rather than a migration so that demo codes never reach a production database.
+
+**The token.** `services/pkg/promo` signs `{code, rider, price, vehicle, discount, expiry}` with HMAC-SHA256 (10 minutes), the scheme quotes use, under a separate key (`PROMO_SECRET`, Secret `grab-mini-promo`; the public development default is refused outside `APP_ENV=development`) and with a
+domain prefix on the MAC, so a signature from one scheme is never valid for the other. Order Service verifies it without a network call. A token buys one booking (Redis `SET NX`, the same mechanism as quotes); with Redis down the booking goes ahead with the discount (`orders_promo_total{result="unchecked"}`), because the token is signed and short-lived and
+redemption still records and bounds the use. The token is bound to the **settled** price, so if the rider's quote expired and the price moved, the booking is refused with `promo_wrong_price` and the rider applies the code again. Failed bookings give the token (and the quote) back.
+
+**Discount math** (`discount.go`, pure and table tested): PERCENT is `price x value / 100` rounded down to whole VND, then capped at `max_discount`; FIXED is `value`; the result is clamped to `[0, price]`, so the final price is never below 0. A discount equal to the price is a free ride.
+
+**Redemption and limits.** The consumer saves the redemption, its eventId dedupe row and the `promotion.redeemed` outbox row in one transaction, taking a lock on the promotion's row, so concurrent workers count exactly: a test redeems one code with a limit of 3 from ten riders at once and gets exactly 3 `REDEEMED` and 7 `OVER_LIMIT`.
+An order always keeps its discount. The order exists and the rider has been told the price, and the discount is already in `order.created`, which Payment Service charges from; nothing here can veto it. So a limit that was reached in the meantime is recorded as `OVER_LIMIT` (with the limit's name) and the order is not failed.
+**The limits are therefore soft.** Validation checks them, and redemption counts them exactly, but two orders in flight can both pass validation before either is recorded, so a code can be used past its usage limit, or by one rider past their per-rider limit, by up to the number of orders in flight at that moment
+(more if the consumer lags: `PromotionConsumerLagHigh`). The over-limit orders are visible (`redemptions.status = 'OVER_LIMIT'`, `promotion_redemptions_total{status="OVER_LIMIT"}`, alert `PromotionRedeemedOverLimit`). A hard cap would need a reservation at validation time and a call from the booking path to Promotion Service, which this design avoids on purpose.
+
+**Cancellation, and the gaps.** `order.cancelled` releases the redemption (`RELEASED`, no longer counted) so the rider can use the code again. `order.created` and `order.cancelled` are different topics, so a quick cancel can be handled first: the order id is then kept in `promotion_cancelled_orders` and the redemption is recorded as released when `order.created` arrives (the two handlers also serialize on a per-order advisory lock).
+`order.cancelled` is only published when a rider cancels a `PENDING` order. **A rider who cancels after the match cancels the trip, and Order Service learns it from `trip.status.changed`; no `order.cancelled` is published, so that order's redemption is not released. Neither is an order that ends `NO_DRIVER`.** Those redemptions stay `REDEEMED` and use up the rider's per-rider limit and the code's usage limit even though no ride took place.
+Closing this means consuming `trip.status.changed` (CANCELLED) and `order.no_driver_found` in Promotion Service too; it is left out of this phase.
+
+**Payment.** Payment Service stores `order_prices.discount` (migration 00005) from `order.created` and charges `price - discount`; the platform commission is on the net amount, and `payment.recorded` carries the net amounts, so the ledger always matches what the rider paid. A cancellation fee is capped at the net price. A discount above the price or a negative one is a permanent error for that event
+(dead-lettered, `PaymentDeadLettered` pages): Order Service never produces one, and guessing between a free ride and the full fare would be worse than stopping. A net of 0 charges nothing (`zero_amount`). A tip is still charged on a free ride.
+
+**Schemas.** `order.created` v4 adds `promoCode` (default `""`) and `discount` (long, default 0): BACKWARD compatible, tested by decoding a v3 message with the v4 reader and a v4 message with a v3 reader. New schema `promotion.redeemed` (all fields after the identifiers defaulted). Orders booked before promotions have an empty code and discount 0 everywhere.
+
+**Known limitations.**
+- **Soft limits and the unreleased redemptions** above.
+- **Codes are guessable.** A code is a short string; validation is rate limited per rider (2 a second, burst 10), which slows enumeration but is not a defence against a determined one. There is no per-code attempt lock-out and no targeting, so a leaked code is usable by anyone who meets its limits.
+- **One token, one booking, best effort.** The single-use mark lives in Redis and fails open (see above); a rider with several valid tokens can still book several orders at once, each recorded and bounded only afterwards.
+- **No stacking, no targeting, no referral credit**, by design (out of scope). One code per order.
+- **Admin edits.** Disabling is the only edit; a promotion's rules cannot be changed after creation (create a new code). Disabling does not touch orders that already carry the discount.
+- **The discount is not revalidated after booking.** An order keeps the discount it was booked with even if the code is disabled or expires a moment later.
+- **Egress.** Promotion Service needs Postgres, Kafka, Schema Registry, the OTLP collector and the JWKS endpoint (no Redis); the ingress controller reaches its public port for the apps.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
@@ -754,4 +755,154 @@ func TestEarningsSummaryAndOwnership(t *testing.T) {
 		t.Errorf("a rider reading earnings: %d, want 403", code)
 	}
 	f.assertLedgerBalances()
+}
+
+// ------------------------------------------------------------- promotions ----
+
+// orderWithDiscount is an order booked with a promo code: the price, and the VND the code took off.
+func (f *fixture) orderWithDiscount(rider string, price float64, discount int64) string {
+	f.t.Helper()
+	orderID := newID()
+	err := f.svc.recordOrder(context.Background(), events.OrderCreated{
+		Envelope: events.Envelope{EventID: newID()}, OrderID: orderID, RiderID: rider, Price: fl(price), SurgeMultiplier: 1,
+		PromoCode: "WELCOME10", Discount: discount,
+	})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return orderID
+}
+
+func TestAPromoOrderIsChargedThePriceLessTheDiscountAndCommissionIsOnTheNet(t *testing.T) {
+	f := newFixture(t, defaultPolicy)
+	ctx := context.Background()
+	order, trip := f.orderWithDiscount("rider-1", 100000, 30000), newID()
+
+	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+		t.Fatal(err)
+	}
+	var amount, driver, platform int64
+	if err := f.db.QueryRow(ctx, `SELECT amount, driver_amount, platform_amount FROM payments WHERE trip_id = $1`, trip).
+		Scan(&amount, &driver, &platform); err != nil {
+		t.Fatal(err)
+	}
+	// 70,000 charged; 20% of that, not of 100,000, is the platform's.
+	if amount != 70000 || driver != 56000 || platform != 14000 {
+		t.Errorf("payment = %d (driver %d, platform %d), want 70000 (56000, 14000)", amount, driver, platform)
+	}
+	if got := f.balance(riderAccount("rider-1")); got != -70000 {
+		t.Errorf("rider balance = %d, want -70000", got)
+	}
+	f.assertLedgerBalances()
+
+	// payment.recorded carries the net amounts that were charged.
+	var payload []byte
+	f.db.QueryRow(ctx, `SELECT payload FROM outbox WHERE source = 'payment-service'`).Scan(&payload)
+	var rec events.PaymentRecorded
+	if err := json.Unmarshal(payload, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Amount != 70000 || rec.DriverAmount != 56000 || rec.PlatformAmount != 14000 {
+		t.Errorf("payment.recorded = %+v", rec)
+	}
+}
+
+func TestTheDiscountIsStoredWithTheOrderAndTheFirstCopyWins(t *testing.T) {
+	f := newFixture(t, defaultPolicy)
+	ctx := context.Background()
+	orderID := newID()
+	for _, d := range []int64{10000, 40000} { // a redelivered or conflicting copy must not move the discount
+		if err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Price: fl(80000), Discount: d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.scalar(`SELECT discount FROM order_prices WHERE order_id = $1`, orderID); got != 10000 {
+		t.Errorf("discount = %d, want 10000", got)
+	}
+}
+
+func TestAFreeRideIsASkippedPaymentNotAZeroCharge(t *testing.T) {
+	f := newFixture(t, defaultPolicy)
+	ctx := context.Background()
+	order, trip := f.orderWithDiscount("rider-1", 50000, 50000), newID()
+	before := testutil.ToFloat64(paymentsSkipped.WithLabelValues(skipZeroAmount))
+
+	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.payments(trip); n != 0 {
+		t.Errorf("%d payments for a free ride, want none", n)
+	}
+	if n := f.outboxRows(); n != 0 {
+		t.Errorf("%d payment.recorded for a free ride", n)
+	}
+	if n := f.scalar(`SELECT count(*) FROM ledger_transactions`); n != 0 {
+		t.Errorf("%d ledger transactions for a free ride", n)
+	}
+	if got := testutil.ToFloat64(paymentsSkipped.WithLabelValues(skipZeroAmount)); got != before+1 {
+		t.Errorf("payments_skipped_total{reason=zero_amount} went from %v to %v, want one more", before, got)
+	}
+	// The tip is still the rider's to give.
+	if err := f.svc.onTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 10000)); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.payments(trip); n != 1 {
+		t.Errorf("%d payments after a tip on a free ride, want just the tip", n)
+	}
+}
+
+func TestADiscountThatCannotBeAppliedIsAPermanentError(t *testing.T) {
+	f := newFixture(t, defaultPolicy)
+	ctx := context.Background()
+	for name, discount := range map[string]int64{"more than the price": 100001, "negative": -1} {
+		err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: discount})
+		var p interface{ Permanent() bool }
+		if !errors.As(err, &p) || !p.Permanent() {
+			t.Errorf("%s: error = %v, want a permanent one", name, err)
+		}
+	}
+	if n := f.scalar(`SELECT count(*) FROM order_prices`); n != 0 {
+		t.Errorf("%d orders recorded from refused events", n)
+	}
+	// Equal to the price is allowed: a free ride.
+	if err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: 100000}); err != nil {
+		t.Errorf("a full discount was refused: %v", err)
+	}
+}
+
+func TestAnOrderWithoutAPriceIgnoresADiscount(t *testing.T) {
+	f := newFixture(t, defaultPolicy)
+	orderID := newID()
+	if err := f.svc.recordOrder(context.Background(), events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Discount: 5000}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.scalar(`SELECT discount FROM order_prices WHERE order_id = $1`, orderID); got != 0 {
+		t.Errorf("discount = %d on an order with no price, want 0", got)
+	}
+}
+
+// Cancelling never costs more than the ride would have, and the ride would have cost the net price.
+func TestTheCancellationFeeIsCappedAtTheNetPrice(t *testing.T) {
+	f := newFixture(t, graceFixturePolicy) // fee 15,000
+	ctx := context.Background()
+	order, trip := f.orderWithDiscount("rider-1", 100000, 95000), newID() // the ride would have cost 5,000
+
+	if err := f.assignedAndCancelled(order, trip, "rider-1", 4*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var amount int64
+	if err := f.db.QueryRow(ctx, `SELECT amount FROM payments WHERE trip_id = $1`, trip).Scan(&amount); err != nil {
+		t.Fatal(err)
+	}
+	if amount != 5000 {
+		t.Errorf("fee = %d, want 5000 (the net price)", amount)
+	}
+
+	free, freeTrip := f.orderWithDiscount("rider-2", 40000, 40000), newID()
+	if err := f.assignedAndCancelled(free, freeTrip, "rider-2", 4*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.payments(freeTrip); n != 0 {
+		t.Errorf("%d payments for cancelling a free ride, want none", n)
+	}
 }

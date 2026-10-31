@@ -195,6 +195,22 @@ func TestIssueForDistancePricesTheGivenDistance(t *testing.T) {
 	}
 }
 
+func TestIssueForBaseKeepsTheGivenBaseFareAtANewMultiplier(t *testing.T) {
+	s := signer(t, "k1")
+	now := time.Unix(1_800_000_000, 0)
+	routed := s.IssueForDistance(req, 25, 1.2, now) // a quote priced on a routed distance
+	again := s.IssueForBase(req, routed.BaseFare, 1.6, now.Add(time.Minute))
+	if again.BaseFare != routed.BaseFare || again.Multiplier != 1.6 || again.Price != Price(routed.BaseFare, 1.6) {
+		t.Errorf("re-quote %+v does not keep base fare %v at 1.6", again, routed.BaseFare)
+	}
+	if same := s.IssueForBase(req, routed.BaseFare, 1.2, now); same.QuoteID != routed.QuoteID {
+		t.Errorf("IssueForBase differs from IssueForDistance for the same base fare and multiplier")
+	}
+	if got, err := s.Verify(again.QuoteID, req, now.Add(time.Minute+time.Second)); err != nil || got.BaseFare != routed.BaseFare {
+		t.Errorf("Verify = %+v, %v", got, err)
+	}
+}
+
 func TestQuoteVerifyFailures(t *testing.T) {
 	s := signer(t, "k1")
 	now := time.Unix(1_800_000_000, 0)

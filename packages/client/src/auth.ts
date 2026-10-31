@@ -5,7 +5,7 @@
 // Everything downstream (the REST calls and the WebSocket) only ever sees a
 // token, so swapping in a real login means changing this file.
 
-export type Role = "rider" | "driver";
+export type Role = "rider" | "driver" | "admin";
 
 const AUTH_API = "/auth-api";
 
@@ -23,7 +23,7 @@ interface Session {
 
 let session: Session | null = null;
 
-/** Sign this tab in as a rider or driver. Call once, before any request. */
+/** Sign this tab in as a rider, driver or (the Ops dashboard) admin. Call once, before any request. */
 export function signIn(role: Role, id: string): void {
   session = { role, id };
 }

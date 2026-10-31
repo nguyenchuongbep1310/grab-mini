@@ -28,6 +28,7 @@ import (
 	"grab-mini/pkg/logging"
 	"grab-mini/pkg/metrics"
 	"grab-mini/pkg/outbox"
+	"grab-mini/pkg/promo"
 	"grab-mini/pkg/redisconn"
 	"grab-mini/pkg/serve"
 	"grab-mini/pkg/surge"
@@ -43,10 +44,23 @@ type createOrderRequest struct {
 	// Optional: the quote the rider was shown (GET /quotes on Pricing
 	// Service). Booking with it locks that price; see pricer.Price.
 	QuoteID string `json:"quoteId"`
+	// Optional: the promoToken from GET /promotions/validate (Promotion
+	// Service), bound to this rider, price and vehicle type. It is verified
+	// here, without calling Promotion Service, and its discount locked on the order.
+	PromoToken string `json:"promoToken"`
 
-	// Set by the server once the price is settled, never read from the body.
+	// Set by the server once the price and discount are settled, never read from the body.
 	surgeMultiplier float64
 	price           *float64
+	promoCode       string
+	discount        int64
+}
+
+// writePromoError answers a booking whose promo token was refused.
+func writePromoError(w http.ResponseWriter, e *promoError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(e.Status)
+	json.NewEncoder(w).Encode(map[string]string{"error": e.Message, "code": e.Code})
 }
 
 func isValidLatLng(p *events.LatLng) bool {
@@ -68,6 +82,8 @@ type server struct {
 	codec *eventcodec.Codec
 	// Settles the price of a booking; nil means no surge (tests).
 	pricer *pricer
+	// Verifies promo tokens; nil means the development signer (tests).
+	promos *promoChecker
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +193,29 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// A promo token is checked against the price just settled, so a token for
+	// another price (the quote expired and the price moved) is refused rather than
+	// applied to a different fare. Not applied on a failure here or later: the
+	// deferred release gives the token back along with the quote.
+	if req.PromoToken != "" {
+		pc := s.promos
+		if pc == nil {
+			pc = defaultPromoChecker()
+		}
+		a, err := pc.Apply(ctx, req.RiderID, req.VehicleType, settled.Price, req.PromoToken)
+		var pe *promoError
+		if errors.As(err, &pe) {
+			writePromoError(w, pe)
+			return
+		}
+		req.promoCode, req.discount = a.Code, a.Discount
+		defer func() {
+			if !saved {
+				pc.release(ctx, a)
+			}
+		}()
+	}
+
 	event := events.OrderCreated{
 		Envelope: events.Envelope{
 			EventID: uuid.NewString(),
@@ -193,6 +232,9 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 
 		SurgeMultiplier: settled.Multiplier,
 		Price:           &settled.Price,
+
+		PromoCode: req.promoCode,
+		Discount:  req.discount,
 	}
 
 	// Encode before touching the database: if the schema registry is down
@@ -207,10 +249,15 @@ func (s *server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	// The order and its order.created event commit together, so there is
 	// never an order that nobody is told about. The relay publishes the
 	// event once the transaction is committed.
-	respBody, _ := json.Marshal(map[string]any{
+	resp := map[string]any{
 		"orderId": orderID, "status": "PENDING",
 		"surgeMultiplier": settled.Multiplier, "price": settled.Price, "currency": surge.Currency,
-	})
+		"discount": req.discount, "finalPrice": settled.Price - float64(req.discount),
+	}
+	if req.promoCode != "" {
+		resp["promoCode"] = req.promoCode
+	}
+	respBody, _ := json.Marshal(resp)
 	respBody = append(respBody, '\n')
 
 	var idem *idemRecord
@@ -271,10 +318,10 @@ func (s *server) insertOrderTx(ctx context.Context, tx pgx.Tx, orderID string, r
 		multiplier = 1.0 // an order built without pricing (tests)
 	}
 	_, err := tx.Exec(ctx, `
-		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9)`,
+		INSERT INTO orders (id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, promo_code, discount)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING', $8, $9, $10, $11)`,
 		orderID, req.RiderID, req.Pickup.Lat, req.Pickup.Lng, req.Dropoff.Lat, req.Dropoff.Lng, req.VehicleType,
-		multiplier, req.price,
+		multiplier, req.price, req.promoCode, req.discount,
 	)
 	if err != nil {
 		return err
@@ -305,19 +352,28 @@ type orderView struct {
 	// null on orders booked before surge pricing existed.
 	SurgeMultiplier float64  `json:"surgeMultiplier"`
 	Price           *float64 `json:"price"`
+	// The promo code the order booked with and the VND it takes off the price
+	// (0 and empty for none); FinalPrice is what the rider pays, null with Price.
+	PromoCode  string   `json:"promoCode,omitempty"`
+	Discount   int64    `json:"discount"`
+	FinalPrice *float64 `json:"finalPrice"`
 
 	// The driver it was matched to; never sent, only used to decide who may read it.
 	driverID string
 }
 
-const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, cancelled_at, cancelled_by, cancel_reason, driver_id`
+const orderColumns = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, vehicle_type, status, surge_multiplier, price, promo_code, discount, cancelled_at, cancelled_by, cancel_reason, driver_id`
 
 func queryOrder(ctx context.Context, db *pgxpool.Pool, where string, arg string) (*orderView, error) {
 	var o orderView
 	err := db.QueryRow(ctx, `SELECT `+orderColumns+` FROM orders WHERE `+where+` ORDER BY created_at DESC LIMIT 1`, arg).
-		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.SurgeMultiplier, &o.Price, &o.CancelledAt, &o.CancelledBy, &o.CancelReason, &o.driverID)
+		Scan(&o.ID, &o.RiderID, &o.Pickup.Lat, &o.Pickup.Lng, &o.Dropoff.Lat, &o.Dropoff.Lng, &o.VehicleType, &o.Status, &o.SurgeMultiplier, &o.Price, &o.PromoCode, &o.Discount, &o.CancelledAt, &o.CancelledBy, &o.CancelReason, &o.driverID)
 	if err != nil {
 		return nil, err
+	}
+	if o.Price != nil {
+		final := max(*o.Price-float64(o.Discount), 0)
+		o.FinalPrice = &final
 	}
 	return &o, nil
 }
@@ -436,10 +492,14 @@ func main() {
 	}
 	rdb := redisconn.MustNew(env.RedisAddr)
 	defer rdb.Close()
+	promoSigner, err := promo.SignerFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{db: db, relay: relay, codec: codec, pricer: &pricer{
 		signer: signer, mult: redisMultipliers{rdb}, tolerance: env.QuoteTolerance,
 		cellDeg: surge.CellDegrees(), now: time.Now, claims: redisClaims{rdb},
-	}}
+	}, promos: &promoChecker{signer: promoSigner, claims: redisClaims{rdb}, now: time.Now}}
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })

@@ -160,6 +160,12 @@ const reasonQuoteUsed = "this quote was already used for another booking"
 //     price is locked at booking. If the rider had an expired quote and the
 //     multiplier moved by more than the tolerance, nothing is booked and a
 //     *conflict carries a fresh quote to confirm.
+//   - Distance: Pricing Service works the base fare out from the routed
+//     distance, which Order Service does not have. A re-pricing that follows a
+//     quote (expired, reused, or unchecked) therefore keeps the base fare the
+//     quote's signed body carries, and so does the replacement quote of a 409,
+//     so only the multiplier moves. With no quote at all there is no routed
+//     distance to keep and the base fare is worked out from the straight line.
 //   - A forged, damaged or mismatched quote is errInvalidQuote.
 //   - A quote buys one booking: the first to book with it marks it used (SET NX
 //     in Redis, kept for the quote's remaining life); a second gets a
@@ -186,10 +192,10 @@ func (p *pricer) Price(ctx context.Context, riderID string, req createOrderReque
 				case cerr != nil:
 					bookingPricing.WithLabelValues("quote_unchecked").Inc()
 					log.Printf("quote single-use check failed, pricing at the current multiplier: %v", cerr)
-					return p.repriced(qr, p.currentMultiplier(ctx, qr)), nil
+					return p.repriced(qr, p.currentMultiplier(ctx, qr), q.BaseFare), nil
 				case !first:
 					bookingPricing.WithLabelValues("quote_reused").Inc()
-					return pricing{}, &conflict{NewQuote: p.signer.Issue(qr, p.currentMultiplier(ctx, qr), now), Reason: reasonQuoteUsed}
+					return pricing{}, &conflict{NewQuote: p.signer.IssueForBase(qr, q.BaseFare, p.currentMultiplier(ctx, qr), now), Reason: reasonQuoteUsed}
 				}
 			}
 			bookingPricing.WithLabelValues("quote").Inc()
@@ -198,15 +204,15 @@ func (p *pricer) Price(ctx context.Context, riderID string, req createOrderReque
 			current := p.currentMultiplier(ctx, qr)
 			if math.Abs(current-q.Multiplier) > p.tolerance+1e-9 {
 				bookingPricing.WithLabelValues("requote").Inc()
-				return pricing{}, &conflict{NewQuote: p.signer.Issue(qr, current, now)}
+				return pricing{}, &conflict{NewQuote: p.signer.IssueForBase(qr, q.BaseFare, current, now)}
 			}
-			return p.repriced(qr, current), nil
+			return p.repriced(qr, current, q.BaseFare), nil
 		default:
 			bookingPricing.WithLabelValues("invalid_quote").Inc()
 			return pricing{}, errInvalidQuote
 		}
 	}
-	return p.repriced(qr, p.currentMultiplier(ctx, qr)), nil
+	return p.repriced(qr, p.currentMultiplier(ctx, qr), 0), nil
 }
 
 func (p *pricer) currentMultiplier(ctx context.Context, qr surge.QuoteRequest) float64 {
@@ -214,8 +220,13 @@ func (p *pricer) currentMultiplier(ctx context.Context, qr surge.QuoteRequest) f
 	return p.mult.Multiplier(ctx, qr.Vehicle, cell)
 }
 
-func (p *pricer) repriced(qr surge.QuoteRequest, multiplier float64) pricing {
+// repriced prices the booking at multiplier. baseFare is the fare before surge
+// carried by a quote the rider held (0 when there is none or it carries none),
+// kept as it is; without it the fare comes from the straight-line distance.
+func (p *pricer) repriced(qr surge.QuoteRequest, multiplier, baseFare float64) pricing {
 	bookingPricing.WithLabelValues("repriced").Inc()
-	base := surge.BaseFare(qr.Vehicle, surge.HaversineKm(qr.PickupLat, qr.PickupLng, qr.DropoffLat, qr.DropoffLng))
-	return pricing{Multiplier: multiplier, Price: surge.Price(base, multiplier)}
+	if baseFare <= 0 {
+		baseFare = surge.BaseFare(qr.Vehicle, surge.HaversineKm(qr.PickupLat, qr.PickupLng, qr.DropoffLat, qr.DropoffLng))
+	}
+	return pricing{Multiplier: multiplier, Price: surge.Price(baseFare, multiplier)}
 }

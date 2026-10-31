@@ -128,37 +128,56 @@ func (e *errOrderUnknown) Error() string {
 
 // ----------------------------------------------------------- order prices ----
 
-// recordOrder keeps the price locked at booking, which is what the rider is
-// charged when the trip completes. order.created is the source because it is
-// the one event that carries the price and the rider together; the table is a
-// local copy so a trip event never needs a call to Order Service. A redelivery
-// hits the primary key and changes nothing.
+// recordOrder keeps the price locked at booking, and the discount a promo code took
+// off it; what the rider is charged when the trip completes is price - discount.
+// order.created is the source because it is the one event that carries them and the
+// rider together; the table is a local copy so a trip event never needs a call to
+// Order Service. A redelivery hits the primary key and changes nothing.
 func (s *service) recordOrder(ctx context.Context, evt events.OrderCreated) error {
 	if evt.OrderID == "" || evt.RiderID == "" {
 		return &invalidEvent{"order.created without orderId or riderId"}
 	}
 	var price *int64
+	var discount int64
 	if evt.Price != nil {
 		p, err := priceToMinor(*evt.Price)
 		if err != nil {
 			return err
 		}
 		price = &p
+		// Order Service never locks more than the price. If one arrives it is a bug
+		// upstream; refuse it here (and page, through the dead-letter topic) rather than
+		// guess between a free ride and the full fare.
+		if err := checkDiscount(evt.Discount, p); err != nil {
+			return err
+		}
+		discount = evt.Discount
 	}
 	_, err := s.db.Exec(ctx,
-		`INSERT INTO order_prices (order_id, rider_id, price) VALUES ($1, $2, $3) ON CONFLICT (order_id) DO NOTHING`,
-		evt.OrderID, evt.RiderID, price)
+		`INSERT INTO order_prices (order_id, rider_id, price, discount) VALUES ($1, $2, $3, $4) ON CONFLICT (order_id) DO NOTHING`,
+		evt.OrderID, evt.RiderID, price, discount)
 	return err
 }
 
 type orderInfo struct {
-	riderID string
-	price   *int64 // nil: the order has no price
+	riderID  string
+	price    *int64 // nil: the order has no price
+	discount int64  // taken off price (0 for none)
+}
+
+// net is what the rider pays for the ride: the price less the discount; nil when
+// the order has no price.
+func (o orderInfo) net() *int64 {
+	if o.price == nil {
+		return nil
+	}
+	n := *o.price - o.discount
+	return &n
 }
 
 func (s *service) lookupOrder(ctx context.Context, orderID string) (orderInfo, error) {
 	var o orderInfo
-	err := s.db.QueryRow(ctx, `SELECT rider_id, price FROM order_prices WHERE order_id = $1`, orderID).Scan(&o.riderID, &o.price)
+	err := s.db.QueryRow(ctx, `SELECT rider_id, price, discount FROM order_prices WHERE order_id = $1`, orderID).Scan(&o.riderID, &o.price, &o.discount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return orderInfo{}, &errOrderUnknown{orderID}
 	}
@@ -179,7 +198,7 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 		if err != nil {
 			return err
 		}
-		c, skip := s.policy.Fare(order.price)
+		c, skip := s.policy.Fare(order.net())
 		if skip != "" {
 			return s.skip(skip, evt.TripID, "fare")
 		}
@@ -209,7 +228,7 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 		if err != nil {
 			return err
 		}
-		c, skip := s.policy.Cancellation(evt.CancelledBy, order.price, assignedFor)
+		c, skip := s.policy.Cancellation(evt.CancelledBy, order.net(), assignedFor)
 		if skip != "" {
 			return s.skip(skip, evt.TripID, "cancellation")
 		}

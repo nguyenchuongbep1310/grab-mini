@@ -14,6 +14,8 @@
     {"name": "dropoff", "type": "LatLng"},
     {"name": "vehicleType", "type": "string", "default": "CAR"},
     {"name": "surgeMultiplier", "type": "double", "default": 1.0},
-    {"name": "price", "type": ["null", "double"], "default": null}
+    {"name": "price", "type": ["null", "double"], "default": null},
+    {"name": "promoCode", "type": "string", "default": ""},
+    {"name": "discount", "type": "long", "default": 0}
   ]
 }

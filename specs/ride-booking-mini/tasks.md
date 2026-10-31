@@ -67,11 +67,11 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 - [x] 8.5 Infra and docs: dev.sh, k8s, alerts, runbook, design/production-design/guide
 
 ### Phase 9 — Promotions
-- [ ] 9.1 `promotion-service`: promotions, validation with a signed `promoToken`, redemptions, `promotion.redeemed`
-- [ ] 9.2 `order.created` v4 (`promoCode`, `discount`); Order Service verifies the token and locks the discount
-- [ ] 9.3 Payment Service charges the net amount
+- [x] 9.1 `promotion-service`: promotions, validation with a signed `promoToken`, redemptions, `promotion.redeemed`
+- [x] 9.2 `order.created` v4 (`promoCode`, `discount`); Order Service verifies the token and locks the discount
+- [x] 9.3 Payment Service charges the net amount
 - [ ] 9.4 Rider App promo field; Ops dashboard promotion management (admin)
-- [ ] 9.5 Infra and docs
+- [x] 9.5 Infra and docs
 
 ### Phase 10 — Chat
 - [ ] 10.1 `chat-service`: messages, participants from `trip.status.changed`, `chat.message.sent`

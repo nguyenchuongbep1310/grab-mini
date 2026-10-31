@@ -11,6 +11,7 @@ const (
 	TopicTripStatusChanged    = "trip.status.changed"
 	TopicTripRated            = "trip.rated"
 	TopicPaymentRecorded      = "payment.recorded"
+	TopicPromotionRedeemed    = "promotion.redeemed"
 )
 
 func DeadLetterTopic(topic string) string {

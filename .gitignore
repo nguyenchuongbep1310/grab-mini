@@ -10,6 +10,7 @@ dist/
 /services/*/notification-service
 /services/*/rating-service
 /services/*/payment-service
+/services/*/promotion-service
 .dev/
 
 # Redis snapshots from local test instances

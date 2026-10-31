@@ -32,14 +32,15 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 
 | Service | Responsibility | Consumes | Produces | Storage |
 |---|---|---|---|---|
-| Order Service | Accepts booking requests, manages orders, keeps each order's status current | `order.matched`, `order.no_driver_found` | `order.created` | Postgres |
+| Order Service | Accepts booking requests, manages orders, keeps each order's status current; locks the price and, when the booking carries a verified promo token, the discount | `order.matched`, `order.no_driver_found` | `order.created` | Postgres |
 | Pricing Service | Surge pricing: counts demand per pickup cell, samples supply, keeps a multiplier per cell, issues signed price quotes (`GET /quotes`) | `order.created` | | Redis (demand counters, multipliers); no Postgres |
 | Routing Service | Estimates the road distance, travel time and a simple polyline between two points (`GET /route`); a deterministic model (great-circle distance x 1.3, speed by vehicle and hour of day), no map data | | | none (stateless: no Kafka, Postgres or Redis) |
 | Matching Service | Finds the nearest driver | `order.created` | `order.matched`, `order.no_driver_found` | Redis (driver status/geo) |
 | Driver Location Service | Receives & stores driver location | `driver.location.updated` | — | Redis (geo, TTL) |
 | Trip Service | Trip state machine | `order.matched` | `trip.status.changed` | Postgres |
 | Notification Service | Pushes realtime updates to clients | `order.matched`, `order.no_driver_found`, `trip.status.changed`, `driver.location.updated` | — | (stateless, in-memory socket map) |
-| Payment Service | Settles rides: charges the rider through a pluggable provider (sandbox fake only) and books a balanced double-entry ledger entry for the fare, tip and optional cancellation fee | `order.created` (local copy of the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (ledger, payments, outbox) |
+| Promotion Service | Promotions (vouchers): validates a code for a rider, price and vehicle and signs a short-lived `promoToken` (`GET /promotions/validate`); admins create, list and disable promotions; records each order's redemption and releases it on cancel | `order.created`, `order.cancelled` | `promotion.redeemed` | Postgres (promotions, redemptions, outbox) |
+| Payment Service | Settles rides: charges the rider (price less any promo discount) through a pluggable provider (sandbox fake only) and books a balanced double-entry ledger entry for the fare, tip and optional cancellation fee | `order.created` (local copy of the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (ledger, payments, outbox) |
 | Rating Service | Averages each driver's ratings | `trip.rated` | | Postgres (`driver_ratings` with tip totals, `driver_reviews`, deduped by eventId in the same transaction) |
 | ksqlDB (replaces the planned Analytics Service) | Stream processing: per-minute counts, a stream-stream join for match latency, ratings, throughput | all topics | analytics tables | Kafka (changelog topics) |
 
@@ -47,7 +48,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 
 | Topic | Partition key | Partitions (local) | Notes |
 |---|---|---|---|
-| `order.created` | `orderId` | 3 | |
+| `order.created` | `orderId` | 3 | Avro v4: also carries `promoCode` (default `""`) and `discount` (default 0, whole VND), both locked at booking. See section 4f |
 | `order.matched` | `orderId` | 3 | |
 | `order.no_driver_found` | `orderId` | 3 | |
 | `order.cancelled` | `orderId` | 3 | Published by Order Service (via the outbox) when a rider cancels a `PENDING` order. Fields: `riderId`, `cancelledBy`, `reason` (all defaulted, so the schema stays backward compatible). Consumed by Matching (Redis key `order:{id}:cancelled`, 24h), Trip Service (`trip-order-cancelled-group`) and Notification |
@@ -55,6 +56,7 @@ Principle: **clients never connect to Kafka directly**. All realtime updates to 
 | `trip.status.changed` | `tripId` | 3 | On `CANCELLED` also carries `cancelledBy` (`RIDER`/`DRIVER`) and `reason`; Order Service consumes it to move a `MATCHED` order to `CANCELLED` |
 | `trip.rated` | `driverId` | 3 | Published by Trip Service when a rider rates a COMPLETED trip (once per trip); carries `comment`, `tipAmount` (whole VND, 0 to 1,000,000, recorded only) and `currency` (`VND`), both added as defaulted Avro fields |
 | `payment.recorded` | `tripId` | 3 | Published by Payment Service (via the outbox) for every charge it records: fare, tip or cancellation fee, captured or declined. Amounts are whole VND; the split between driver and platform is included. See [production-design.md](./production-design.md#16-payments-payment-service-done) |
+| `promotion.redeemed` | `orderId` | 3 | Published by Promotion Service (via the outbox) once for each `order.created` that carried a `promoCode`: `code`, `discount`, `riderId` and `status` (`REDEEMED`, or `OVER_LIMIT` when a limit had been reached by the time the order was recorded). For analytics; nothing waits for it. See section 4f |
 | `*.DLQ` | same as source topic | 1 | Dead-letter topic per topic above |
 
 Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so each service scales independently without reading each other's events.
@@ -63,7 +65,7 @@ Consumer group naming: `<service-name>-group` (e.g. `matching-service-group`) so
 
 **Order** (Postgres)
 ```
-id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER|CANCELLED], createdAt, cancelledAt, cancelledBy, cancelReason
+id, riderId, pickupLat, pickupLng, dropoffLat, dropoffLng, vehicleType[CAR|BIKE], status[PENDING|MATCHED|NO_DRIVER|CANCELLED], surgeMultiplier, price, promoCode, discount, createdAt, cancelledAt, cancelledBy, cancelReason
 (status starts PENDING and is moved by Order Service's own consumer of the matching outcomes; `POST /orders/{id}/cancel` moves PENDING -> CANCELLED with a conditional UPDATE, so it and a concurrent order.matched cannot both win; trip cancellations move MATCHED -> CANCELLED through a separate function)
 ```
 
@@ -109,7 +111,19 @@ Routing Service (port 3009) is HTTP only and stateless: no Kafka, no database, n
 - **Model.** `distanceKm` = great-circle distance x 1.3 (a detour factor for a street grid). `durationSec` = distance / speed, where the speed depends on the vehicle and the hour of day in `Asia/Ho_Chi_Minh` (UTC+7, no daylight saving): slower at the peaks 07:00 to 09:00 and 17:00 to 19:00, faster at night. The polyline is the straight line between the two points in steps of about a kilometre (at most 20 segments). The same inputs at the same hour always give the same answer.
 - **Limits.** Bad coordinates or an unknown vehicle give 400; a modelled distance above 200 km gives 422.
 - **Callers.** Pricing Service asks for the distance behind a quote with a 300 ms timeout and **forwards the rider's own bearer token** (there is no service-to-service credential in this system, and Routing accepts any role); when Routing is off, slow or failing it uses the straight-line distance and counts it in `pricing_routing_fail_open_total{reason}`. The Rider App will call it for the distance and ETA (task 8.4).
-- **Not routed.** Order Service never calls Routing: a booking whose quote is expired (and re-priced) or absent, and the new quote of a 409, use the straight-line distance, so such a price can differ from the routed quote the rider saw ([production-design §17](production-design.md)).
+- **Order Service does not call Routing**, so it cannot work out a routed distance itself. A booking whose quote is expired, reused or unchecked, and the replacement quote of a 409, therefore keep the **base fare carried in the quote's signed body** (which Pricing computed from the routed distance) and change only the multiplier. Only a booking with **no quote at all** has no routed distance to keep and is priced on the straight line, so that price can differ from a routed quote the rider never asked for ([production-design §17](production-design.md)).
+
+## 4f. Promotions
+
+Promotion Service (port 3010; Postgres and the outbox, no Redis) keeps `promotions(code, kind PERCENT|FIXED, value, max_discount, min_fare, vehicle_type, valid_from, valid_to, usage_limit, per_rider_limit, disabled_at)` and `redemptions(order_id, code, rider_id, discount, status, ...)`, unique per `(code, order_id)`. Amounts are whole VND.
+
+- **Validate, do not call, at booking.** `GET /promotions/validate?code&price&vehicleType` (rider token) returns `{code, discount, price, finalPrice, currency, promoToken, expiresAt}`, or a 404/422 whose body is `{error, code}` with `code` one of `not_found`, `not_started`, `expired`, `min_fare`, `wrong_vehicle`, `limit_reached`, `already_used`. The discount is `price x value / 100` rounded down and capped at `max_discount` (PERCENT) or `value` (FIXED), never more than the price, so the final price is never negative. A disabled code is `not_found`. The `promoToken` is `base64url(JSON) "." base64url(HMAC-SHA256)` like a quote id (`services/pkg/promo`), valid 10 minutes, bound to rider, code, price, vehicle type and discount, signed with `PROMO_SECRET` (a key of its own, shared by Promotion Service and Order Service; the public development default is refused outside `APP_ENV=development`).
+- **Booking.** `POST /orders` takes an optional `promoToken`. Order Service verifies it locally against the price it has just settled (it never calls Promotion Service): forged, expired, another rider's, for another price or for another vehicle type is `400 {error, code}` with `code` `promo_invalid`, `promo_expired`, `promo_wrong_rider`, `promo_wrong_price` or `promo_wrong_vehicle`. A token buys one booking (Redis `SET NX`, like a quote): a second use is `409 promo_used`; if Redis cannot be reached the discount is still applied (counted in `orders_promo_total{result="unchecked"}`). The order stores `promo_code` and `discount` (migration 00010); the response and `GET /orders/{id}` carry `promoCode`, `discount` and `finalPrice`; `order.created` v4 carries `promoCode` and `discount`.
+- **Redemption.** Promotion Service consumes `order.created` (group `promotion-service-group`) and, for an order with a code, saves the redemption, the eventId dedupe row and the `promotion.redeemed` outbox row in one transaction, under the promotion's row lock so the counts are exact. A limit already reached is recorded as `OVER_LIMIT`, never a failure: the order exists with its discount. `order.cancelled` releases the redemption (`RELEASED`); a cancellation seen before the order leaves a marker so the redemption is recorded as released.
+- **Limits are soft.** The per-rider and global limits are checked at validation and again at redemption, but two orders in flight can both pass validation before either is recorded, so a limit can be exceeded by the number of orders in flight. Those are the `OVER_LIMIT` rows and the `PromotionRedeemedOverLimit` alert. A cancel of a `MATCHED` order's trip (and a `NO_DRIVER` order) publishes no `order.cancelled`, so its redemption is not released ([production-design §18](production-design.md)).
+- **Payment.** Payment Service keeps `discount` next to the price in its local copy of the order and charges `price - discount`; the commission is on that net amount and `payment.recorded` carries the net amounts. A free ride (net 0) is skipped (`payments_skipped_total{reason="zero_amount"}`).
+- **Admin.** `POST /promotions`, `GET /promotions`, `POST /promotions/{code}/disable` need an `admin` token. Disabling stops new validations only.
+- **Frontend.** `validatePromotion()` and the admin helpers are in `packages/client`; the Rider App promo field and the Ops dashboard screen are task 9.4.
 
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.

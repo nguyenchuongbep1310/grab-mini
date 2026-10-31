@@ -78,11 +78,15 @@ func fingerprint(req createOrderRequest) string {
 		Pickup, Dropoff latLng
 		VehicleType     string
 		QuoteID         string
+		// Left out when empty, so the fingerprint of a booking without a promo
+		// code is what it was before promotions existed (keys live for 24 hours).
+		PromoToken string `json:",omitempty"`
 	}{
 		Pickup:      latLng{req.Pickup.Lat, req.Pickup.Lng},
 		Dropoff:     latLng{req.Dropoff.Lat, req.Dropoff.Lng},
 		VehicleType: string(req.VehicleType),
 		QuoteID:     req.QuoteID,
+		PromoToken:  req.PromoToken,
 	}
 	b, _ := json.Marshal(norm) // a fixed struct: the field order is the declaration order
 	sum := sha256.Sum256(b)

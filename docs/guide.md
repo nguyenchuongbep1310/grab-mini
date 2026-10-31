@@ -40,7 +40,7 @@ Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in
 ### Take a ride
 
 1. In the **Rider App**, pick **Car** or **Bike**, tap the map to drop a destination pin, then **Book ride**. Next to the price the app shows the route length and an estimated time ("3.2 km · about 8 min"), and after the match it shows how long until the driver arrives, then until you reach the destination (from Routing Service, a model without real map data; if that service is down the line is simply hidden).
-2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes.
+2. The rider is matched with the nearest driver of that type and can watch them move on the map. Five drivers are seeded around central Ho Chi Minh City: `driver-1` to `driver-3` drive cars, `driver-4` and `driver-5` drive bikes. Three demo promotion codes are seeded too (`promotion-service seed-dev`, development only): `WELCOME10` (10% off, at most 20,000 VND, fare 40,000 or more, once per rider), `FLAT15K` (15,000 VND off a fare of 40,000 or more, 5 times per rider) and `BIKE5K` (5,000 VND off a BIKE trip). Until the Rider App has a promo field (task 9.4) try them with the API calls under "Promotion Service" below.
 3. Open the **Driver App as that driver**, e.g. `http://localhost:5172/?driver=driver-2`. **Confirm pickup**, then **Complete trip**, and the rider's timeline follows along.
 4. Back in the **Rider App**, rate the driver (1 to 5 stars) and submit. You can also add a comment and a tip (0, 10k, 20k, 50k or custom VND). A tip is only recorded, there is no payment system: Rating Service keeps a per-driver total and the driver's app shows it in the toast. The driver's app shows a toast and their updated average.
 
@@ -132,7 +132,8 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | Auth Service | 3005 | | | none (development token issuer) |
 | Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored; asks Routing Service for the distance (`ROUTING_URL`), falling back to the straight line |
 | Routing Service | 3009 | | | none (stateless; a deterministic distance and travel-time model, no maps data: [production-design §17](../specs/ride-booking-mini/production-design.md)) |
-| Payment Service | 3008 | `order.created` (the locked price), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (double-entry ledger, payments); a sandbox `PaymentProvider`, no real card processor ([production-design §16](../specs/ride-booking-mini/production-design.md)) |
+| Promotion Service | 3010 | `order.created`, `order.cancelled` (to record and release redemptions) | `promotion.redeemed` | Postgres (promotions, redemptions, outbox); validation signs a short-lived `promoToken` that Order Service checks without calling it ([production-design §18](../specs/ride-booking-mini/production-design.md)) |
+| Payment Service | 3008 | `order.created` (the locked price and discount), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (double-entry ledger, payments); a sandbox `PaymentProvider`, no real card processor ([production-design §16](../specs/ride-booking-mini/production-design.md)) |
 | Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
 | `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
 
@@ -195,6 +196,15 @@ curl "localhost:3004/drivers/driver-1/reviews?limit=20&before=<createdAt>"   # a
 
 # Routing Service (any valid token: rider, driver or admin). Distance by road (great-circle x 1.3) and travel time for the hour in Vietnam
 curl "localhost:3009/route?fromLat=10.776&fromLng=106.700&toLat=10.790&toLng=106.710&vehicle=BIKE" -H "Authorization: Bearer <token>"   # {"distanceKm": 2.47, "durationSec": 405, "polyline": [{"lat":...,"lng":...}, ...], "vehicle": "BIKE", "model": "detour-1.3"}; vehicle is CAR (default) or BIKE; 400 for bad input, 422 beyond 200 km
+
+# Promotion Service. Riders check a code for a price (whole VND) and vehicle; admins manage promotions (an admin token: {"role":"admin","id":"ops-1"})
+curl "localhost:3010/promotions/validate?code=WELCOME10&price=87000&vehicleType=CAR" -H "Authorization: Bearer <rider token>"   # {"code":"WELCOME10","discount":8700,"price":87000,"finalPrice":78300,"promoToken":"...","expiresAt":...}; otherwise 404/422 {"error":"...","code":"not_found|not_started|expired|min_fare|wrong_vehicle|limit_reached|already_used"}
+curl -X POST localhost:3001/orders -H "Authorization: Bearer <rider token>" -H "Content-Type: application/json" \
+  -d '{"pickup":{"lat":10.776,"lng":106.700},"dropoff":{"lat":10.790,"lng":106.710},"promoToken":"<promoToken>"}'   # locks the discount: {"orderId":...,"price":87000,"discount":8700,"finalPrice":78300,"promoCode":"WELCOME10"}; a stale or foreign token is 400 {"code":"promo_expired|promo_wrong_price|promo_wrong_rider|promo_wrong_vehicle|promo_invalid"}, a used one 409 promo_used
+curl localhost:3010/promotions -H "Authorization: Bearer <admin token>"   # every promotion with how often it was redeemed (redeemed, overLimit)
+curl -X POST localhost:3010/promotions -H "Authorization: Bearer <admin token>" -H "Content-Type: application/json" \
+  -d '{"code":"SUMMER20","kind":"PERCENT","value":20,"maxDiscount":30000,"minFare":50000,"vehicleType":"CAR","validTo":"2027-01-31T00:00:00Z","usageLimit":100,"perRiderLimit":2}'   # kind PERCENT or FIXED; only code, kind, value and validTo are required
+curl -X POST localhost:3010/promotions/SUMMER20/disable -H "Authorization: Bearer <admin token>"   # stops new uses; orders that carry its discount keep it
 
 # Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
 curl "localhost:3008/payments?tripId=<tripId>" -H "Authorization: Bearer <token>"   # fare, tip and cancellation fee of one trip, plus the captured total

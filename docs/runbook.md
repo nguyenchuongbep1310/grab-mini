@@ -368,6 +368,34 @@ transaction, so reprocessing is always safe.
 
 **Do not:** edit or delete `ledger_*` (a trigger blocks it; the ledger is append-only). To correct a mistake, add a reversing transaction.
 
+## Promotions
+
+**Alerts:** `PromotionConsumerLagHigh` (ticket), `PromotionDeadLettered` (ticket), `PromotionRedeemedOverLimit` (ticket), `PromoTokensRefused` (ticket).
+**Meaning:** promotions touch pricing, but they fail softly. Validation is a read; a booking never calls Promotion Service (Order Service verifies the signed token itself), so
+**Promotion Service being down only stops riders from applying a new code**, it never blocks a booking, and an order that already carries a discount is charged net by Payment Service regardless.
+What can go wrong is bookkeeping: a redemption recorded late or not at all, so a limit is enforced late.
+
+1. **Validation fails (riders cannot apply a code).** Look at the `/readyz` of promotion-service (see [Pods not ready](#pods-not-ready)); the 4xx answers are not faults, they carry a `code`:
+   `not_found` (also a disabled code), `not_started`, `expired`, `min_fare`, `wrong_vehicle`, `limit_reached`, `already_used`. `promotion_validations_total{result}` counts each.
+2. **`PromotionConsumerLagHigh`:** see [Consumer lag](#consumer-lag), group `promotion-service-group` (one group reads `order.created` and `order.cancelled`). While it lags, redemptions are counted too low, so
+   validation lets more riders through a limit (they will show as `OVER_LIMIT` once recorded). It is safe to wait for it to catch up.
+3. **`PromotionDeadLettered`:** `topic` says which event. An order has its discount and was charged net, but the redemption was not recorded (or not released). Inspect with `dlq-redrive -topic <topic> -dry-run`. Common causes:
+   - `order booked with unknown promotion "CODE"`: Promotion Service has no such code. The usual reason is a different `PROMO_SECRET` or database between environments, or promotions restored from an older backup. Re-create the promotion with the same code, then redrive.
+   - `invalid promotion event`: the event is malformed (no `orderId` or `riderId`, a negative discount); redriving is pointless, fix the sender.
+   Redriving is safe: the redemption is unique per `(code, order_id)` and the event is deduplicated by `eventId`.
+4. **`PromotionRedeemedOverLimit`:** more than 10 orders in an hour were recorded past a limit. A few are expected (two orders in flight can both pass validation), a stream is not. `reason` says which limit.
+   ```sql
+   SELECT code, over_limit_reason, count(*) FROM redemptions WHERE status = 'OVER_LIMIT' AND redeemed_at > now() - interval '1 hour' GROUP BY 1, 2 ORDER BY 3 DESC;
+   SELECT rider_id, count(*) FROM redemptions WHERE code = 'WELCOME10' GROUP BY 1 ORDER BY 2 DESC LIMIT 10;   -- one rider hammering a code?
+   ```
+   If a code is being abused, disable it (`POST /promotions/{code}/disable`, admin token): new validations stop at once. Orders that already carry the discount keep it; there is no clawback.
+5. **`PromoTokensRefused`:** Order Service refuses tokens as *invalid* (not merely expired or for another price: those are riders' own doing and never alert). The cause is almost always `PROMO_SECRET` differing between order-service and promotion-service
+   (a rotation that reached one of them). Compare the `grab-mini-promo` Secret both Deployments mount and restart both. `orders_promo_total{result}` shows `invalid`, `expired`, `wrong_price`, `wrong_rider`, `wrong_vehicle`, `used` and `unchecked` (Redis down: the discount was still applied).
+6. **Limits look wrong.** Counts are `redemptions` with `status = 'REDEEMED'`. A cancelled order's redemption is `RELEASED` and no longer counts, **but only when `order.cancelled` was published, which happens when a rider cancels a PENDING order.** A cancelled trip after the match, and an order that ended `NO_DRIVER`,
+   keep their redemption and keep using up the rider's limit (a known gap, [production-design §18](../specs/ride-booking-mini/production-design.md)). To give one back by hand:
+   `UPDATE redemptions SET status = 'RELEASED', released_at = now() WHERE code = '...' AND order_id = '...';`.
+7. **Reading the money.** A promo order's payment is `price - discount` (`order_prices.discount` in Payment Service); `payments_skipped_total{reason="zero_amount"}` counts free rides. Rotating `PROMO_SECRET` invalidates only tokens issued in the last 10 minutes.
+
 ## Pods not ready
 
 **Alerts:** `DeploymentReplicasUnavailable`.
@@ -413,6 +441,8 @@ Do not replay `driver.location.updated` (old locations are discarded because of 
 - **Token signing key (Ed25519):** only the issuer holds the private key. Rotating it does not break live tokens: give the issuer the new
   key and keep the old public key in `JWT_PREVIOUS_PUBLIC_KEYS` until the last token signed with it expires (`TOKEN_TTL` + 10 minutes of cache).
   Services that use JWKS need no restart. Details in [security.md](security.md).
+- **Quote and promo secrets (`QUOTE_SECRET`, `PROMO_SECRET`):** each is shared by two services (Pricing and Order; Promotion and Order). Change the Secret (`grab-mini-quote`, `grab-mini-promo`) and restart **both** services together; tokens and quotes issued
+  before the switch stop verifying (at most 60 seconds of quotes, 10 minutes of promo tokens), and riders just ask again. Until both have restarted, bookings carrying one are refused (400), which is `PromoTokensRefused` for promo tokens.
 - **Schema Registry password:** change the `grab-mini-schema-registry` Secret, then restart (it is read at startup).
 - **Postgres password:** change it in the `grab-mini-db-<service>` Secret, then restart; the service reads `DATABASE_URL` at startup. The `backup-*`/`retention-*`
   CronJobs read the same Secret on every run, so they need nothing.

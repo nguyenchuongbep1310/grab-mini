@@ -63,7 +63,8 @@ func (p Policy) commissioned(kind string, total int64) charge {
 }
 
 // Fare is the charge for a COMPLETED trip: exactly the price locked at
-// booking. skip is the reason there is nothing to charge, or empty.
+// booking less any promo discount (the caller passes that net price; the
+// commission is taken on it). skip is the reason there is nothing to charge, or empty.
 func (p Policy) Fare(price *int64) (c charge, skip string) {
 	if price == nil {
 		return charge{}, skipNoPrice
@@ -105,7 +106,8 @@ func (p Policy) CancellationApplies(cancelledBy string) (skip string) {
 // yet) produces no trip event and never reaches here. assignedFor is how long the
 // driver had been assigned when the trip was cancelled; nil means the assignment
 // was never seen, which is not held against the rider. The driver cancelling is
-// never the rider's cost.
+// never the rider's cost. price is the order's net price (after any promo discount),
+// which caps the fee: cancelling never costs more than the ride would have.
 func (p Policy) Cancellation(cancelledBy string, price *int64, assignedFor *time.Duration) (c charge, skip string) {
 	if skip := p.CancellationApplies(cancelledBy); skip != "" {
 		return charge{}, skip

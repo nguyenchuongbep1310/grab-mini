@@ -10,6 +10,7 @@ const TRIP_API = "/trip-api";
 const RATING_API = "/rating-api";
 const PRICING_API = "/pricing-api";
 const ROUTING_API = "/routing-api";
+const PROMOTION_API = "/promotion-api";
 
 export interface LatLng {
   lat: number;
@@ -32,6 +33,12 @@ export interface Order {
   surgeMultiplier?: number;
   /** Price locked at booking (VND); null for orders from before surge pricing. */
   price?: number | null;
+  /** The promo code the order was booked with; absent for none. */
+  promoCode?: string;
+  /** VND the promo code takes off `price` (0 for none), locked at booking. */
+  discount?: number;
+  /** What the rider pays: `price - discount`; null with `price`. */
+  finalPrice?: number | null;
 }
 
 /** A price offer from Pricing Service, good for booking until it expires. */
@@ -126,6 +133,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
  * Books a ride. With a quoteId the price shown in the quote is honoured; if the
  * quote has expired and the price moved, this rejects with an ApiError of
  * status 409 whose `body.newQuote` is the price to confirm (see `newQuoteOf`).
+ * With a promoToken (from `validatePromotion`) its discount is locked on the
+ * order; a token that is expired, for another price or already used rejects
+ * with an ApiError whose `body.code` says why (see `promoBookingErrorOf`).
  */
 export async function createOrder(
   riderId: string,
@@ -134,13 +144,21 @@ export async function createOrder(
   vehicleType: VehicleType,
   quoteId?: string,
   retryDelayMs = 300,
-): Promise<{ orderId: string; price?: number; surgeMultiplier?: number }> {
+  promoToken?: string,
+): Promise<{ orderId: string; price?: number; surgeMultiplier?: number; discount?: number; finalPrice?: number; promoCode?: string }> {
   // One key per booking attempt, reused by every retry of it, so a request that
   // reached the server but whose answer was lost books one order, not two.
   const init: RequestInit = {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": newIdempotencyKey() },
-    body: JSON.stringify({ riderId, pickup, dropoff, vehicleType, ...(quoteId ? { quoteId } : {}) }),
+    body: JSON.stringify({
+      riderId,
+      pickup,
+      dropoff,
+      vehicleType,
+      ...(quoteId ? { quoteId } : {}),
+      ...(promoToken ? { promoToken } : {}),
+    }),
   };
   const maxAttempts = 3;
   for (let attempt = 1; ; attempt++) {
@@ -387,4 +405,142 @@ export function getDriverEarnings(driverId: string, range: { from?: string; to?:
   if (range.to) q.set("to", range.to);
   const qs = q.toString();
   return request(`${PAYMENT_API}/drivers/${driverId}/earnings${qs ? `?${qs}` : ""}`);
+}
+
+// ---- Promotion Service ----------------------------------------------------
+// Amounts are whole VND. Riders check a code before booking; admins manage promotions.
+
+export type PromotionKind = "PERCENT" | "FIXED";
+
+/** Why a code cannot be used for this trip: the `code` of a 404/422 from `validatePromotion`. */
+export type PromoRejectionCode =
+  | "not_found"
+  | "not_started"
+  | "expired"
+  | "min_fare"
+  | "wrong_vehicle"
+  | "limit_reached"
+  | "already_used";
+
+/** A code that applies to a trip: the discount, and a signed token to book with (valid ~10 minutes). */
+export interface PromoValidation {
+  code: string;
+  /** VND taken off `price`. */
+  discount: number;
+  price: number;
+  /** `price - discount`, never below 0. */
+  finalPrice: number;
+  currency: string;
+  /** Pass to `createOrder`; bound to this rider, price and vehicle type. */
+  promoToken: string;
+  /** ISO time the token stops working. */
+  expiresAt: string;
+}
+
+const PROMO_REJECTIONS: readonly string[] = [
+  "not_found",
+  "not_started",
+  "expired",
+  "min_fare",
+  "wrong_vehicle",
+  "limit_reached",
+  "already_used",
+];
+
+/**
+ * Checks a promo code for a trip priced at `price` (VND). Rejects with an ApiError
+ * (404 or 422) when the code cannot be used; `promoRejectionOf` gives the reason.
+ */
+export function validatePromotion(code: string, price: number, vehicleType: VehicleType): Promise<PromoValidation> {
+  const q = new URLSearchParams({ code: code.trim(), price: String(Math.round(price)), vehicleType });
+  return request(`${PROMOTION_API}/promotions/validate?${q}`);
+}
+
+/** The machine-readable reason a code was refused by `validatePromotion`, or null if err isn't one. */
+export function promoRejectionOf(err: unknown): PromoRejectionCode | null {
+  if (!(err instanceof ApiError) || (err.status !== 404 && err.status !== 422)) return null;
+  const code = err.body.code;
+  return typeof code === "string" && PROMO_REJECTIONS.includes(code) ? (code as PromoRejectionCode) : null;
+}
+
+/** Why `createOrder` refused a promo token (a 400, or a 409 for promo_used). */
+export type PromoBookingErrorCode =
+  | "promo_invalid"
+  | "promo_expired"
+  | "promo_wrong_rider"
+  | "promo_wrong_price"
+  | "promo_wrong_vehicle"
+  | "promo_used";
+
+/** The reason `createOrder` refused the promo token, or null if err isn't about one. Apply the code again. */
+export function promoBookingErrorOf(err: unknown): PromoBookingErrorCode | null {
+  if (!(err instanceof ApiError) || (err.status !== 400 && err.status !== 409)) return null;
+  const code = err.body.code;
+  return typeof code === "string" && code.startsWith("promo_") ? (code as PromoBookingErrorCode) : null;
+}
+
+/** A promotion as an admin sees it. */
+export interface Promotion {
+  code: string;
+  kind: PromotionKind;
+  /** A percentage (1 to 100) for PERCENT, VND for FIXED. */
+  value: number;
+  /** Cap on a PERCENT discount, VND; null for none. */
+  maxDiscount: number | null;
+  /** The trip price must be at least this (VND). */
+  minFare: number;
+  /** Null: any vehicle. */
+  vehicleType: VehicleType | null;
+  validFrom: string;
+  validTo: string;
+  /** Null: unlimited. A soft limit: orders in flight can pass it (they show as `overLimit`). */
+  usageLimit: number | null;
+  perRiderLimit: number;
+  disabledAt: string | null;
+  status: "scheduled" | "active" | "expired" | "disabled";
+  /** Redemptions that count against the limits. */
+  redeemed: number;
+  /** Orders recorded past a limit. */
+  overLimit: number;
+  createdBy: string;
+  createdAt: string;
+}
+
+/** What an admin supplies to create a promotion. */
+export interface NewPromotion {
+  /** 3 to 32 characters: letters, digits, "-" or "_" (stored upper case). */
+  code: string;
+  kind: PromotionKind;
+  value: number;
+  /** PERCENT only. */
+  maxDiscount?: number;
+  minFare?: number;
+  vehicleType?: VehicleType;
+  /** ISO time; defaults to now. */
+  validFrom?: string;
+  /** ISO time, required. */
+  validTo: string;
+  usageLimit?: number;
+  /** Defaults to 1. */
+  perRiderLimit?: number;
+}
+
+/** Admin only. Every promotion, newest first. */
+export async function listPromotions(): Promise<Promotion[]> {
+  const body = await request<{ promotions: Promotion[] }>(`${PROMOTION_API}/promotions`);
+  return body.promotions;
+}
+
+/** Admin only. A 400 (`body.code` "invalid_promotion") says what is wrong; a 409 means the code exists. */
+export function createPromotion(promotion: NewPromotion): Promise<Promotion> {
+  return request(`${PROMOTION_API}/promotions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(promotion),
+  });
+}
+
+/** Admin only. Stops new uses of a code; orders that already carry its discount keep it. Repeating it is harmless. */
+export function disablePromotion(code: string): Promise<Promotion> {
+  return request(`${PROMOTION_API}/promotions/${encodeURIComponent(code)}/disable`, { method: "POST" });
 }

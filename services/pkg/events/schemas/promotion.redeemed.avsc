@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "PromotionRedeemed",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "orderId", "type": "string"},
+    {"name": "riderId", "type": "string"},
+    {"name": "code", "type": "string"},
+    {"name": "discount", "type": "long"},
+    {"name": "status", "type": "string"},
+    {"name": "currency", "type": "string", "default": "VND"}
+  ]
+}

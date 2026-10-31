@@ -37,6 +37,7 @@ declare -A PRODUCES=(
   [trip-service]="trip.status.changed trip.rated"
   [location-gateway]="driver.location.updated"
   [payment-service]="payment.recorded"
+  [promotion-service]="promotion.redeemed"
 )
 
 # service -> "group=topic,topic;group=topic" it consumes
@@ -48,6 +49,7 @@ declare -A CONSUMES=(
   [driver-location-service]="driver-location-service-group=driver.location.updated"
   [rating-service]="rating-service-group=trip.rated"
   [payment-service]="payment-service-group=order.created,order.matched,trip.status.changed,trip.rated"
+  [promotion-service]="promotion-service-group=order.created,order.cancelled"
   [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,driver.location.updated,trip.rated"
 )
 

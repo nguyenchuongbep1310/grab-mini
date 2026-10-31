@@ -124,6 +124,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - promotion-service
       - rating-service
       - trip-service
   policyTypes:
@@ -159,6 +160,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - promotion-service
       - rating-service
       - trip-service
   policyTypes:
@@ -259,6 +261,7 @@ spec:
       values:
       - order-service
       - payment-service
+      - promotion-service
       - rating-service
       - trip-service
   policyTypes:
@@ -334,6 +337,7 @@ spec:
       - order-service
       - payment-service
       - pricing-service
+      - promotion-service
       - rating-service
       - routing-service
       - trip-service
