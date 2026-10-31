@@ -13,6 +13,7 @@ export default defineConfig({
       "/payment-api": { target: "http://localhost:3008", rewrite: (p) => p.replace(/^\/payment-api/, "") },
       "/rating-api": { target: "http://localhost:3004", rewrite: (p) => p.replace(/^\/rating-api/, "") },
       "/routing-api": { target: "http://localhost:3009", rewrite: (p) => p.replace(/^\/routing-api/, "") },
+      "/chat-api": { target: "http://localhost:3011", rewrite: (p) => p.replace(/^\/chat-api/, "") },
       "/auth-api": { target: "http://localhost:3005", rewrite: (p) => p.replace(/^\/auth-api/, "") },
       "/ws": { target: "ws://localhost:3003", ws: true },
     },

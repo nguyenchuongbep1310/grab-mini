@@ -91,6 +91,9 @@ function reduce(state: DriverState, action: Action): DriverState {
           // Not part of the trip flow (the app reacts to ratings separately).
           return state;
       }
+      // The union is exhausted here, but the socket delivers whatever Notification Service
+      // sends (a `chat.message.sent`, or a type added later): ignore it, never crash.
+      return state;
     }
   }
 }

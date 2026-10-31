@@ -76,7 +76,7 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 ### Phase 10 — Chat
 - [x] 10.1 `chat-service`: messages, participants from `trip.status.changed`, `chat.message.sent`
 - [x] 10.2 Notification Service pushes chat messages to the other participant
-- [ ] 10.3 `ChatSheet` in the design system; used by the Rider and Driver apps
+- [x] 10.3 `ChatSheet` in the design system; used by the Rider and Driver apps
 - [x] 10.4 Infra and docs
 
 ### Phase 11 — Profiles and driver onboarding

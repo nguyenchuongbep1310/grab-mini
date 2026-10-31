@@ -16,3 +16,4 @@ export { CancelDialog, reasonFor, MAX_REASON_LENGTH, type CancelDialogProps } fr
 export { TripStatusTimeline, type TimelineStep, type TripStatusTimelineProps } from "./TripStatusTimeline";
 export { MapView, type MapViewProps, type LatLngTuple } from "./MapView";
 export { MapMarker, type MapMarkerProps } from "./MapMarker";
+export { ChatSheet, ChatButton, type ChatSheetProps, type ChatSheetMessage, type ChatButtonProps } from "./ChatSheet";

@@ -98,6 +98,14 @@ function moveTo(state: RideState, phase: Phase, patch: Partial<RideState> = {}):
   return { ...state, ...patch, phase, reached: STEP_OF_PHASE[phase] ?? state.reached };
 }
 
+const RIDE_PUSHES: ReadonlySet<string> = new Set([
+  "order.matched",
+  "order.no_driver_found",
+  "order.cancelled",
+  "trip.status.changed",
+  "trip.rated",
+]);
+
 const ACTIVE: Phase[] = ["booking", "searching", "assigned", "in_progress"];
 
 function reduce(state: RideState, action: Action): RideState {
@@ -180,6 +188,10 @@ function reduce(state: RideState, action: Action): RideState {
         return { ...state, driverPos: pos, driverAnchor: state.driverAnchor ?? pos };
       }
 
+      // Only the pushes below belong to a ride. Anything else (a chat message, a type added
+      // later) must not be read for an orderId.
+      if (!RIDE_PUSHES.has(message.type)) return state;
+
       // A rider has one active order at a time, so before the POST response
       // tells us the orderId, the first order-related push is ours.
       if (state.orderId && message.payload.orderId !== state.orderId) return state;
@@ -208,6 +220,8 @@ function reduce(state: RideState, action: Action): RideState {
           // Ratings are only pushed to the driver.
           return state;
       }
+      // The union is exhausted here, but the socket can deliver more than the types say.
+      return state;
     }
   }
 }

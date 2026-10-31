@@ -5,6 +5,8 @@ import {
   Button,
   CancelDialog,
   Card,
+  ChatButton,
+  ChatSheet,
   MapMarker,
   MapView,
   StarRating,
@@ -19,6 +21,7 @@ import {
   waitForOrder,
   signIn,
   tripAction,
+  useChat,
   useNotificationSocket,
   waitForTripByOrder,
   type DriverRating,
@@ -92,7 +95,10 @@ export function App() {
     };
   }, [dispatch]);
 
+  // Chat pushes go to the chat hook (created below, once the trip is known), never to the trip reducer.
+  const chatPush = useRef<(message: unknown) => boolean>(() => false);
   const socket = useNotificationSocket("driver", driverId, (message) => {
+    if (chatPush.current(message)) return;
     if (message.type === "trip.rated") {
       const tip = message.payload.tipAmount ?? 0;
       toast.show(
@@ -126,6 +132,15 @@ export function App() {
       stale = true;
     };
   }, [phase, orderId, tripId, order, dispatch, toast]);
+
+  const chat = useChat(tripId, {
+    me: driverId,
+    enabled: !!tripId && phase !== "idle",
+    socketState: socket,
+  });
+  useEffect(() => {
+    chatPush.current = chat.receive;
+  }, [chat.receive]);
 
   const previousPhase = useRef<Phase>(phase);
   useEffect(() => {
@@ -161,6 +176,8 @@ export function App() {
   }, [phase, anchor?.join(","), pickup?.join(","), dropoff?.join(","), phase === "idle" && pos ? "has-pos" : ""]);
 
   const working = phase === "assigned" || phase === "in_progress";
+  // While the trip is on, and afterwards for as long as the trip is still shown and there is something to re-read.
+  const showChat = !!tripId && (working || ((phase === "completed" || phase === "cancelled") && chat.messages.length > 0));
 
   return (
     <div className="app gm-root">
@@ -232,6 +249,8 @@ export function App() {
                 failed={phase === "cancelled"}
               />
 
+              {showChat && <ChatButton unread={chat.unread} onClick={chat.openSheet} />}
+
               {phase === "assigned" && (
                 <div className="btn-row">
                   <Button variant="secondary" loading={pending === "cancel"} disabled={!tripId || !!pending} onClick={() => setConfirmingCancel(true)}>
@@ -262,6 +281,19 @@ export function App() {
           )}
         </div>
       </BottomSheet>
+
+      <ChatSheet
+        open={chat.sheetOpen && showChat}
+        title={`Chat with ${order?.riderId ?? "your rider"}`}
+        messages={chat.messages}
+        loading={chat.loading}
+        closed={chat.closed}
+        sendDisabled={chat.sendBlocked}
+        notice={chat.notice}
+        onSend={chat.send}
+        onRetry={chat.retry}
+        onClose={chat.closeSheet}
+      />
 
       <CancelDialog
         open={confirmingCancel && working}

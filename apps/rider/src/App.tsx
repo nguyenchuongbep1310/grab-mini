@@ -5,6 +5,8 @@ import {
   Button,
   CancelDialog,
   Card,
+  ChatButton,
+  ChatSheet,
   EtaBadge,
   MapMarker,
   MapView,
@@ -27,6 +29,7 @@ import {
   rateTrip,
   signIn,
   tripAction,
+  useChat,
   useNotificationSocket,
   waitForTripByOrder,
 } from "@grab-mini/client";
@@ -103,7 +106,12 @@ export function App() {
   const [comment, setComment] = useState("");
   const [tip, setTip] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const socket = useNotificationSocket("rider", riderId, (message) => dispatch({ type: "notification", message }));
+  // Chat pushes go to the chat hook (created below, once the trip is known), never to the ride reducer.
+  const chatPush = useRef<(message: unknown) => boolean>(() => false);
+  const socket = useNotificationSocket("rider", riderId, (message) => {
+    if (chatPush.current(message)) return;
+    dispatch({ type: "notification", message });
+  });
 
   // Pick up a ride that was already under way when this page opened.
   useEffect(() => {
@@ -149,6 +157,15 @@ export function App() {
       cancelled = true;
     };
   }, [phase, orderId, tripId, dispatch, toast]);
+
+  const chat = useChat(tripId, {
+    me: riderId,
+    enabled: !!tripId && (phase === "assigned" || phase === "in_progress" || phase === "completed" || phase === "cancelled"),
+    socketState: socket,
+  });
+  useEffect(() => {
+    chatPush.current = chat.receive;
+  }, [chat.receive]);
 
   const previousPhase = useRef<Phase>(phase);
   useEffect(() => {
@@ -277,6 +294,8 @@ export function App() {
 
   const finished = phase === "completed" || phase === "cancelled" || phase === "no_driver";
   const inRide = phase === "assigned" || phase === "in_progress";
+  // While the ride is on, and afterwards for as long as the trip is still shown and there is something to re-read.
+  const showChat = !!tripId && (inRide || ((phase === "completed" || phase === "cancelled") && chat.messages.length > 0));
 
   return (
     <div className="app gm-root">
@@ -363,6 +382,8 @@ export function App() {
               </Card>
             )}
 
+            {showChat && <ChatButton unread={chat.unread} onClick={chat.openSheet} />}
+
             {inRide && eta && (
               <EtaBadge
                 label={phase === "assigned" ? "Driver arrives in" : "You'll arrive in"}
@@ -433,6 +454,19 @@ export function App() {
           </div>
         )}
       </BottomSheet>
+
+      <ChatSheet
+        open={chat.sheetOpen && showChat}
+        title={`Chat with ${driverId ?? "your driver"}`}
+        messages={chat.messages}
+        loading={chat.loading}
+        closed={chat.closed}
+        sendDisabled={chat.sendBlocked}
+        notice={chat.notice}
+        onSend={chat.send}
+        onRetry={chat.retry}
+        onClose={chat.closeSheet}
+      />
 
       <CancelDialog
         open={confirmingCancel && (phase === "searching" || phase === "assigned")}
