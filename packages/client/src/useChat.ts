@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import type { ChatNotification } from "@grab-mini/events";
 import {
   CHAT_MAX_LENGTH,
@@ -231,8 +231,11 @@ export function useChat(tripId: string | null, { me, enabled, socketState }: Use
   const active = enabled && !!tripId ? tripId : null;
 
   // The latest values for callbacks that outlive a render (responses, socket pushes).
+  // Updated in a layout effect, which runs as part of the commit: a passive effect can still be
+  // pending when the user taps "retry" on a button this very render drew, and `retry` would then
+  // read the state from before the message failed and silently do nothing.
   const latest = useRef({ active, me, state, cooldown });
-  useEffect(() => {
+  useLayoutEffect(() => {
     latest.current = { active, me, state, cooldown };
   });
   // Bumped on every trip change and every load, so a slow answer for an old one is ignored.
@@ -252,8 +255,10 @@ export function useChat(tripId: string | null, { me, enabled, socketState }: Use
     [],
   );
 
-  // A new trip (or none) starts from nothing.
-  useEffect(() => {
+  // A new trip (or none) starts from nothing. A layout effect, so the reset lands in the same commit
+  // that first shows the chat: as a passive effect it could run after the person had already tapped
+  // "Chat" (or sent something) on that very render, and wipe the sheet state and the outbox.
+  useLayoutEffect(() => {
     loadSeq.current++;
     dispatch({ type: "reset" });
     setCooldown(0);
