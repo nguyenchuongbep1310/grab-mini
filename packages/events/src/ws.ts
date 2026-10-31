@@ -1,4 +1,5 @@
 import type {
+  ChatMessageSent,
   DriverLocationUpdated,
   OrderCancelled,
   OrderMatched,
@@ -15,3 +16,10 @@ export type NotificationMessage =
   | { type: "trip.status.changed"; payload: TripStatusChanged }
   | { type: "driver.location.updated"; payload: DriverLocationUpdated }
   | { type: "trip.rated"; payload: TripRated };
+
+/**
+ * The chat push Notification Service sends to the other person on a trip. Not yet part of
+ * `NotificationMessage`: the app reducers switch on that union without a default, so a new member
+ * must be added together with a `case` in each (task 10.3). Until then the apps would not know what to do with it.
+ */
+export type ChatNotification = { type: "chat.message.sent"; payload: ChatMessageSent };

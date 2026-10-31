@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -39,6 +40,7 @@ func runConsumer(ctx context.Context, env Env, h *hub) {
 			events.TopicTripStatusChanged,
 			events.TopicDriverLocationUpdate,
 			events.TopicTripRated,
+			events.TopicChatMessageSent,
 		},
 		MaxRetries: 1,
 		RetryDelay: 500 * time.Millisecond,
@@ -169,9 +171,39 @@ func handleMessage(ctx context.Context, codec decoder, h *hub, msg kafka.Message
 		}
 		return h.pushToDriver(ctx, evt.DriverID, message{Type: events.TopicTripRated, Payload: evt})
 
+	case events.TopicChatMessageSent:
+		var evt events.ChatMessageSent
+		if err := codec.Decode(ctx, msg.Topic, msg.Value, &evt); err != nil {
+			return err
+		}
+		return pushChatMessage(ctx, h, evt)
+
 	default:
 		return fmt.Errorf("unhandled topic %q", msg.Topic)
 	}
 
+	return nil
+}
+
+// pushChatMessage delivers a chat message to the other person on the trip: the
+// recipient the event names, on the rider or the driver channel by its role,
+// and never to the sender (their app already shows what they typed). Best-effort
+// like every push: nobody listening means nobody gets it, and the app reads the
+// history from Chat Service when it opens the chat.
+//
+// The text is personal data. Nothing here logs it, only ids.
+func pushChatMessage(ctx context.Context, h *hub, evt events.ChatMessageSent) error {
+	if evt.RecipientID == "" || evt.RecipientID == evt.SenderID {
+		log.Printf("chat message %s on trip %s has no recipient other than its sender, not pushed", evt.MessageID, evt.TripID)
+		return nil
+	}
+	msg := message{Type: events.TopicChatMessageSent, Payload: evt}
+	switch evt.RecipientRole {
+	case events.ChatRoleRider:
+		return h.pushToRider(ctx, evt.RecipientID, msg)
+	case events.ChatRoleDriver:
+		return h.pushToDriver(ctx, evt.RecipientID, msg)
+	}
+	log.Printf("chat message %s on trip %s names recipient role %q, not pushed", evt.MessageID, evt.TripID, evt.RecipientRole)
 	return nil
 }

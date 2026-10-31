@@ -38,9 +38,9 @@ groups:
       - alert: KafkaMessagesDeadLettered
         # Any message at all: a dead letter in the transactional flow is an event
         # that was not processed (an order not matched, a rating not counted).
-        # Payment Service and Promotion Service have their own, more specific alerts
-        # (PaymentDeadLettered, PromotionDeadLettered).
-        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!="driver.location.updated", group!~"payment-service-group|promotion-service-group"}[5m])) > 0
+        # Payment, Promotion and Chat Service have their own, more specific alerts
+        # (PaymentDeadLettered, PromotionDeadLettered, ChatDeadLettered, ChatPushDeadLettered).
+        expr: sum by (group, topic) (increase(kafka_consumer_messages_total{result="dead_lettered", topic!~"driver.location.updated|chat.message.sent", group!~"payment-service-group|promotion-service-group|chat-service-group"}[5m])) > 0
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.group }} dead-lettered messages from {{ $labels.topic }}"
@@ -278,6 +278,48 @@ groups:
           summary: "Order Service refused {{ $value }} promo tokens as invalid in 10 minutes"
           description: "A rider cannot forge one by accident. Check that order-service and promotion-service have the same PROMO_SECRET."
           runbook: "docs/runbook.md#promotions"
+
+  - name: grab-mini.chat
+    rules:
+      - alert: ChatConsumerLagHigh
+        # chat-service-group only reads trip.status.changed. Behind, a trip's chat cannot be opened yet (404: the
+        # trip is unknown) and a finished trip stays writable longer. Nothing is lost, and it is not a page.
+        expr: sum by (consumergroup) (kafka_consumergroup_lag{consumergroup="chat-service-group"}) > 500
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "chat-service-group is {{ $value }} messages behind"
+          description: "Riders and drivers of new trips get 'no such trip' when they open the chat, and the chat of an ended trip closes late."
+          runbook: "docs/runbook.md#chat"
+
+      - alert: ChatDeadLettered
+        # A trip event that could not be applied (no tripId or driverId, say): that trip's chat may never open.
+        expr: sum by (topic) (increase(kafka_consumer_messages_total{group="chat-service-group", result="dead_lettered"}[5m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "chat-service dead-lettered a message from {{ $labels.topic }}"
+          description: "A trip event could not be applied after its retries, so people on that trip may not be able to chat. Fix the cause, then redrive with dlq-redrive."
+          runbook: "docs/runbook.md#chat"
+
+      - alert: ChatPushDeadLettered
+        # A push is best-effort and the app reads the history over REST, so this is not a page. It means the
+        # push path (Redis) was failing: messages arrive only when the other person opens the chat or reloads it.
+        expr: sum(increase(kafka_consumer_messages_total{group="notification-service-group", topic="chat.message.sent", result="dead_lettered"}[5m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "notification-service dead-lettered chat messages"
+          description: "Chat messages were saved but not pushed (Redis unreachable, say). The other person sees them when they open the chat. The dead letters hold message text: redrive them only if still useful, then let them expire."
+          runbook: "docs/runbook.md#chat"
+
+      - alert: ChatRateLimitedSpike
+        # One person hitting the 20 a minute limit is normal for a script and rare for a person. Many of them in
+        # ten minutes is a bot, or a client retrying in a loop.
+        expr: sum(increase(chat_messages_rejected_total{reason="rate_limited"}[10m])) > 100
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $value }} chat messages were rate limited in 10 minutes"
+          description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
+          runbook: "docs/runbook.md#chat"
 
   - name: grab-mini.workloads
     rules:

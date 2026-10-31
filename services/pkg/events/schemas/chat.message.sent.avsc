@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "ChatMessageSent",
+  "namespace": "grabmini.events",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "occurredAt", "type": "string"},
+    {"name": "messageId", "type": "string"},
+    {"name": "tripId", "type": "string"},
+    {"name": "senderId", "type": "string"},
+    {"name": "senderRole", "type": "string"},
+    {"name": "recipientId", "type": "string"},
+    {"name": "recipientRole", "type": "string"},
+    {"name": "text", "type": "string"}
+  ]
+}

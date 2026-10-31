@@ -36,6 +36,10 @@ TOPICS = {
     "trip.rated": (6, 7 * DAY, 2),
     "payment.recorded": (6, 7 * DAY, 2),
     "promotion.redeemed": (6, 7 * DAY, 2),
+    # Messages are personal data, so this topic is never kept longer than its neighbours (7 days, enough
+    # to recover from a consumer outage); the source of truth is chat-service's own table, pruned after
+    # CHAT_RETENTION_DAYS. Low volume: 6 partitions, keyed by trip.
+    "chat.message.sent": (6, 7 * DAY, 2),
     "driver.location.updated": (48, 1 * DAY, 1),
 }
 
@@ -53,6 +57,9 @@ SERVICES = {
     # management, and redemptions recorded from order.created and released by order.cancelled,
     # trip.status.changed (CANCELLED) and order.no_driver_found. No Redis.
     "promotion-service": dict(port=3010, kind="api", db=True, redis=False, promo=True, scale=("lag", 2, 6)),
+    # Rider and driver chat: participants learned from trip.status.changed, messages published through the
+    # outbox as chat.message.sent. No Redis (its rate limit is per instance, in memory).
+    "chat-service": dict(port=3011, kind="api", db=True, redis=False, scale=("lag", 2, 6)),
     "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
@@ -70,7 +77,7 @@ CALLS = {"pricing-service": ["routing-service"]}
 LAG_THRESHOLD = {"driver.location.updated": "5000"}  # messages behind per replica before scaling out; default 100
 
 # Which services have migrations (and so a migration Job).
-MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service", "promotion-service"]
+MIGRATING = ["order-service", "trip-service", "rating-service", "payment-service", "promotion-service", "chat-service"]
 
 # Dedupe tables grow one row per event and are only read for a redelivery, so
 # rows older than anything Kafka or the DLQ can still hand back are dead
@@ -89,6 +96,10 @@ RETENTION = {
     # The promotions and redemptions themselves are never pruned.
     "promotion-promotion-events": ("promotion-service", "promotion_events", "processed_at"),
     "promotion-cancelled-orders": ("promotion-service", "promotion_cancelled_orders", "cancelled_at"),
+    # Same reasoning (a trip's row only ever moves forward, so a very late redelivery changes nothing).
+    # The messages and finished trips are pruned by chat-service itself after CHAT_RETENTION_DAYS, as they
+    # are personal data (see production-design.md, "Chat").
+    "chat-chat-events": ("chat-service", "chat_events", "processed_at"),
 }
 POSTGRES_IMAGE = "postgres:16-alpine"
 REDIS_IMAGE = "redis:7.4.12-alpine"

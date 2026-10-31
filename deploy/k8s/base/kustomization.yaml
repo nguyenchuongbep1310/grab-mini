@@ -5,6 +5,7 @@ namespace: grab-mini
 resources:
 - namespace.yaml
 - config.yaml
+- backup/chat-service.yaml
 - backup/order-service.yaml
 - backup/payment-service.yaml
 - backup/promotion-service.yaml
@@ -14,6 +15,7 @@ resources:
 - kafka/cluster.yaml
 - kafka/topics.yaml
 - kafka/users.yaml
+- migrations/chat-service.yaml
 - migrations/order-service.yaml
 - migrations/payment-service.yaml
 - migrations/promotion-service.yaml
@@ -24,6 +26,7 @@ resources:
 - network/policies.yaml
 - redis/redis.yaml
 - redis/scripts.yaml
+- retention/chat-chat-events.yaml
 - retention/order-orders.yaml
 - retention/payment-payment-events.yaml
 - retention/promotion-cancelled-orders.yaml
@@ -32,6 +35,7 @@ resources:
 - retention/trip-processed-events.yaml
 - retention/trip-trips.yaml
 - scaling/keda.yaml
+- services/chat-service.yaml
 - services/driver-location-service.yaml
 - services/location-gateway.yaml
 - services/matching-service.yaml

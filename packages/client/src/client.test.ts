@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { forgetToken, getToken, isSignedIn, signIn } from "./auth";
 import {
   ApiError,
+  CHAT_MAX_LENGTH,
   cancelOrder,
+  chatErrorOf,
+  chatMessageFromPush,
+  chatRetryAfterOf,
   createOrder,
   createPromotion,
   disablePromotion,
@@ -14,11 +18,13 @@ import {
   getOrder,
   getQuote,
   getRoute,
+  listChatMessages,
   listPromotions,
   newQuoteOf,
   promoBookingErrorOf,
   promoRejectionOf,
   rateTrip,
+  sendChatMessage,
   tripAction,
   useNotificationSocket,
   validatePromotion,
@@ -234,6 +240,97 @@ describe("auth & api client", () => {
     expect(disableCall[1].method).toBe("POST");
     for (const [, init] of fetchMock.mock.calls.slice(1)) expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt-a");
     forgetToken();
+  });
+
+  it("sends a chat message with an Idempotency-Key and lists the history", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const sent = { id: "m-1", tripId: "t/1", senderId: "rider-1", senderRole: "rider", text: "At the gate", createdAt: "2026-01-02T03:04:05.123456Z" };
+    const history = { messages: [sent], nextBefore: "1767323045123456.m-1", tripStatus: "ASSIGNED", open: true, closesAt: null };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(sent), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(history), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...history, nextBefore: null }), { status: 200 }));
+
+    expect(CHAT_MAX_LENGTH).toBe(500);
+    expect(await sendChatMessage("t/1", "At the gate")).toEqual(sent);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe("/chat-api/trips/t%2F1/messages");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ text: "At the gate" });
+    const headers = new Headers(init.headers);
+    expect(headers.get("Authorization")).toBe("Bearer jwt-1");
+    expect(headers.get("Idempotency-Key")).toMatch(/\S+/);
+
+    expect(await listChatMessages("t/1")).toEqual(history);
+    expect(fetchMock.mock.calls[2][0]).toBe("/chat-api/trips/t%2F1/messages");
+    const older = await listChatMessages("t/1", { before: history.nextBefore, limit: 20 });
+    expect(older.nextBefore).toBeNull();
+    const q = new URL(fetchMock.mock.calls[3][0], "http://x");
+    expect(Object.fromEntries(q.searchParams)).toEqual({ before: "1767323045123456.m-1", limit: "20" });
+    forgetToken();
+  });
+
+  it("retries a chat send with the same Idempotency-Key, but not an answer", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const sent = { id: "m-1", tripId: "t-1", senderId: "rider-1", senderRole: "rider", text: "hi", createdAt: "2026-01-02T03:04:05Z" };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-1", expiresAt: future }), { status: 200 }))
+      .mockRejectedValueOnce(new TypeError("network down"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "boom" }), { status: 502 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(sent), { status: 200, headers: { "Idempotent-Replayed": "true" } }));
+
+    expect(await sendChatMessage("t-1", "hi", { retryDelayMs: 1 })).toEqual(sent);
+    const keys = fetchMock.mock.calls.slice(1).map(([, init]) => new Headers(init.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
+
+    // A caller who retries later can reuse the key it chose.
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(sent), { status: 200 }));
+    await sendChatMessage("t-1", "hi", { idempotencyKey: "tap-1" });
+    expect(new Headers(fetchMock.mock.calls[4][1].headers).get("Idempotency-Key")).toBe("tap-1");
+
+    // A 4xx is an answer: no retry.
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "closed", code: "chat_closed" }), { status: 409 }));
+    await expect(sendChatMessage("t-1", "late", { retryDelayMs: 1 })).rejects.toMatchObject({ status: 409 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    forgetToken();
+  });
+
+  it("names why chat refused, and how long to wait when rate limited", async () => {
+    signIn("driver", "driver-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-d1", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "invalid_text" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "not_participant" }), { status: 403 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "unknown_trip" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "rate_limited", retryAfter: 3 }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "rate_limited" }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "missing bearer token" }), { status: 403 }));
+
+    const errs = [];
+    for (let i = 0; i < 6; i++) errs.push(await sendChatMessage("t-1", "x", { retryDelayMs: 1 }).catch((e) => e));
+    expect(errs.slice(0, 4).map(chatErrorOf)).toEqual(["invalid_text", "not_participant", "unknown_trip", "rate_limited"]);
+    expect(chatRetryAfterOf(errs[3])).toBe(3);
+    expect(chatRetryAfterOf(errs[4])).toBe(1); // no figure in the body: wait a second
+    expect(chatRetryAfterOf(errs[0])).toBeNull();
+    expect(chatErrorOf(errs[5])).toBeNull(); // a refusal of the gateway or the auth layer, not of chat
+    expect(chatErrorOf(new Error("other"))).toBeNull();
+    expect(chatRetryAfterOf(new ApiError("x", 429, {}))).toBeNull();
+    forgetToken();
+  });
+
+  it("turns a pushed chat.message.sent into a history message", () => {
+    expect(
+      chatMessageFromPush({
+        eventId: "e-1", occurredAt: "2026-01-02T03:04:05.123456Z", messageId: "m-1", tripId: "t-1",
+        senderId: "rider-1", senderRole: "rider", recipientId: "driver-1", recipientRole: "driver", text: "At the gate",
+      }),
+    ).toEqual({ id: "m-1", tripId: "t-1", senderId: "rider-1", senderRole: "rider", text: "At the gate", createdAt: "2026-01-02T03:04:05.123456Z" });
   });
 
   it("retries 404 in waitForTripByOrder until the trip exists", async () => {

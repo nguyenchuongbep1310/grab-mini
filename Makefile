@@ -2,8 +2,8 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
 GO_MODULES := $(shell sed -n 's/^[[:space:]]*\(\.\/[^[:space:]]*\)[[:space:]]*$$/\1/p' go.work)
-SERVICES := auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service promotion-service location-gateway routing-service pricing-service driver-app-sim dlq-redrive loadtest dev-registry
-MIGRATE_SERVICES := order-service trip-service rating-service payment-service promotion-service
+SERVICES := auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service promotion-service chat-service location-gateway routing-service pricing-service driver-app-sim dlq-redrive loadtest dev-registry
+MIGRATE_SERVICES := order-service trip-service rating-service payment-service promotion-service chat-service
 
 BIN_DIR := .dev/bin
 LOG_DIR := .dev/logs
@@ -112,6 +112,7 @@ metrics-check: ## Check /readyz and /metrics on all Go services plus Prometheus 
 		"payment-service:3008" \
 		"routing-service:3009" \
 		"promotion-service:3010" \
+		"chat-service:3011" \
 		"matching-service:9101" \
 		"driver-location-service:9102"; do \
 		svc=$${item%%:*}; port=$${item##*:}; \
@@ -203,7 +204,7 @@ verify: ## Run deployment & manifest verification (deploy/verify.sh)
 
 ##@ Database, Kafka, DLQ & Load Testing
 
-migrate: ## Run SQL migrations for order-service, trip-service, rating-service, payment-service, and promotion-service
+migrate: ## Run SQL migrations for order-service, trip-service, rating-service, payment-service, promotion-service, and chat-service
 	@for svc in $(MIGRATE_SERVICES); do \
 		echo "==> migrating $$svc"; \
 		(cd "services/$$svc" && DATABASE_URL="$(DATABASE_URL)" go run . migrate) || exit 1; \

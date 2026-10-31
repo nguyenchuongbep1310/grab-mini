@@ -1,4 +1,4 @@
-import type { CancelledBy, OrderStatus, TripStatus, VehicleType } from "@grab-mini/events";
+import type { CancelledBy, ChatMessageSent, ChatRole, OrderStatus, TripStatus, VehicleType } from "@grab-mini/events";
 import { forgetToken, getToken, isSignedIn } from "./auth";
 
 export type { VehicleType };
@@ -11,6 +11,7 @@ const RATING_API = "/rating-api";
 const PRICING_API = "/pricing-api";
 const ROUTING_API = "/routing-api";
 const PROMOTION_API = "/promotion-api";
+const CHAT_API = "/chat-api";
 
 export interface LatLng {
   lat: number;
@@ -543,4 +544,127 @@ export function createPromotion(promotion: NewPromotion): Promise<Promotion> {
 /** Admin only. Stops new uses of a code; orders that already carry its discount keep it. Repeating it is harmless. */
 export function disablePromotion(code: string): Promise<Promotion> {
   return request(`${PROMOTION_API}/promotions/${encodeURIComponent(code)}/disable`, { method: "POST" });
+}
+
+// ---- Chat Service ---------------------------------------------------------
+// The rider and the driver of a trip exchange short messages. Only the two of them may read or send;
+// the text is personal data (do not log it). Pushes arrive on the notification socket as
+// `chat.message.sent` (see `chatMessageFromPush`); the history below is how to recover what a push missed.
+
+/** A chat message as the API returns it. */
+export interface ChatMessage {
+  id: string;
+  tripId: string;
+  senderId: string;
+  senderRole: ChatRole;
+  text: string;
+  /** ISO time, to the microsecond. */
+  createdAt: string;
+}
+
+/** One page of a trip's history, newest first. */
+export interface ChatHistory {
+  messages: ChatMessage[];
+  /** Pass as `before` to get the next older page; null when this was the last page. */
+  nextBefore: string | null;
+  tripStatus: TripStatus;
+  /** False once the trip has ended and the grace period (10 minutes by default) has passed: read-only. */
+  open: boolean;
+  /** ISO time the chat becomes read-only; null while the trip is still on. */
+  closesAt: string | null;
+}
+
+/** Longest message, in characters (not bytes): longer text is refused with `invalid_text`. */
+export const CHAT_MAX_LENGTH = 500;
+
+/** The `code` of a refusal from Chat Service. */
+export type ChatErrorCode =
+  | "invalid_text" // empty, over 500 characters, or containing a control character (newlines included)
+  | "invalid_request"
+  | "not_participant" // 403: the caller is not the rider or driver of this trip
+  | "unknown_trip" // 404: the trip is not known to chat yet (just created) or no longer
+  | "chat_closed" // 409: the trip ended more than the grace period ago
+  | "no_recipient" // 409: the other person on the trip is not known
+  | "key_mismatch" // 422: the Idempotency-Key was used with other text
+  | "rate_limited"; // 429: see `chatRetryAfterOf`
+
+const CHAT_ERRORS: readonly string[] = [
+  "invalid_text",
+  "invalid_request",
+  "not_participant",
+  "unknown_trip",
+  "chat_closed",
+  "no_recipient",
+  "key_mismatch",
+  "rate_limited",
+];
+
+/** Why Chat Service refused a request, or null if err isn't one of its refusals. */
+export function chatErrorOf(err: unknown): ChatErrorCode | null {
+  if (!(err instanceof ApiError)) return null;
+  const code = err.body.code;
+  return typeof code === "string" && CHAT_ERRORS.includes(code) ? (code as ChatErrorCode) : null;
+}
+
+/** Seconds to wait after a `rate_limited` refusal, or null if err isn't one. */
+export function chatRetryAfterOf(err: unknown): number | null {
+  if (chatErrorOf(err) !== "rate_limited" || !(err instanceof ApiError)) return null;
+  const n = err.body.retryAfter;
+  return typeof n === "number" && n > 0 ? n : 1;
+}
+
+/**
+ * Sends a message on a trip. The text is trimmed by the server; it must be 1 to 500
+ * characters with no control characters. Rejects with an ApiError whose `body.code` says
+ * why (see `chatErrorOf`).
+ *
+ * One Idempotency-Key per call, reused by its retries (a network failure or a 5xx), so a
+ * request that reached the server but whose answer was lost sends one message, not two.
+ * To retry a failed send yourself later (after the user taps "retry"), pass the same `idempotencyKey`.
+ */
+export async function sendChatMessage(
+  tripId: string,
+  text: string,
+  opts: { idempotencyKey?: string; retryDelayMs?: number } = {},
+): Promise<ChatMessage> {
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": opts.idempotencyKey ?? newIdempotencyKey() },
+    body: JSON.stringify({ text }),
+  };
+  const retryDelayMs = opts.retryDelayMs ?? 300;
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await request(`${CHAT_API}/trips/${encodeURIComponent(tripId)}/messages`, init);
+    } catch (err) {
+      const retryable = err instanceof ApiError ? err.status >= 500 : err instanceof TypeError;
+      if (!retryable || attempt >= maxAttempts) throw err;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+    }
+  }
+}
+
+/**
+ * A page of a trip's messages, newest first. Start without `before`; for older ones pass the
+ * previous page's `nextBefore`. `limit` is 1 to 100 (default 50). Only the trip's rider and driver may read.
+ */
+export function listChatMessages(tripId: string, opts: { before?: string; limit?: number } = {}): Promise<ChatHistory> {
+  const q = new URLSearchParams();
+  if (opts.limit) q.set("limit", String(opts.limit));
+  if (opts.before) q.set("before", opts.before);
+  const qs = q.toString();
+  return request(`${CHAT_API}/trips/${encodeURIComponent(tripId)}/messages${qs ? `?${qs}` : ""}`);
+}
+
+/** A pushed `chat.message.sent` as a message, to append to the history (dedupe by `id`: a push and a reload can overlap). */
+export function chatMessageFromPush(push: ChatMessageSent): ChatMessage {
+  return {
+    id: push.messageId,
+    tripId: push.tripId,
+    senderId: push.senderId,
+    senderRole: push.senderRole,
+    text: push.text,
+    createdAt: push.occurredAt,
+  };
 }

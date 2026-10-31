@@ -2,6 +2,48 @@
 apiVersion: kafka.strimzi.io/v1beta2
 kind: KafkaUser
 metadata:
+  name: chat-service
+  labels:
+    strimzi.io/cluster: grab-mini
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+    - resource:
+        type: topic
+        name: chat.message.sent
+        patternType: literal
+      operations:
+      - Write
+      - Describe
+    - resource:
+        type: group
+        name: chat-service-group
+        patternType: prefix
+      operations:
+      - Read
+    - resource:
+        type: topic
+        name: trip.status.changed
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: trip.status.changed.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
   name: driver-location-service
   labels:
     strimzi.io/cluster: grab-mini
@@ -249,6 +291,22 @@ spec:
     - resource:
         type: topic
         name: trip.rated.
+        patternType: prefix
+      operations:
+      - Read
+      - Write
+      - Describe
+      - Create
+    - resource:
+        type: topic
+        name: chat.message.sent
+        patternType: literal
+      operations:
+      - Read
+      - Describe
+    - resource:
+        type: topic
+        name: chat.message.sent.
         patternType: prefix
       operations:
       - Read

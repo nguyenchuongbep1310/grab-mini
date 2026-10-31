@@ -78,3 +78,20 @@ export interface TripRated extends EventEnvelope {
   tipAmount?: number;
   currency?: string;
 }
+
+export type ChatRole = "rider" | "driver";
+
+/**
+ * A chat message about a trip. Chat Service publishes it on `chat.message.sent`, and
+ * Notification Service pushes it to the other person on the trip (never to the sender).
+ * `text` is personal data: show it, do not log it.
+ */
+export interface ChatMessageSent extends EventEnvelope {
+  messageId: string;
+  tripId: string;
+  senderId: string;
+  senderRole: ChatRole;
+  recipientId: string;
+  recipientRole: ChatRole;
+  text: string;
+}

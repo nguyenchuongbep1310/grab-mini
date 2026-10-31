@@ -208,3 +208,24 @@ type PromotionRedeemed struct {
 	Status   string `json:"status" avro:"status"`
 	Currency string `json:"currency" avro:"currency"`
 }
+
+// Chat roles carried by ChatMessageSent (the same strings as the rider and driver roles of a token).
+const (
+	ChatRoleRider  = "rider"
+	ChatRoleDriver = "driver"
+)
+
+// ChatMessageSent is published by Chat Service (through its outbox) for every message
+// a rider or driver sends about a trip. Key: tripId. Notification Service pushes it to
+// the recipient. The text is personal data: consumers must not log it.
+// SenderRole and RecipientRole are "rider" or "driver" (never the same).
+type ChatMessageSent struct {
+	Envelope
+	MessageID     string `json:"messageId" avro:"messageId"`
+	TripID        string `json:"tripId" avro:"tripId"`
+	SenderID      string `json:"senderId" avro:"senderId"`
+	SenderRole    string `json:"senderRole" avro:"senderRole"`
+	RecipientID   string `json:"recipientId" avro:"recipientId"`
+	RecipientRole string `json:"recipientRole" avro:"recipientRole"`
+	Text          string `json:"text" avro:"text"`
+}

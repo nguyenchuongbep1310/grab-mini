@@ -114,6 +114,7 @@ func TestEveryTopicHasARoundTrippableSchema(t *testing.T) {
 		events.TopicTripStatusChanged:    &events.TripStatusChanged{TripID: "t", OrderID: "o", DriverID: "d", Status: events.TripStatusCompleted},
 		events.TopicOrderCancelled:       &events.OrderCancelled{OrderID: "o", RiderID: "r", CancelledBy: "RIDER", Reason: "x"},
 		events.TopicTripRated:            &events.TripRated{TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Stars: 5, Comment: "great", TipAmount: 20000, Currency: "VND"},
+		events.TopicChatMessageSent:      &events.ChatMessageSent{MessageID: "m", TripID: "t", SenderID: "r", SenderRole: events.ChatRoleRider, RecipientID: "d", RecipientRole: events.ChatRoleDriver, Text: "I am at the gate"},
 		events.TopicPromotionRedeemed:    &events.PromotionRedeemed{OrderID: "o", RiderID: "r", Code: "WELCOME10", Discount: 20000, Status: events.PromotionStatusRedeemed, Currency: "VND"},
 		events.TopicPaymentRecorded:      &events.PaymentRecorded{PaymentID: "p", TripID: "t", OrderID: "o", RiderID: "r", DriverID: "d", Kind: events.PaymentKindFare, Status: events.PaymentStatusCaptured, Amount: 50000, DriverAmount: 40000, PlatformAmount: 10000, Currency: "VND", LedgerTransactionID: "x"},
 	}
@@ -396,6 +397,28 @@ func TestV3ReaderIgnoresPromotionFields(t *testing.T) {
 	}
 	if got.OrderID != "o-1" || got.Price == nil || *got.Price != 87000 {
 		t.Errorf("got %+v", got)
+	}
+}
+
+// The chat text is carried as it was typed: Vietnamese, emoji and a newline included.
+func TestChatMessageSurvivesARoundTrip(t *testing.T) {
+	_, url := newRegistry(t)
+	c := New(url)
+	in := events.ChatMessageSent{
+		Envelope:  events.Envelope{EventID: "e-1", OccurredAt: "2026-01-02T03:04:05Z"},
+		MessageID: "m-1", TripID: "t-1", SenderID: "rider-1", SenderRole: events.ChatRoleRider,
+		RecipientID: "driver-1", RecipientRole: events.ChatRoleDriver, Text: "Mình ở cổng số 2 \U0001F44B\nxanh lá",
+	}
+	data, err := c.Encode(context.Background(), events.TopicChatMessageSent, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out events.ChatMessageSent
+	if err := c.Decode(context.Background(), events.TopicChatMessageSent, data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != in {
+		t.Errorf("got %+v, want %+v", out, in)
 	}
 }
 

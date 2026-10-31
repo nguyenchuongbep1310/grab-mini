@@ -38,6 +38,7 @@ declare -A PRODUCES=(
   [location-gateway]="driver.location.updated"
   [payment-service]="payment.recorded"
   [promotion-service]="promotion.redeemed"
+  [chat-service]="chat.message.sent"
 )
 
 # service -> "group=topic,topic;group=topic" it consumes
@@ -50,7 +51,8 @@ declare -A CONSUMES=(
   [rating-service]="rating-service-group=trip.rated"
   [payment-service]="payment-service-group=order.created,order.matched,trip.status.changed,trip.rated"
   [promotion-service]="promotion-service-group=order.created,order.cancelled,trip.status.changed,order.no_driver_found"
-  [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,driver.location.updated,trip.rated"
+  [chat-service]="chat-service-group=trip.status.changed"
+  [notification-service]="notification-service-group=order.created,order.matched,order.no_driver_found,order.cancelled,trip.status.changed,driver.location.updated,trip.rated,chat.message.sent"
 )
 
 acls()  { "$KAFKA_BIN/kafka-acls.sh" --bootstrap-server "$BOOTSTRAP" --command-config "$ADMIN_CONFIG" "$@" >/dev/null; }

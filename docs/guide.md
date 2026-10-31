@@ -133,6 +133,7 @@ ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId`
 | Pricing Service | 3007 | `order.created` (demand per pickup cell) | | Redis (surge multipliers, demand counters); quotes are signed, not stored; asks Routing Service for the distance (`ROUTING_URL`), falling back to the straight line |
 | Routing Service | 3009 | | | none (stateless; a deterministic distance and travel-time model, no maps data: [production-design §17](../specs/ride-booking-mini/production-design.md)) |
 | Promotion Service | 3010 | `order.created`, `order.cancelled` (to record and release redemptions) | `promotion.redeemed` | Postgres (promotions, redemptions, outbox); validation signs a short-lived `promoToken` that Order Service checks without calling it ([production-design §18](../specs/ride-booking-mini/production-design.md)) |
+| Chat Service | 3011 | `trip.status.changed` (who is on a trip, and when it ended) | `chat.message.sent` | Postgres (chat_trips, chat_messages, outbox); messages are personal data, never logged, deleted after `CHAT_RETENTION_DAYS` ([production-design §19](../specs/ride-booking-mini/production-design.md)) |
 | Payment Service | 3008 | `order.created` (the locked price and discount), `trip.status.changed`, `trip.rated` | `payment.recorded` | Postgres (double-entry ledger, payments); a sandbox `PaymentProvider`, no real card processor ([production-design §16](../specs/ride-booking-mini/production-design.md)) |
 | Location Gateway | 3006 | | `driver.location.updated` | per-driver rate limit in memory |
 | `driver-app-sim` | | | | reports positions to the Location Gateway over HTTP |
@@ -205,6 +206,11 @@ curl localhost:3010/promotions -H "Authorization: Bearer <admin token>"   # ever
 curl -X POST localhost:3010/promotions -H "Authorization: Bearer <admin token>" -H "Content-Type: application/json" \
   -d '{"code":"SUMMER20","kind":"PERCENT","value":20,"maxDiscount":30000,"minFare":50000,"vehicleType":"CAR","validTo":"2027-01-31T00:00:00Z","usageLimit":100,"perRiderLimit":2}'   # kind PERCENT or FIXED; only code, kind, value and validTo are required
 curl -X POST localhost:3010/promotions/SUMMER20/disable -H "Authorization: Bearer <admin token>"   # stops new uses; orders that carry its discount keep it
+
+# Chat Service (rider or driver token; only the rider and the driver of that trip. The chat opens when the trip is assigned and stays writable for 10 minutes after it ends)
+curl -X POST localhost:3011/trips/<tripId>/messages -H "Authorization: Bearer <rider or driver token>" -H "Content-Type: application/json" -H "Idempotency-Key: <any unique string>" \
+  -d '{"text":"I am at the gate"}'   # 201 {"id":...,"tripId":...,"senderId":...,"senderRole":"rider","text":"I am at the gate","createdAt":...}; 1 to 500 characters, no control characters (400 invalid_text); 403 not_participant, 404 unknown_trip, 409 chat_closed, 429 rate_limited (Retry-After); the same Idempotency-Key and text again returns the saved message (200) instead of sending twice
+curl "localhost:3011/trips/<tripId>/messages?limit=20" -H "Authorization: Bearer <rider or driver token>"   # {"messages":[newest first],"nextBefore":"...","tripStatus":"ASSIGNED","open":true,"closesAt":null}; pass nextBefore as ?before= for older ones. The other person gets a "chat.message.sent" push on their WebSocket
 
 # Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
 curl "localhost:3008/payments?tripId=<tripId>" -H "Authorization: Bearer <token>"   # fare, tip and cancellation fee of one trip, plus the captured total

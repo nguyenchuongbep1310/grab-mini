@@ -397,6 +397,26 @@ What can go wrong is bookkeeping: a redemption recorded late or not at all, so a
    `UPDATE redemptions SET status = 'RELEASED', released_at = now() WHERE code = '...' AND order_id = '...';`.
 7. **Reading the money.** A promo order's payment is `price - discount` (`order_prices.discount` in Payment Service); `payments_skipped_total{reason="zero_amount"}` counts free rides. Rotating `PROMO_SECRET` invalidates only tokens issued in the last 10 minutes.
 
+## Chat
+
+**Alerts:** `ChatConsumerLagHigh` (ticket), `ChatDeadLettered` (ticket), `ChatPushDeadLettered` (ticket), `ChatRateLimitedSpike` (ticket).
+**Meaning:** chat is a convenience, not part of the booking: nothing else waits for it, so none of these pages. Chat Service learns who may talk from `trip.status.changed`, so what can go wrong is a trip it has not learned (or learned late), a push that did not go out, or abuse.
+**Messages are personal data.** Do not paste message text into tickets, chat or dashboards, and do not log it; the service logs ids and lengths only. The text is also in Kafka (7 days), the DLQ and retry topics, `outbox_dead` and the backups: see [production-design §19](../specs/ride-booking-mini/production-design.md).
+
+1. **A rider or driver gets "no such trip" (404 `unknown_trip`) when opening the chat.** The trip event has not been applied yet: check `ChatConsumerLagHigh` and `chat_trip_events_total{result}`. A trip is known as soon as its `ASSIGNED` event is handled, normally within a second of the match.
+   ```sql
+   SELECT trip_id, rider_id, driver_id, status, updated_at FROM chat_trips WHERE trip_id = '...';
+   ```
+   A trip with an empty `rider_id` comes from events written before they carried the rider: the driver's send is 409 `no_recipient` until a later event names the rider.
+2. **403 `not_participant` for someone who should be on the trip.** The token's subject differs from `rider_id` / `driver_id` in `chat_trips` (a driver token carrying a rider's id is refused too). Compare them; do not edit the row unless the trip event itself was wrong.
+3. **409 `chat_closed` too early or too late.** The chat closes `CHAT_GRACE_MINUTES` (default 10) after the trip ended, measured from the end event's own time. `SELECT status, updated_at FROM chat_trips ...` shows what the service holds; a consumer that lags more than the grace period makes an ended trip look closed as soon as it is learned. History stays readable.
+4. **`ChatConsumerLagHigh`:** see [Consumer lag](#consumer-lag), group `chat-service-group` (it reads `trip.status.changed` only). Safe to wait for: events are applied in any order and twice, and nothing is lost.
+5. **`ChatDeadLettered`:** a trip event could not be applied (no `tripId` or `driverId`, or an `eventId` that is not a UUID). Inspect with `dlq-redrive -topic trip.status.changed -dry-run`; an event that is malformed will not succeed by redriving, fix the sender. The DLQ topic holds trip events, not message text.
+6. **`ChatPushDeadLettered`:** Notification Service could not push chat messages (the dead letters are `chat.message.sent` in `notification-service-group`), almost always because Redis was unreachable ([Redis failover](#redis-failover)). The messages are saved: the other person sees them when they open the chat. Redriving (`dlq-redrive -topic chat.message.sent`) is optional and pushes old messages as if new; the DLQ **holds message text**, so let it expire rather than keep it.
+7. **`ChatRateLimitedSpike`:** more than 100 sends in 10 minutes were refused with 429. The limit is per sender (20 a minute by default, burst 5) and per instance. The service does not log each refusal (that would let a flood fill the logs); find the sender in the gateway or ingress access logs by the 429s on `POST /trips/*/messages`, and look for a client retrying in a loop. `chat_messages_rejected_total{reason}` splits the refusals (`rate_limited`, `chat_closed`, `invalid_text`, `not_participant`, `unknown_trip`, ...). To loosen the limit, set `CHAT_RATE_PER_MINUTE` and restart.
+8. **Messages are not reaching the other person.** The message is in `chat_messages` and in the outbox (`outbox_oldest_pending_age_seconds{source="chat-service"}`, see [Outbox backlog](#outbox-backlog)) before it is published; then Notification Service pushes it only to a recipient with an open socket (`notification_pushes_total`). With no socket the app shows it when the chat is opened or reloaded.
+9. **Retention.** Messages older than `CHAT_RETENTION_DAYS` (default 30) and ended trips that old are deleted hourly by every replica (`chat_pruned_total{table}`, and a log line with counts). To delete sooner for a legal request, `DELETE FROM chat_messages WHERE trip_id = '...'` is safe (history and the cursor just end); the copies listed above are not touched by it.
+
 ## Pods not ready
 
 **Alerts:** `DeploymentReplicasUnavailable`.

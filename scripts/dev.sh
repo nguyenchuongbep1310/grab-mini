@@ -86,7 +86,7 @@ wait_for "Loki" healthy grab-mini-loki
 wait_for "Grafana" healthy grab-mini-grafana
 
 echo "Building Go services..."
-SERVICES="auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service promotion-service location-gateway routing-service pricing-service driver-app-sim"
+SERVICES="auth-service order-service matching-service trip-service driver-location-service notification-service rating-service payment-service promotion-service chat-service location-gateway routing-service pricing-service driver-app-sim"
 ROOT=$PWD
 for svc in $SERVICES; do
   (cd "services/$svc" && go build -o "$ROOT/$BIN/$svc" .)
@@ -137,6 +137,7 @@ wait_for "Notification Service" curl -fs localhost:3003/health
 wait_for "Rating Service" curl -fs localhost:3004/health
 wait_for "Payment Service" curl -fs localhost:3008/health
 wait_for "Promotion Service" curl -fs localhost:3010/health
+wait_for "Chat Service" curl -fs localhost:3011/health
 wait_for "Location Gateway" curl -fs localhost:3006/health
 wait_for "Routing Service" curl -fs localhost:3009/health
 wait_for "Pricing Service" curl -fs localhost:3007/health

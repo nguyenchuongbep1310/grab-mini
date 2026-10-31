@@ -442,6 +442,131 @@ tests:
         alertname: PromoTokensRefused
         exp_alerts: []   # resolves once they stop
 
+  # ------------------------------------------------------------------ chat
+  - name: chat-service falling behind is a ticket once it persists
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="chat-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 300 300 300 300 300 300 300 300 300 300 300 300 300'
+      - series: 'kafka_consumergroup_lag{consumergroup="chat-service-group", topic="trip.status.changed", partition="1"}'
+        values: '0 300 300 300 300 300 300 300 300 300 300 300 300 300'
+      - series: 'kafka_consumergroup_lag{consumergroup="promotion-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 900 900 900 900 900 900 900 900 900 900 900 900 900'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ChatConsumerLagHigh
+        exp_alerts: []   # high, but not for ten minutes yet
+      - eval_time: 13m
+        alertname: ChatConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: ticket, consumergroup: chat-service-group}
+            exp_annotations:
+              summary: "chat-service-group is 600 messages behind"
+              description: "Riders and drivers of new trips get 'no such trip' when they open the chat, and the chat of an ended trip closes late."
+              runbook: "docs/runbook.md#chat"
+
+  - name: a small chat backlog is not an alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="chat-service-group", topic="trip.status.changed", partition="0"}'
+        values: '0 100 300 400 300 100 50 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: ChatConsumerLagHigh
+        exp_alerts: []
+
+  - name: a dead-lettered trip event is a ticket with the chat runbook, and the generic page stays quiet for it
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="chat-service-group", topic="trip.status.changed", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ChatDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ChatDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: ticket, topic: trip.status.changed}
+            exp_annotations:
+              summary: "chat-service dead-lettered a message from trip.status.changed"
+              description: "A trip event could not be applied after its retries, so people on that trip may not be able to chat. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#chat"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []   # one ticket, not a page as well
+
+  - name: another service's dead letters do not raise the chat alert
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="trip-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ChatDeadLettered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ChatPushDeadLettered
+        exp_alerts: []
+
+  - name: a chat push that is dead-lettered is a ticket, not a page, and other notification dead letters still page
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="notification-service-group", topic="chat.message.sent", result="dead_lettered"}'
+        values: '0 0 0 2 2 2 2 2'
+      - series: 'kafka_consumer_messages_total{group="notification-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ChatPushDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "notification-service dead-lettered chat messages"
+              description: "Chat messages were saved but not pushed (Redis unreachable, say). The other person sees them when they open the chat. The dead letters hold message text: redrive them only if still useful, then let them expire."
+              runbook: "docs/runbook.md#chat"
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ChatPushDeadLettered
+        exp_alerts: []   # resolves once the counter stops moving
+
+  - name: a notification dead letter on another topic still pages
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{group="notification-service-group", topic="order.matched", result="dead_lettered"}'
+        values: '0 0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KafkaMessagesDeadLettered
+        exp_alerts:
+          - exp_labels: {severity: page, group: notification-service-group, topic: order.matched}
+            exp_annotations:
+              summary: "notification-service-group dead-lettered messages from order.matched"
+              description: "At least one message could not be processed after its retries. Fix the cause, then redrive with dlq-redrive."
+              runbook: "docs/runbook.md#dead-letters"
+
+  - name: a flood of rate-limited chat messages is a ticket, a few are not
+    interval: 1m
+    input_series:
+      - series: 'chat_messages_rejected_total{reason="rate_limited"}'
+        values: '0+20x20'
+      - series: 'chat_messages_rejected_total{reason="chat_closed"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ChatRateLimitedSpike
+        exp_alerts: []   # 60 so far
+      - eval_time: 15m
+        alertname: ChatRateLimitedSpike
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "200 chat messages were rate limited in 10 minutes"
+              description: "Look for a client retrying in a loop, or one sender spamming. The limit is per sender and per instance."
+              runbook: "docs/runbook.md#chat"
+
   # -------------------------------------------------------------------- business
   - name: slow matching breaches the SLO
     interval: 1m

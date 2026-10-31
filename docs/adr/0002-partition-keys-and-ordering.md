@@ -14,11 +14,12 @@ Kafka orders messages only within a partition. Consumers in a group scale by par
 | `trip.status.changed` | `tripId` | Status transitions of one trip are ordered |
 | `trip.rated` | `driverId` | Rating Service aggregates per driver |
 | `payment.recorded` | `tripId` | One trip's charges (fare, tip, cancellation fee) stay ordered |
+| `chat.message.sent` | `tripId` | One trip's messages stay in the order sent |
 | `driver.location.updated` | `driverId` | A driver's positions arrive in the order sent, so the newest wins |
 
 There is no global ordering and none is needed: nothing compares events of two different orders.
 
-Partition counts in the Kubernetes manifests (`deploy/k8s/base/kafka/topics.yaml`): 12 for the order and trip topics, 6 for low-volume ones (including `payment.recorded`), 48 for `driver.location.updated`. Local Docker Compose uses 3.
+Partition counts in the Kubernetes manifests (`deploy/k8s/base/kafka/topics.yaml`): 12 for the order and trip topics, 6 for low-volume ones (including `payment.recorded` and `chat.message.sent`), 48 for `driver.location.updated`. Local Docker Compose uses 3.
 
 ## Alternatives considered
 

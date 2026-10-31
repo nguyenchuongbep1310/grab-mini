@@ -117,6 +117,7 @@ spec:
     - key: app.kubernetes.io/name
       operator: In
       values:
+      - chat-service
       - driver-location-service
       - location-gateway
       - matching-service
@@ -153,6 +154,7 @@ spec:
     - key: app.kubernetes.io/name
       operator: In
       values:
+      - chat-service
       - driver-location-service
       - location-gateway
       - matching-service
@@ -259,6 +261,7 @@ spec:
     - key: app.kubernetes.io/name
       operator: In
       values:
+      - chat-service
       - order-service
       - payment-service
       - promotion-service
@@ -332,6 +335,7 @@ spec:
     - key: app.kubernetes.io/name
       operator: In
       values:
+      - chat-service
       - location-gateway
       - notification-service
       - order-service

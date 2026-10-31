@@ -11,6 +11,7 @@ dist/
 /services/*/rating-service
 /services/*/payment-service
 /services/*/promotion-service
+/services/*/chat-service
 .dev/
 
 # Redis snapshots from local test instances

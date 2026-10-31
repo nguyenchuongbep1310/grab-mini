@@ -110,6 +110,29 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - IF the caller is a rider or a driver, THE Promotion Service SHALL answer 403.
 - **US-8.6** (Rider App and Ops dashboard screens, task 9.4, not built yet): As a rider, I want a promo-code field next to the price, showing the discount and the new total; as an operator, I want to list, create and disable promotions from the Ops dashboard.
 
+### 9. Chat
+- **US-9.1**: As a rider or a driver on a trip, I want to send short text messages to the other person, so we can find each other.
+  - WHEN the rider or the driver of a trip posts a message, THE Chat Service SHALL save it and publish `chat.message.sent` (key `tripId`) in one transaction, and answer 201 with the saved message.
+  - THE text SHALL be trimmed and SHALL be 1 to 500 characters (counted as characters); IF it is empty, longer, or contains a control character, THE Chat Service SHALL answer 400 with the code `invalid_text` and save nothing.
+  - THE Chat Service SHALL take who is sending from the token alone.
+- **US-9.2**: As a rider or a driver, I want my conversation to be private.
+  - IF the caller is neither the rider nor the driver of the trip, THE Chat Service SHALL answer 403 (`not_participant`) for sending and for reading; IF the trip is unknown, 404 (`unknown_trip`); IF there is no valid token, 401. An admin token SHALL be refused (403).
+  - WHEN Chat Service handles `trip.status.changed`, THE Chat Service SHALL learn the trip's rider and driver, and a redelivered event SHALL change nothing.
+  - THE Chat Service and THE Notification Service SHALL NOT write the text of a message to a log.
+- **US-9.3**: As a rider or a driver, I want the chat to be open while the trip is on and for a short while after, and then to stay readable.
+  - WHILE the trip is `ASSIGNED` or `IN_PROGRESS`, THE Chat Service SHALL accept messages.
+  - WHEN a trip is `COMPLETED` or `CANCELLED`, THE Chat Service SHALL accept messages for `CHAT_GRACE_MINUTES` (default 10) from the time it ended and then answer 409 with the code `chat_closed`; reading the history SHALL still work.
+  - THE Chat Service SHALL never move a trip's status backwards, nor from one end to the other, however its events arrive.
+- **US-9.4**: As a rider or a driver, I want to read the conversation and see new messages at once.
+  - WHEN a participant asks for the history, THE Chat Service SHALL return the messages newest first, a page at a time (1 to 100, default 50), with a cursor (`nextBefore`) that neither skips nor repeats a message when new ones arrive.
+  - WHEN Notification Service consumes `chat.message.sent`, THE Notification Service SHALL push it, as a message of type `chat.message.sent`, to the recipient named in the event, on the rider or driver channel of their role, and SHALL NOT push it to the sender.
+  - THE push SHALL be best-effort: IF the recipient has no open socket the message is not delivered by push, and the recipient reads it from the history.
+- **US-9.5**: As an operator, I want chat to resist abuse.
+  - WHEN a sender exceeds `CHAT_RATE_PER_MINUTE` (default 20) messages a minute, THE Chat Service SHALL answer 429 with a `Retry-After` header and the code `rate_limited`. The limit is per sender and kept in memory on each instance.
+  - WHEN a request carries an `Idempotency-Key` already used by that sender on that trip with the same text, THE Chat Service SHALL return the saved message and SHALL NOT publish again; with different text, 422 `key_mismatch`.
+  - THE Chat Service SHALL delete messages, and the rows of trips that ended, after `CHAT_RETENTION_DAYS` (default 30).
+- **US-9.6** (`ChatSheet` in both apps, task 10.3, not built yet): As a rider or a driver, I want a chat sheet opened from the trip screen, that loads the history when opened and appends new messages from pushes.
+
 ## Technical constraints
 - Kafka runs locally via Docker Compose, with Kafka UI for observing topics/offsets.
 - No two-phase distributed transactions — eventual consistency is acceptable.
@@ -118,5 +141,6 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 ## Out of scope
 - A real payment gateway or card processor (rides are settled through a double-entry ledger against a sandbox provider; no payouts, refunds or reconciliation)
 - Per-user targeting of promotions, stacking several codes on one order, referral credits
+- Chat read receipts, typing indicators, attachments, and moderation beyond length, control characters and a rate limit
 - Multi-region, high-availability Kafka cluster
 - Full authentication (mock user/driver ids are acceptable initially)
