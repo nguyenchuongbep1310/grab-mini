@@ -136,7 +136,7 @@ Promotion Service (port 3010; Postgres and the outbox, no Redis) keeps `promotio
 - **Limits are soft.** The per-rider and global limits are checked at validation and again at redemption, but two orders in flight can both pass validation before either is recorded, so a limit can be exceeded by the number of orders in flight. Those are the `OVER_LIMIT` rows and the `PromotionRedeemedOverLimit` alert.
 - **Payment.** Payment Service keeps `discount` next to the price in its local copy of the order and charges `price - discount`; the commission is on that net amount and `payment.recorded` carries the net amounts. A free ride (net 0) is skipped (`payments_skipped_total{reason="zero_amount"}`).
 - **Admin.** `POST /promotions`, `GET /promotions`, `POST /promotions/{code}/disable` need an `admin` token. Disabling stops new validations only.
-- **Frontend.** `validatePromotion()` and the admin helpers are in `packages/client`; the Rider App promo field and the Ops dashboard screen are task 9.4.
+- **Frontend.** `validatePromotion()` and the admin helpers are in `packages/client`; the Rider App promo field and the Ops dashboard Promotions panel are built (task 9.4).
 
 ## 4g. Chat
 
@@ -150,7 +150,7 @@ Chat Service (port 3011; Postgres and the outbox, no Redis) lets the rider and t
 - **History.** `GET /trips/{id}/messages?before=&limit=` (limit 1 to 100, default 50) returns `{messages, nextBefore, tripStatus, open, closesAt}`, newest first, ordered by `(createdAt, id)`. `before` is the previous page's `nextBefore` (microseconds and the message id), so a page neither skips nor repeats a message when new ones arrive.
 - **Push.** Notification Service consumes `chat.message.sent` and sends `{"type":"chat.message.sent","payload":{...}}` to the **recipient** only, on the rider or driver channel named by `recipientRole`, through the existing Redis Pub/Sub path. It is best-effort: the history above is how an app recovers what a push missed.
 - **Privacy.** The text is never written to a log (ids and lengths only), by Chat Service or Notification Service. Messages and the rows of trips that ended are deleted after `CHAT_RETENTION_DAYS` (default 30). See [production-design §19](production-design.md).
-- **Frontend.** `sendChatMessage()`, `listChatMessages()` and the types are in `packages/client`; the `ChatSheet` in the apps is task 10.3.
+- **Frontend.** `sendChatMessage()`, `listChatMessages()` and the types are in `packages/client`; the `ChatSheet` and `ChatButton` in the design system and the `useChat` hook are used by both apps (task 10.3).
 
 ## 4h. Profiles and driver onboarding
 
@@ -166,7 +166,7 @@ Profile Service (port 3012; Postgres and the outbox, no Redis, consumes nothing)
 - **Public view.** `GET /drivers/{id}/public` (any signed-in user) returns `{driverId, name, vehicleType, plate, model, color}` only for an `APPROVED` driver, never the phone or the status; an unknown, unapproved or suspended driver is the same 404, so it does not tell who applied. Limited per caller (`PUBLIC_RATE_PER_MINUTE`, default 120).
 - **Development data.** `profile-service seed-dev` (only with `APP_ENV=development`; `scripts/dev.sh` runs it) adds approved profiles for `driver-1..3` (CAR) and `driver-4..5` (BIKE) and profiles for `rider-1..3`, once (existing rows are left alone). It publishes **no** event: `matching-service seed-drivers` already made the drivers eligible, and an event published later could put a driver back to `AVAILABLE` after a demo script set them otherwise.
 - **Privacy.** Names, phones and plates are never written to a log (ids only; a test fails if they appear) and responses carry `Cache-Control: no-store`. See [production-design §20](production-design.md).
-- **Frontend.** `getRiderProfile()`, `updateRiderProfile()`, `getDriverProfile()`, `updateDriverProfile()`, `applyAsDriver()`, `getDriverPublic()`, `listDriverApplications()` and `reviewDriver()` are in `packages/client` (through the `/profile-api` dev proxy to port 3012); the screens are task 11.3.
+- **Frontend.** `getRiderProfile()`, `updateRiderProfile()`, `getDriverProfile()`, `updateDriverProfile()`, `applyAsDriver()`, `getDriverPublic()`, `listDriverApplications()` and `reviewDriver()` are in `packages/client` (through the `/profile-api` dev proxy to port 3012); the screens (profile sheet and driver card in the Rider App, onboarding and status screens in the Driver App, review queue in Ops) are built (task 11.3).
 
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.

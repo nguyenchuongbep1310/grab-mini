@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 780" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
   <title id="t">grab-mini architecture</title>
   <desc id="d">Rider and driver apps call REST services and a location gateway. Services publish Avro events to Kafka through a transactional outbox. Matching, pricing, driver location, rating and notification services consume them. ksqlDB reads the same topics for the ops dashboard. Notification pushes to the apps over WebSocket.</desc>
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#475467"/></marker>
     <marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0b8a4f"/></marker>
   </defs>
-  <rect width="1000" height="620" rx="14" fill="#ffffff" stroke="#e4e7ec"/>
+  <rect width="1000" height="780" rx="14" fill="#ffffff" stroke="#e4e7ec"/>
 
   <!-- clients -->
   <rect x="14" y="50" width="150" height="270" rx="12" fill="#f9fafb" stroke="#98a2b3" stroke-dasharray="5 4"/>
@@ -41,12 +41,14 @@
     <rect x="442" y="272" width="146" height="24" rx="6" fill="#ffffff" stroke="#fdb022"/><text x="515" y="288">driver.location.updated</text>
     <rect x="442" y="304" width="146" height="24" rx="6" fill="#ffffff" stroke="#fdb022"/><text x="515" y="320">payment.recorded</text>
   </g>
-  <text x="515" y="354" text-anchor="middle" font-size="11" fill="#475467">each topic keyed by orderId,</text>
-  <text x="515" y="370" text-anchor="middle" font-size="11" fill="#475467">tripId or driverId (ordering)</text>
-  <text x="515" y="398" text-anchor="middle" font-size="11" fill="#475467">+ retry tiers and DLQ per topic</text>
-  <rect x="446" y="426" width="138" height="42" rx="8" fill="#ffffff" stroke="#98a2b3"/>
-  <text x="515" y="444" text-anchor="middle" font-size="12" font-weight="600" fill="#101828">Schema Registry</text>
-  <text x="515" y="459" text-anchor="middle" font-size="11" fill="#475467">Avro · BACKWARD</text>
+  <text x="515" y="346" text-anchor="middle" font-size="10" fill="#475467">+ promotion.redeemed, chat.message.sent,</text>
+  <text x="515" y="358" text-anchor="middle" font-size="10" fill="#475467">driver.application.reviewed</text>
+  <text x="515" y="378" text-anchor="middle" font-size="11" fill="#475467">keyed by orderId,</text>
+  <text x="515" y="392" text-anchor="middle" font-size="11" fill="#475467">tripId or driverId</text>
+  <text x="515" y="410" text-anchor="middle" font-size="11" fill="#475467">retry tiers + DLQ</text>
+  <rect x="446" y="424" width="138" height="42" rx="8" fill="#ffffff" stroke="#98a2b3"/>
+  <text x="515" y="442" text-anchor="middle" font-size="12" font-weight="600" fill="#101828">Schema Registry</text>
+  <text x="515" y="457" text-anchor="middle" font-size="11" fill="#475467">Avro · BACKWARD</text>
 
   <!-- consumers -->
   <rect x="640" y="44" width="190" height="70" rx="10" fill="#e8f8ef" stroke="#12b76a"/>
@@ -75,7 +77,7 @@
   <text x="928" y="89" text-anchor="middle" font-size="11" fill="#475467">windows · join</text>
   <rect x="870" y="160" width="116" height="58" rx="10" fill="#f4ebff" stroke="#9e77ed"/>
   <text x="928" y="184" text-anchor="middle" font-size="13" font-weight="600" fill="#101828">Ops dashboard</text>
-  <text x="928" y="202" text-anchor="middle" font-size="11" fill="#475467">pull queries</text>
+  <text x="928" y="202" text-anchor="middle" font-size="11" fill="#475467">+ admin tools</text>
 
   <!-- request arrows -->
   <g stroke="#475467" stroke-width="1.5" fill="none" marker-end="url(#a)">
@@ -103,8 +105,31 @@
   <path d="M735 490 L735 534 L89 534 L89 320" stroke="#0b8a4f" stroke-width="2" stroke-dasharray="6 4" fill="none" marker-end="url(#w)"/>
   <text x="412" y="526" text-anchor="middle" font-size="12" font-weight="600" fill="#0b8a4f">WebSocket push to rider and driver (best-effort; apps recover over REST)</text>
 
+  <!-- supporting services -->
+  <text x="24" y="566" font-size="12" font-weight="600" fill="#344054">Added to behave like a real app</text>
+  <path d="M515 490 L515 596 M384 596 L884 596" stroke="#475467" stroke-width="1.5" fill="none"/>
+  <g stroke="#475467" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <path d="M384 596 L384 612"/><path d="M634 596 L634 612"/><path d="M884 596 L884 612"/>
+  </g>
+  <rect x="24" y="612" width="220" height="74" rx="10" fill="#e8f8ef" stroke="#12b76a"/>
+  <text x="134" y="638" text-anchor="middle" font-size="13" font-weight="600" fill="#101828">Routing Service</text>
+  <text x="134" y="657" text-anchor="middle" font-size="11" fill="#475467">distance and ETA · no Kafka</text>
+  <text x="134" y="673" text-anchor="middle" font-size="11" fill="#475467">Pricing calls it, fails open</text>
+  <rect x="274" y="612" width="220" height="74" rx="10" fill="#e8f8ef" stroke="#12b76a"/>
+  <text x="384" y="638" text-anchor="middle" font-size="13" font-weight="600" fill="#101828">Promotion Service</text>
+  <text x="384" y="657" text-anchor="middle" font-size="11" fill="#475467">signed promo token · redemptions</text>
+  <text x="384" y="673" text-anchor="middle" font-size="11" fill="#475467">Order verifies it locally</text>
+  <rect x="524" y="612" width="220" height="74" rx="10" fill="#e8f8ef" stroke="#12b76a"/>
+  <text x="634" y="638" text-anchor="middle" font-size="13" font-weight="600" fill="#101828">Chat Service</text>
+  <text x="634" y="657" text-anchor="middle" font-size="11" fill="#475467">rider-driver messages · outbox</text>
+  <text x="634" y="673" text-anchor="middle" font-size="11" fill="#475467">pushed via Notification</text>
+  <rect x="774" y="612" width="212" height="74" rx="10" fill="#e8f8ef" stroke="#12b76a"/>
+  <text x="880" y="638" text-anchor="middle" font-size="13" font-weight="600" fill="#101828">Profile Service</text>
+  <text x="880" y="657" text-anchor="middle" font-size="11" fill="#475467">profiles · driver approval</text>
+  <text x="880" y="673" text-anchor="middle" font-size="11" fill="#475467">Matching enforces the result</text>
+
   <!-- legend -->
-  <text x="24" y="568" font-size="12" fill="#475467">Solid arrows: HTTP requests and Kafka events. Producers write state and event in one Postgres transaction (outbox); consumers are idempotent (at-least-once).</text>
-  <text x="24" y="588" font-size="12" fill="#475467">Every API and WebSocket carries a JWT (Auth Service, dev only). Drivers' phones never talk to Kafka directly: they report through the Location Gateway.</text>
-  <text x="24" y="608" font-size="12" fill="#475467">Data stores: Postgres (orders, trips, ratings, payments and ledger, outbox) and Redis (driver status and GEO, routing, pub/sub).</text>
+  <text x="24" y="714" font-size="12" fill="#475467">Solid arrows: HTTP requests and Kafka events. Producers write state and event in one Postgres transaction (outbox); consumers are idempotent (at-least-once).</text>
+  <text x="24" y="734" font-size="12" fill="#475467">Every API and WebSocket carries a JWT (Auth Service, dev only; roles rider, driver, admin). Drivers' phones never talk to Kafka: they report through the Location Gateway.</text>
+  <text x="24" y="754" font-size="12" fill="#475467">Data stores: Postgres (orders, trips, ratings, payments, promotions, chat, profiles, outbox) and Redis (driver status and GEO, routing, pub/sub).</text>
 </svg>

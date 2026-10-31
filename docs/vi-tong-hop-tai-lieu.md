@@ -18,7 +18,7 @@ Toàn bộ tài liệu gốc của dự án viết bằng **tiếng Anh**. File 
 
 1. `README.md`: tổng quan.
 2. `docs/guide.md`: chạy và thử.
-3. `docs/adr/README.md`, rồi lần lượt ADR 0001 đến 0010.
+3. `docs/adr/README.md`, rồi lần lượt ADR 0001 đến 0013.
 4. `docs/scaling.md` và `docs/performance.md`.
 5. Đặc tả: `requirements.md` → `design.md` → `tasks.md` → `production-design.md`.
 6. Vận hành và triển khai khi cần: `runbook.md`, `disaster-recovery.md`, `security.md`, `deploy/README.md`, `deploy/loadtest/README.md`.
@@ -64,6 +64,9 @@ Mỗi ADR theo khung: Context (bối cảnh), Decision (quyết định), Altern
 | [0008](adr/0008-notification-fan-out-and-recovery.md) | Thông báo realtime | Đẩy qua WebSocket nhờ Redis pub/sub; đẩy là best-effort, REST là đường khôi phục |
 | [0009](adr/0009-location-gateway-and-telemetry-stream.md) | Luồng vị trí | Tài xế không ghi thẳng vào Kafka, gateway giới hạn tốc độ và bỏ báo cáo thừa; độ bền thấp hơn các event giao dịch |
 | [0010](adr/0010-payment-ledger-and-provider-idempotency.md) | Thanh toán | Sổ cái kép trong Postgres, nhà cung cấp thẻ nằm sau interface idempotent, tiền là số nguyên |
+| [0011](adr/0011-signed-promo-token-instead-of-a-booking-time-call.md) | Khuyến mãi | Mã giảm giá được ký, dùng một lần, Order Service tự kiểm tra tại chỗ nên đặt xe không phụ thuộc Promotion Service; giới hạn tổng chỉ là "mềm" |
+| [0012](adr/0012-chat-push-is-best-effort-and-private.md) | Chat | Tin nhắn lưu bền, đẩy realtime chỉ là gợi ý, REST là nguồn đúng; không bao giờ ghi nội dung tin nhắn vào log |
+| [0013](adr/0013-driver-eligibility-through-an-event-and-redis.md) | Đăng ký tài xế | Profile Service quyết định, Matching thi hành qua event áp dụng nguyên tử trong Redis; kết quả cũ bị bỏ qua |
 
 ### Thư mục `specs/ride-booking-mini/` (đặc tả theo kiểu spec-driven)
 
@@ -71,9 +74,11 @@ Mỗi ADR theo khung: Context (bối cảnh), Decision (quyết định), Altern
 
 **[design.md](../specs/ride-booking-mini/design.md)**: thiết kế. Sơ đồ luồng, bảng service (nhận event nào, phát event nào, lưu ở đâu), bảng topic (partition key, số partition), cách chạy surge pricing, Avro và Schema Registry.
 
-**[tasks.md](../specs/ride-booking-mini/tasks.md)**: danh sách việc theo phase 0 đến 7 (nền tảng, Order và Matching, vòng đời chuyến đi, vị trí tài xế, thông báo, độ bền, design system, tích hợp end-to-end) và backlog (đánh giá, tip, surge, loại xe, ksqlDB, Schema Registry, thanh toán). Mọi mục đã đánh dấu xong.
+**[tasks.md](../specs/ride-booking-mini/tasks.md)**: danh sách việc theo phase 0 đến 7 (nền tảng, Order và Matching, vòng đời chuyến đi, vị trí tài xế, thông báo, độ bền, design system, tích hợp end-to-end), các phase 8 đến 11 (Routing, khuyến mãi, chat, hồ sơ và đăng ký tài xế) và backlog (đánh giá, tip, surge, loại xe, ksqlDB, Schema Registry, thanh toán). Mọi mục đã đánh dấu xong.
 
-**[production-design.md](../specs/ride-booking-mini/production-design.md)** (khoảng 435 dòng): thiết kế bản production hóa, 16 mục đánh số. Ghi lại từng đợt nâng cấp, các giới hạn đã biết, cách đã kiểm thử, và mục 16 về Payment Service. Đây là nơi nói thẳng hệ thống còn thiếu gì.
+**[realism-design.md](../specs/ride-booking-mini/realism-design.md)**: thiết kế cho phase 8 đến 11, tức bốn service thêm vào để app giống app thật: Routing (khoảng cách và ETA, thêm vai trò `admin`), Promotion (mã giảm giá), Chat (nhắn tin rider và driver), Profile (hồ sơ và duyệt tài xế). Mỗi phần nêu rõ lý do, phạm vi và những gì cố ý không làm.
+
+**[production-design.md](../specs/ride-booking-mini/production-design.md)** (hơn 600 dòng): thiết kế bản production hóa, 20 mục đánh số. Ghi lại từng đợt nâng cấp, các giới hạn đã biết, cách đã kiểm thử, mục 16 về Payment, mục 17 Routing, 18 Promotions, 19 Chat và 20 Profiles. Đây là nơi nói thẳng hệ thống còn thiếu gì.
 
 ### Thư mục `deploy/`
 
@@ -102,4 +107,6 @@ Cấu hình các sub-agent của Claude Code, mỗi file khai báo một vai tr�
 - **Số đo hiệu năng** (ví dụ 250 đơn/giây) đo trên **một máy 4 nhân** chạy cả hệ thống. Nó cho biết cái gì bị nghẽn, không phải năng lực production.
 - **Chưa chạy trên cluster Kubernetes thật.** Các manifest, KEDA, Sentinel, ACL mới được kiểm tra từng phần.
 - **Thanh toán là giả lập.** Chỉ có nhà cung cấp sandbox, không có thẻ thật, chi trả tài xế, hoàn tiền hay đối soát.
+- **Routing là mô hình tính toán**, không phải dữ liệu bản đồ thật. **Đăng ký tài xế** không có tải giấy tờ hay xác minh danh tính, và số điện thoại không được xác minh.
+- **Hạn mức khuyến mãi tổng chỉ là "mềm"**: hai đơn đang xử lý cùng lúc có thể cùng dùng lượt cuối cùng (xem ADR 0011).
 - **`production-design.md` ghi lại theo thời gian**, nên một số đoạn mô tả trạng thái lúc viết. Khi hai file mâu thuẫn, ưu tiên `README.md` và các ADR vì chúng phản ánh hiện trạng.

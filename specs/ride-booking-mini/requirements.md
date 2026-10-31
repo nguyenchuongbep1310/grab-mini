@@ -77,7 +77,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - THE token issuer SHALL be able to sign a token with the role `admin`; a service SHALL treat a role other than `rider`, `driver` or `admin` as invalid.
   - WHILE `APP_ENV=production`, THE Auth Service (the development issuer) SHALL refuse to start unless `ALLOW_DEV_TOKENS=true`.
   - A route that names the roles it admits SHALL refuse an `admin` token unless `admin` is among them (403).
-- **US-7.4** (Rider App screens, task 8.4, not built yet): As a rider, I want to see the distance and "about N min" before booking, and "driver arrives in N min" after a match.
+- **US-7.4** (Rider App screens, task 8.4, done): As a rider, I want to see the distance and "about N min" before booking, and "driver arrives in N min" after a match.
   - WHEN the pickup, dropoff or vehicle changes, THE Rider App SHALL show the distance and the estimated time from Routing Service, and SHALL still allow booking if Routing is unavailable.
   - WHEN the rider has been matched, THE Rider App SHALL show the driver's estimated arrival, recomputed from the driver's pushed location at a throttled rate.
 - **US-7.5**: As a rider, I want the price I pay to match the routed quote I saw, even if I book late.
@@ -108,7 +108,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN a caller with an `admin` token posts a valid promotion, THE Promotion Service SHALL create it (201); IF the code exists, 409; IF a field is invalid, 400 with the code `invalid_promotion`.
   - WHEN an admin disables a promotion, THE Promotion Service SHALL stop validating it; orders that already carry its discount SHALL keep it.
   - IF the caller is a rider or a driver, THE Promotion Service SHALL answer 403.
-- **US-8.6** (Rider App and Ops dashboard screens, task 9.4, not built yet): As a rider, I want a promo-code field next to the price, showing the discount and the new total; as an operator, I want to list, create and disable promotions from the Ops dashboard.
+- **US-8.6** (Rider App and Ops dashboard screens, task 9.4, done): As a rider, I want a promo-code field next to the price, showing the discount and the new total; as an operator, I want to list, create and disable promotions from the Ops dashboard.
 
 ### 9. Chat
 - **US-9.1**: As a rider or a driver on a trip, I want to send short text messages to the other person, so we can find each other.
@@ -131,7 +131,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN a sender exceeds `CHAT_RATE_PER_MINUTE` (default 20) messages a minute, THE Chat Service SHALL answer 429 with a `Retry-After` header and the code `rate_limited`. The limit is per sender and kept in memory on each instance.
   - WHEN a request carries an `Idempotency-Key` already used by that sender on that trip with the same text, THE Chat Service SHALL return the saved message and SHALL NOT publish again; with different text, 422 `key_mismatch`.
   - THE Chat Service SHALL delete messages, and the rows of trips that ended, after `CHAT_RETENTION_DAYS` (default 30).
-- **US-9.6** (`ChatSheet` in both apps, task 10.3, not built yet): As a rider or a driver, I want a chat sheet opened from the trip screen, that loads the history when opened and appends new messages from pushes.
+- **US-9.6** (`ChatSheet` in both apps, task 10.3, done): As a rider or a driver, I want a chat sheet opened from the trip screen, that loads the history when opened and appends new messages from pushes.
 
 ### 10. Profiles and driver onboarding
 - **US-10.1**: As a rider, I want a profile with my name and phone, so drivers and the app know who I am.
@@ -155,7 +155,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN a signed-in user asks `GET /drivers/{id}/public` for an `APPROVED` driver, THE Profile Service SHALL return the name, vehicle type, plate, model and colour and SHALL NOT return the phone or status; for any other driver it SHALL answer 404.
 - **US-10.6**: As a person whose data is held, I want my name, phone and plate kept out of logs.
   - THE Profile Service SHALL NOT write a name, phone or plate to a log, and SHALL send `Cache-Control: no-store` with a profile.
-- **US-10.7** (Rider and Driver Apps and the Ops dashboard, task 11.3, not built yet): As a rider I want a profile screen and to see the matched driver's name, vehicle and plate; as a driver an onboarding form and a status screen (pending, approved, rejected with the reason) and no trips until approved; as an operator a review queue.
+- **US-10.7** (Rider and Driver Apps and the Ops dashboard, task 11.3, done): As a rider I want a profile screen and to see the matched driver's name, vehicle and plate; as a driver an onboarding form and a status screen (pending, approved, rejected with the reason) and no trips until approved; as an operator a review queue.
 
 ## Technical constraints
 - Kafka runs locally via Docker Compose, with Kafka UI for observing topics/offsets.

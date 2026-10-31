@@ -14,6 +14,9 @@ Each record states the problem, what was chosen, what was given up, and what wou
 | [0008](0008-notification-fan-out-and-recovery.md) | Realtime delivery | WebSocket pushes fanned out through Redis pub/sub; push is best-effort, REST is the recovery path |
 | [0009](0009-location-gateway-and-telemetry-stream.md) | Location telemetry | Drivers never write to Kafka; a gateway rate-limits and drops redundant reports |
 | [0010](0010-payment-ledger-and-provider-idempotency.md) | Payments | Double-entry ledger in Postgres; the card provider sits behind an idempotent interface; no float money |
+| [0011](0011-signed-promo-token-instead-of-a-booking-time-call.md) | Promotions | A signed, single-use promo token verified locally, so booking never calls Promotion Service; the global limit is soft |
+| [0012](0012-chat-push-is-best-effort-and-private.md) | Chat | Messages are durable, push is a best-effort hint, REST is the truth; text is never logged |
+| [0013](0013-driver-eligibility-through-an-event-and-redis.md) | Driver onboarding | Profile Service decides, Matching enforces the result through an event applied atomically in Redis |
 
 See also [scaling.md](../scaling.md) (what breaks first at 10x) and [performance.md](../performance.md) (what was measured).
 

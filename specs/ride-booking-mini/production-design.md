@@ -526,7 +526,7 @@ What is still true: a redemption is released only by these events. A trip cancel
 
 ## 19. Chat: Chat Service (done)
 
-The rider and the driver of a trip can exchange short text messages. Chat Service owns the messages and who may send them; Notification Service pushes them. The apps' `ChatSheet` is task 10.3 and is not built yet.
+The rider and the driver of a trip can exchange short text messages. Chat Service owns the messages and who may send them; Notification Service pushes them. The apps' `ChatSheet` is built (task 10.3) and reloads the history when its socket reconnects.
 
 **The service.** `chat-service` (port 3011) has Postgres and the outbox, consumes `trip.status.changed` (group `chat-service-group`, retry tiers and DLQ from `pkg/kafkaconsumer`), publishes `chat.message.sent` (key `tripId`, 6 partitions, 7 days of retention in the manifests), and has no Redis.
 Tables: `chat_trips` (who is on a trip and its status), `chat_messages`, `chat_events` (eventId dedupe) and the outbox. Migrations run in a Job (`chat-service migrate`). `chat_events` is pruned after 30 days by a retention CronJob like the other dedupe tables; the messages and finished trips are pruned by the service itself (below).
@@ -553,7 +553,7 @@ No schema change was needed for the participants: `trip.status.changed` already 
 
 **Known limitations.**
 - **No read receipts, typing indicators, delivery status or attachments**, by design (out of scope). The sender cannot tell whether the other person saw a message, or even whether the push reached a socket.
-- **A missed push is only found by reloading the history.** An app that has the sheet open while its socket was down shows nothing new until the socket reconnects and the app reloads (the API returns `open` and the newest page for exactly that; the `ChatSheet` reloading on reconnect is part of task 10.3).
+- **A missed push is only found by reloading the history.** An app that has the sheet open while its socket was down shows nothing new until the socket reconnects and the app reloads (the API returns `open` and the newest page for exactly that; the `useChat` hook reloads on reconnect).
 - **The rate limit is per instance** (above), and a burst of requests that are rejected still spends the sender's allowance.
 - **Moderation is length, control characters and the rate limit.** No profanity filter, link filter, reporting or blocking. A driver and a rider can send each other anything that is printable text, and an operator cannot see or remove a message through any API.
 - **Not tied to the order's lifecycle beyond the trip.** A chat exists only once its trip does (a rider cannot message while still `PENDING`); a trip event that is lost (DLQ) leaves the chat closed to that trip until it is redriven.
@@ -564,7 +564,7 @@ No schema change was needed for the participants: `trip.status.changed` already 
 
 ## 20. Profiles and onboarding: Profile Service (done)
 
-People are no longer bare ids: riders have a name and a phone, drivers have a name, a phone and a vehicle, and a driver is offered trips only once an admin has approved them. Profile Service owns the profiles and the decision; Matching Service enforces it. The screens are task 11.3 and are not built yet.
+People are no longer bare ids: riders have a name and a phone, drivers have a name, a phone and a vehicle, and a driver is offered trips only once an admin has approved them. Profile Service owns the profiles and the decision; Matching Service enforces it. The screens are built (task 11.3): a profile sheet and driver card in the Rider App, onboarding and status screens in the Driver App, and a review queue in Ops.
 
 **The service.** `profile-service` (port 3012) has Postgres and the outbox, publishes `driver.application.reviewed` (key `driverId`, 6 partitions, 7 days of retention in the manifests) and consumes nothing, so it has no consumer group, no dedupe table and no retention CronJob, and scales on CPU. Tables: `rider_profiles`, `driver_profiles` and the outbox; migrations run in a Job (`profile-service migrate`). Matching Service gains a third consumer group, `matching-service-driver-review-group` (retry tiers and DLQ from `pkg/kafkaconsumer`), with its ACLs and a KEDA trigger; its alerts are `DriverReviewConsumerLagHigh` and `DriverReviewDeadLettered`.
 
@@ -603,5 +603,5 @@ People are no longer bare ids: riders have a name and a phone, drivers have a na
 - **A driver on a trip keeps it.** Suspension does not cancel a trip in progress, by design, and a driver who is `ASSIGNED` when suspended becomes `ON_TRIP` as Trip Service handles the matched order. An operator who wants them off the road at once must cancel the trip.
 - **No uniqueness of plates or phones.** Two drivers can register the same plate; the reviewer is the check.
 - **The rate limit of the public view is per instance** (like chat's), and a suspended driver's view is a 404 even to the rider on their trip.
-- **Apps.** The screens (a profile page, the onboarding form and status, the driver card and the review queue) are task 11.3; until then the endpoints and the client helpers in `packages/client` are all there is, and drivers in the Driver App still see trips if they were seeded into Redis.
+- **Apps.** The screens are built (task 11.3). The Driver App gate is cosmetic: Matching is the real gate, and a driver who is not approved but already has a trip keeps seeing it so the rider is not stranded. If the profile service is unreachable on first load, the Driver App shows the normal app with a notice instead of locking an existing driver out.
 - **Egress.** Profile Service needs Postgres, Kafka, Schema Registry, the OTLP collector and the JWKS endpoint (no Redis); the ingress controller reaches its public port for the apps. Matching Service needs Kafka and Schema Registry for the new topic in addition to what it had.

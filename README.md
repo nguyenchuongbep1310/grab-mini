@@ -9,12 +9,13 @@ A ride-hailing backend in Go built around Apache Kafka, with a React design syst
 
 ## What it demonstrates
 
-- **Event-driven services on Kafka.** Order, Matching, Trip, Pricing, Payment, Rating, Driver Location and Notification services communicate only through Avro events. ksqlDB reads the same topics for live analytics.
+- **Event-driven services on Kafka.** Order, Matching, Trip, Pricing, Routing, Promotion, Payment, Chat, Profile, Rating, Driver Location and Notification services communicate through Avro events (the one plain HTTP call is Pricing asking Routing for a distance, and it fails open). ksqlDB reads the same topics for live analytics.
 - **No lost or phantom events.** State and event are committed in one Postgres transaction (transactional outbox); every consumer is idempotent, so at-least-once delivery is safe.
 - **No double-booked drivers.** Matching claims a driver with one atomic Redis script and a lease that expires if the matcher dies.
 - **Money done carefully.** Payment Service settles each ride in a double-entry ledger: entries must sum to zero (checked in code and by a database trigger), amounts are integers, and a charge is unique per trip and kind, so a replay or crash never charges twice.
+- **Features of a real app, each with its trade-off written down.** Promo codes as signed single-use tokens that booking verifies locally ([ADR 0011](docs/adr/0011-signed-promo-token-instead-of-a-booking-time-call.md)), rider-driver chat with durable messages and best-effort push ([ADR 0012](docs/adr/0012-chat-push-is-best-effort-and-private.md)), distance and ETA, and driver onboarding where an admin's decision reaches Matching through an event ([ADR 0013](docs/adr/0013-driver-eligibility-through-an-event-and-redis.md)).
 - **Failure handling.** Retry topics (5 s, 1 min, 10 min), dead-letter topics, permanent errors that skip retries, and a redrive tool for operators.
-- **Evolvable contracts.** Avro in Schema Registry with `BACKWARD` compatibility; three schema versions shipped without breaking consumers.
+- **Evolvable contracts.** Avro in Schema Registry with `BACKWARD` compatibility; `order.created` is on its fourth version without breaking a consumer.
 - **Operable.** Prometheus alerts with a runbook, Grafana and Loki, traces carried through the outbox and Kafka, Kubernetes manifests with KEDA autoscaling, ACLs, and a disaster-recovery guide.
 - **A shared design system.** One component library (`packages/ui`) used by the Rider, Driver and Ops apps.
 
@@ -56,7 +57,7 @@ This starts the infrastructure, seeds five drivers, runs every service and opens
 
 ## Honest limits
 
-It is a learning and portfolio project, not a product. Tokens are Ed25519 JWTs verified through a JWKS, but the issuer is a development token service, not a real identity provider. Rides are settled through a double-entry ledger against a sandbox payment provider: no real card processor, payouts, refunds or reconciliation. Kubernetes manifests (including Redis/Sentinel, backups, retention and network policies), Sentinel and ACL configuration are tested in pieces (scripts and client behaviour against real Redis/Postgres/Kafka, manifests schema-checked) but the full stack has not been run on a real cluster. Single region only.
+It is a learning and portfolio project, not a product. Tokens are Ed25519 JWTs verified through a JWKS, but the issuer is a development token service, not a real identity provider. Rides are settled through a double-entry ledger against a sandbox payment provider: no real card processor, payouts, refunds or reconciliation. Routing is a deterministic model, not real map data. Driver onboarding has no document upload or identity check, and phone numbers are not verified. Kubernetes manifests (including Redis/Sentinel, backups, retention and network policies), Sentinel and ACL configuration are tested in pieces (scripts and client behaviour against real Redis/Postgres/Kafka, manifests schema-checked) but the full stack has not been run on a real cluster. Single region only.
 
 ## License
 
