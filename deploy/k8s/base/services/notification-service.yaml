@@ -88,6 +88,11 @@ spec:
             configMapKeyRef:
               name: grab-mini-config
               key: ALLOWED_ORIGINS
+        - name: MAX_SOCKETS_PER_USER
+          valueFrom:
+            configMapKeyRef:
+              name: grab-mini-config
+              key: MAX_SOCKETS_PER_USER
         volumeMounts:
         - name: kafka-user
           mountPath: /etc/kafka/user

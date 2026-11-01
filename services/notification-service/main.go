@@ -173,6 +173,7 @@ func main() {
 		log.Fatal(err)
 	}
 	h := newHub(ctx, rdb)
+	h.maxSockets = env.MaxSocketsPerUser
 	var background sync.WaitGroup
 	background.Go(func() { h.run(ctx) })
 	background.Go(func() { runConsumer(ctx, env, h) })

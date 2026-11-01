@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"grab-mini/pkg/secret"
@@ -15,6 +16,8 @@ type Env struct {
 	RedisAddr         string
 	// Origins allowed to open a WebSocket from a browser page.
 	AllowedOrigins []string
+	// Simultaneous sockets per rider or driver; the oldest is closed beyond it.
+	MaxSocketsPerUser int
 }
 
 func loadEnv() Env {
@@ -24,6 +27,7 @@ func loadEnv() Env {
 		KafkaBrokers:      []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
 		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
 		AllowedOrigins:    allowedOrigins(),
+		MaxSocketsPerUser: maxSocketsPerUser(),
 	}
 }
 
@@ -55,4 +59,16 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// maxSocketsPerUser is MAX_SOCKETS_PER_USER; unset or invalid means the default.
+func maxSocketsPerUser() int {
+	if v := os.Getenv("MAX_SOCKETS_PER_USER"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil && n >= 1 {
+			return n
+		}
+		log.Printf("ignoring invalid MAX_SOCKETS_PER_USER=%q, using %d", v, defaultMaxSocketsPerUser)
+	}
+	return defaultMaxSocketsPerUser
 }

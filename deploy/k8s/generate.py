@@ -67,7 +67,7 @@ SERVICES = {
     # Rider and driver profiles, driver onboarding and admin review; publishes driver.application.reviewed through
     # the outbox and consumes nothing, so it scales on CPU like the other API that only produces. No Redis.
     "profile-service": dict(port=3012, kind="api", db=True, redis=False, scale=("cpu", 2, 6)),
-    "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True),
+    "notification-service": dict(port=3003, kind="api", db=False, redis=True, scale=("lag", 2, 24), origins=True, sockets=True),
     "location-gateway": dict(port=3006, kind="api", db=False, redis=False, scale=("cpu", 3, 30)),
     "matching-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 2, 12)),
     "driver-location-service": dict(port=None, kind="worker", db=False, redis=True, scale=("lag", 3, 24)),
@@ -229,6 +229,8 @@ def deployment(name, spec):
         env.append({"name": "PROMO_SECRET_FILE", "value": "/etc/secrets/promo/secret"})
     if spec.get("origins"):
         env.append({"name": "ALLOWED_ORIGINS", "valueFrom": {"configMapKeyRef": {"name": "grab-mini-config", "key": "ALLOWED_ORIGINS"}}})
+    if spec.get("sockets"):
+        env.append({"name": "MAX_SOCKETS_PER_USER", "valueFrom": {"configMapKeyRef": {"name": "grab-mini-config", "key": "MAX_SOCKETS_PER_USER"}}})
 
     ports = [{"name": "admin", "containerPort": ADMIN_PORT}]
     if api:
@@ -989,6 +991,9 @@ def config_map():
                 "TRIP_LOOKUP_TIMEOUT_MS": "500",
                 "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector.monitoring:4318",
                 "ALLOWED_ORIGINS": "https://app.example.com",
+                # Notification Service: sockets one rider or driver may hold at once (phone + web);
+                # beyond it the oldest is closed (notification_sockets_evicted_total).
+                "MAX_SOCKETS_PER_USER": "5",
             }}
 
 

@@ -293,6 +293,7 @@ Behavior changes and trade-offs to be aware of:
 
 - **Retry topics reorder messages**: a message is retried after the messages that came behind it. The handlers that enable `RetryTiers` already tolerate this (state transitions are guarded by the current state, and every event has an `eventId`). `driver.location.updated` and Notification do not enable tiered retry: a notification re-sent minutes later would only show stale state.
 - **Redis becomes a dependency of Notification Service** (previously only Kafka). A message published to a Redis channel while nobody is subscribed is dropped, which matches the best-effort semantics of WebSocket: the app recovers through REST after reconnecting (design.md section 4d).
+- A rider or driver may have several sockets on an instance (phone and web); a push goes to all of them. The cap is `MAX_SOCKETS_PER_USER` (default 5): beyond it the oldest socket is closed and `notification_sockets_evicted_total{kind}` is incremented. `notification_sockets_open{kind}` counts sockets, not people. The Redis subscription is taken with the first socket and dropped with the last (ADR 0008).
 - Each location update costs one extra Redis `GET` (the driver→rider lookup) and at most two `PUBLISH`es. At 25,000 msg/s (section 1) this is the place to measure; if it becomes a problem, add a local cache for the driver→rider mapping.
 - Trip Service stores `rider_id` on the trip; trips created before this change have an empty `rider_id`, so their events use the fallback path (order→rider lookup in Redis).
 

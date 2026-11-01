@@ -185,7 +185,7 @@
         },
         {
           "expr": "sum by (kind) (notification_sockets_open)",
-          "legendFormat": "ws open: {{kind}}",
+          "legendFormat": "sockets open: {{kind}}",
           "refId": "C"
         }
       ],

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/redis/go-redis/v9"
 )
 
 // shrink makes the socket limits small enough to hit in a test.
@@ -91,50 +89,5 @@ func TestAClientThatAnswersPingsKeepsItsSocket(t *testing.T) {
 	case <-closed:
 		t.Fatal("a client that answers pings was dropped")
 	case <-time.After(800 * time.Millisecond): // four pong deadlines
-	}
-}
-
-// Redis is not reachable here: register logs that it could not subscribe, and
-// still tracks the socket, which is all this test is about.
-func TestAReplacedSocketIsClosedNotLeftOpen(t *testing.T) {
-	ctx := context.Background()
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
-	defer rdb.Close()
-	h := newHub(ctx, rdb)
-	up := newUpgrader(nil)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveWS(up, w, r,
-			func(ws *websocket.Conn) *conn { return h.register(ctx, kindRider, "rider-1", ws) },
-			func(c *conn) { h.unregister(ctx, kindRider, "rider-1", c) })
-	}))
-	defer srv.Close()
-	url := "ws" + strings.TrimPrefix(srv.URL, "http")
-
-	first, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer first.Close()
-	// Wait until the first is registered before the second replaces it.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		h.mu.RLock()
-		n := len(h.riderConns)
-		h.mu.RUnlock()
-		if n == 1 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	second, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-
-	first.SetReadDeadline(time.Now().Add(3 * time.Second))
-	_, _, err = first.ReadMessage()
-	if ne, ok := err.(interface{ Timeout() bool }); err == nil || (ok && ne.Timeout()) {
-		t.Fatalf("the replaced socket was left open (read gave %v)", err)
 	}
 }

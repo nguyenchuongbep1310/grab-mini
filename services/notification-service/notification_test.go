@@ -312,16 +312,16 @@ func TestASocketFromAnotherSitesPageIsRefused(t *testing.T) {
 	}
 }
 
-func TestTheOpenSocketGaugeFollowsConnectsAndDisconnects(t *testing.T) {
+func TestTheOpenSocketGaugeCountsSocketsNotPeople(t *testing.T) {
 	ctx, addr := setup(t)
 	a := newInstance(t, ctx, addr)
 	open := func() float64 { return testutil.ToFloat64(socketsOpen.WithLabelValues(kindRider)) }
 	base := open()
 
 	first := a.connect(t, kindRider, "gauge-rider")
-	second := a.connect(t, kindRider, "gauge-rider") // the same rider reconnecting is still one socket
-	if open()-base != 1 {
-		t.Errorf("gauge moved by %v for one rider connecting twice, want 1", open()-base)
+	second := a.connect(t, kindRider, "gauge-rider") // the same rider on a second device is a second socket
+	if open()-base != 2 {
+		t.Errorf("gauge moved by %v for one rider with two sockets, want 2", open()-base)
 	}
 	first.Close()
 	second.Close()
@@ -332,20 +332,5 @@ func TestTheOpenSocketGaugeFollowsConnectsAndDisconnects(t *testing.T) {
 			t.Fatalf("gauge stuck at %v, want %v after both sockets closed", open(), base)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func TestReconnectingClosesTheOlderSocket(t *testing.T) {
-	ctx, addr := setup(t)
-	a := newInstance(t, ctx, addr)
-	first := a.connect(t, kindRider, "rider-1")
-	second := a.connect(t, kindRider, "rider-1")
-	defer second.Close()
-
-	first.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, _, err := first.ReadMessage(); err == nil {
-		t.Fatal("the replaced socket delivered a message instead of being closed")
-	} else if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
-		t.Fatal("the replaced socket was left open")
 	}
 }
