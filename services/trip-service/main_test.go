@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/events"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -85,5 +88,17 @@ func TestNormalizeRatingTrimsAndCountsRunesAfterTrimming(t *testing.T) {
 	req = rateRequest{Stars: 5, Comment: strings.Repeat("é", 501)}
 	if normalizeRating(&req) == "" {
 		t.Error("501 runes accepted")
+	}
+}
+
+func TestTripJSONCarriesCompletedAtOnlyWhenSet(t *testing.T) {
+	at := time.Date(2026, 3, 1, 10, 30, 0, 0, time.UTC)
+	b, _ := json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted, CompletedAt: &at})
+	if !strings.Contains(string(b), `"completedAt":"2026-03-01T10:30:00Z"`) {
+		t.Errorf("completed trip JSON = %s", b)
+	}
+	b, _ = json.Marshal(trip{ID: "t", Status: events.TripStatusAssigned})
+	if strings.Contains(string(b), "completedAt") {
+		t.Errorf("unfinished trip JSON has completedAt: %s", b)
 	}
 }

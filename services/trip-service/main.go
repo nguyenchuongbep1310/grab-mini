@@ -278,7 +278,7 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 
 	if t.Status == targetStatus {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"tripId": t.ID, "status": string(t.Status)})
+		json.NewEncoder(w).Encode(transitionBody(t))
 		return
 	}
 
@@ -318,6 +318,12 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 	}
 
 	t.Status = targetStatus
+	if targetStatus == events.TripStatusCompleted {
+		// Report the time the database stored, not the time of this response.
+		if fresh, err := getTripByID(ctx, s.db, id); err == nil {
+			t.CompletedAt = fresh.CompletedAt
+		}
+	}
 
 	if onTransition != nil {
 		if err := onTransition(ctx, t); err != nil {
@@ -326,7 +332,7 @@ func (s *server) handleTransition(w http.ResponseWriter, r *http.Request, mayDo 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"tripId": t.ID, "status": string(t.Status)})
+	json.NewEncoder(w).Encode(transitionBody(t))
 }
 
 type rateRequest struct {

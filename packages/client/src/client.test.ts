@@ -22,6 +22,7 @@ import {
   getQuote,
   getRiderProfile,
   getRoute,
+  getTripByOrder,
   listChatMessages,
   listDriverApplications,
   listPromotions,
@@ -508,6 +509,30 @@ describe("auth & api client", () => {
     expect((await rateTrip("t-1", "rider-1", 5, "Great", 10000)).stars).toBe(5);
     expect((await getDriverRating("driver-1")).average).toBe(4.9);
     expect(await getDriverReviews("driver-1", { limit: 5 })).toHaveLength(1);
+    forgetToken();
+  });
+});
+
+describe("trip completedAt", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockReset();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is passed through for a completed trip and absent for others", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "t-1", orderId: "o-1", driverId: "d", status: "COMPLETED", completedAt: "2026-03-01T10:30:00.123456Z" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "t-2", orderId: "o-2", driverId: "d", status: "ASSIGNED" }), { status: 200 }));
+
+    expect((await getTripByOrder("o-1")).completedAt).toBe("2026-03-01T10:30:00.123456Z");
+    expect((await getTripByOrder("o-2")).completedAt).toBeUndefined();
     forgetToken();
   });
 });

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -373,5 +374,84 @@ func TestOnlyCommittedTransitionsAreCounted(t *testing.T) {
 	s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e"))
 	if moved()-before != 1 {
 		t.Errorf("a committed transition moved the counter by %v, want 1", moved()-before)
+	}
+}
+
+func TestCompletedAtIsSetOnceByTheFirstCompletionAndServedByTheAPI(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	if tr.CompletedAt != nil {
+		t.Fatalf("a new trip has completedAt %v", tr.CompletedAt)
+	}
+	s, _ := newServer(db, rdb)
+	inProgress := []events.TripStatus{events.TripStatusInProgress}
+
+	if ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e1")); err != nil || !ok {
+		t.Fatalf("pickup = %v, %v", ok, err)
+	}
+	if got, _ := getTripByID(ctx, db, tr.ID); got.CompletedAt != nil {
+		t.Errorf("an in-progress trip has completedAt %v", got.CompletedAt)
+	}
+	if ok, err := s.transitionWithEvent(ctx, tr.ID, inProgress, events.TripStatusCompleted, completedAt, []byte(tr.ID), []byte("e2")); err != nil || !ok {
+		t.Fatalf("complete = %v, %v", ok, err)
+	}
+	first, _ := getTripByID(ctx, db, tr.ID)
+	if first.CompletedAt == nil || time.Since(*first.CompletedAt) > time.Minute {
+		t.Fatalf("completedAt = %v, want about now", first.CompletedAt)
+	}
+
+	// Completing again is a no-op: no transition, and the time does not move.
+	time.Sleep(20 * time.Millisecond)
+	if ok, err := s.transitionWithEvent(ctx, tr.ID, inProgress, events.TripStatusCompleted, completedAt, []byte(tr.ID), []byte("e3")); err != nil || ok {
+		t.Fatalf("second complete = %v, %v; want false, nil", ok, err)
+	}
+	second, _ := getTripByID(ctx, db, tr.ID)
+	if !second.CompletedAt.Equal(*first.CompletedAt) {
+		t.Errorf("completedAt moved from %v to %v", first.CompletedAt, second.CompletedAt)
+	}
+
+	// The HTTP endpoints serve it, and the repeat call answers with the same time.
+	issuer, verifier := authtest.Pair(t, time.Hour)
+	mux := s.routes(verifier)
+	call := func(method, path string, role auth.Role, subject string) map[string]any {
+		req := httptest.NewRequest(method, path, nil)
+		tok, _, _ := issuer.Issue(role, subject)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s %s = %d", method, path, rec.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	want := first.CompletedAt.UTC().Format(time.RFC3339Nano)
+	for name, body := range map[string]map[string]any{
+		"by id":       call("GET", "/trips/"+tr.ID, auth.Rider, "rider-1"),
+		"by order":    call("GET", "/trips/by-order/o1", auth.Driver, "driver-1"),
+		"repeat done": call("POST", "/trips/"+tr.ID+"/complete", auth.Driver, "driver-1"),
+	} {
+		if body["completedAt"] != want {
+			t.Errorf("%s: completedAt = %v, want %s", name, body["completedAt"], want)
+		}
+	}
+}
+
+func TestACancelledTripHasNoCompletedAt(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s, _ := newServer(db, rdb)
+	if ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusCancelled, cancelledAt, []byte(tr.ID), []byte("e"), cancelInfo{By: "RIDER"}); err != nil || !ok {
+		t.Fatalf("cancel = %v, %v", ok, err)
+	}
+	if got, _ := getTripByID(ctx, db, tr.ID); got.CompletedAt != nil {
+		t.Errorf("cancelled trip has completedAt %v", got.CompletedAt)
 	}
 }

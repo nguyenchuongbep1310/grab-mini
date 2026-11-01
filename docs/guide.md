@@ -197,10 +197,10 @@ curl localhost:3001/riders/<riderId>/latest-order     # what a reloaded Rider Ap
 
 # Trip Service
 curl localhost:3002/trips/by-order/<orderId>
-curl localhost:3002/trips/<tripId>
+curl localhost:3002/trips/<tripId>                    # a COMPLETED trip also has completedAt (RFC 3339); empty for the others
 curl localhost:3002/drivers/<driverId>/active-trip    # the driver's ASSIGNED or IN_PROGRESS trip, else 404
 curl -X POST localhost:3002/trips/<tripId>/pickup     # ASSIGNED -> IN_PROGRESS
-curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED, driver becomes AVAILABLE
+curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED (answers with completedAt), driver becomes AVAILABLE
 curl -X POST localhost:3002/trips/<tripId>/cancel     # from ASSIGNED or IN_PROGRESS; 409 once COMPLETED
 curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/json" \
   -d '{"riderId": "rider-1", "stars": 5, "comment": "Smooth ride", "tipAmount": 20000}'   # COMPLETED trips only, once (409 otherwise); tipAmount is optional whole VND, 0 to 1,000,000

@@ -79,6 +79,8 @@ export interface Trip {
   /** Set once CANCELLED. */
   cancelledBy?: CancelledBy;
   cancelReason?: string;
+  /** When the trip was completed (RFC 3339). Only COMPLETED trips have it; absent for every other status, CANCELLED included. */
+  completedAt?: string;
 }
 
 export interface DriverRating {
@@ -262,7 +264,7 @@ export function tripAction(
   tripId: string,
   action: TripAction,
   reason?: string,
-): Promise<{ tripId: string; status: TripStatus }> {
+): Promise<{ tripId: string; status: TripStatus; completedAt?: string }> {
   const note = action === "cancel" && reason ? reason : undefined;
   return request(`${TRIP_API}/trips/${tripId}/${action}`, {
     method: "POST",

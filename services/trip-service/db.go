@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -82,6 +83,20 @@ type trip struct {
 	// Set once CANCELLED: RIDER or DRIVER, and the reason they gave (if any).
 	CancelledBy  string `json:"cancelledBy,omitempty"`
 	CancelReason string `json:"cancelReason,omitempty"`
+	// When the trip was completed (RFC 3339, from trips.completed_at). Only
+	// COMPLETED trips have one; it is omitted for every other status, a
+	// cancelled trip included. Written once, by the first completion.
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+}
+
+// transitionBody is the response of pickup/complete/cancel: the trip id and
+// status, plus completedAt once the trip is COMPLETED.
+func transitionBody(t *trip) map[string]string {
+	body := map[string]string{"tripId": t.ID, "status": string(t.Status)}
+	if t.CompletedAt != nil {
+		body["completedAt"] = t.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return body
 }
 
 // cancelInfo says who cancelled a trip and why. It rides along with the
@@ -89,13 +104,13 @@ type trip struct {
 type cancelInfo struct{ By, Reason string }
 
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips WHERE id = $1`, id)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips WHERE id = $1`, id)
 }
 
 // getTripByOrderID lets a client that only knows the orderId (e.g. from an
 // order.matched push) find the trip Trip Service created for it.
 func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips WHERE order_id = $1`, orderID)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips WHERE order_id = $1`, orderID)
 }
 
 // getActiveTripByDriver is the driver's trip still in flight (ASSIGNED or
@@ -104,14 +119,18 @@ func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*t
 // the newest wins.
 func getActiveTripByDriver(ctx context.Context, db *pgxpool.Pool, driverID string) (*trip, error) {
 	return queryTrip(ctx, db, `
-		SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason FROM trips
+		SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips
 		WHERE driver_id = $1 AND status IN ('ASSIGNED', 'IN_PROGRESS')
 		ORDER BY created_at DESC LIMIT 1`, driverID)
 }
 
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating, &t.CancelledBy, &t.CancelReason)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating, &t.CancelledBy, &t.CancelReason, &t.CompletedAt)
+	if t.CompletedAt != nil {
+		u := t.CompletedAt.UTC()
+		t.CompletedAt = &u
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
 	}
