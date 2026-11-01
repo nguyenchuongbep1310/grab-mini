@@ -17,6 +17,7 @@ Each record states the problem, what was chosen, what was given up, and what wou
 | [0011](0011-signed-promo-token-instead-of-a-booking-time-call.md) | Promotions | A signed, single-use promo token verified locally, so booking never calls Promotion Service; the global limit is soft |
 | [0012](0012-chat-push-is-best-effort-and-private.md) | Chat | Messages are durable, push is a best-effort hint, REST is the truth; text is never logged |
 | [0013](0013-driver-eligibility-through-an-event-and-redis.md) | Driver onboarding | Profile Service decides, Matching enforces the result through an event applied atomically in Redis |
+| [0014](0014-clean-architecture-for-go-services.md) | Code structure | Larger Go services get `internal/{domain,app,adapters}` with a tested dependency rule; small ones stay flat; payment-service is the pilot |
 
 See also [scaling.md](../scaling.md) (what breaks first at 10x) and [performance.md](../performance.md) (what was measured).
 
