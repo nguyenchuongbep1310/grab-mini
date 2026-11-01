@@ -1,10 +1,8 @@
-package main
+package domain
 
 import (
 	"fmt"
 	"time"
-
-	"grab-mini/pkg/events"
 )
 
 // Policy holds the business rules that decide what a trip event costs. It is
@@ -26,10 +24,10 @@ type Policy struct {
 }
 
 func (p Policy) Validate() error {
-	if p.CommissionBps < 0 || p.CommissionBps > bpsDenominator {
-		return fmt.Errorf("commission must be 0 to %d basis points, got %d", bpsDenominator, p.CommissionBps)
+	if p.CommissionBps < 0 || p.CommissionBps > BpsDenominator {
+		return fmt.Errorf("commission must be 0 to %d basis points, got %d", BpsDenominator, p.CommissionBps)
 	}
-	if err := checkAmount(p.CancellationFee); err != nil {
+	if err := CheckAmount(p.CancellationFee); err != nil {
 		return fmt.Errorf("cancellation fee: %w", err)
 	}
 	if p.CancellationGrace < 0 {
@@ -40,47 +38,47 @@ func (p Policy) Validate() error {
 
 // Why an event produced no charge (the label of payments_skipped_total).
 const (
-	skipNoPrice      = "no_price"      // the order predates priced orders (price is null)
-	skipZeroAmount   = "zero_amount"   // a free ride, or no tip
-	skipFeeDisabled  = "fee_disabled"  // the rider cancelled but the cancellation fee is 0
-	skipWithinGrace  = "within_grace"  // the rider cancelled soon enough after the assignment to pay nothing
-	skipNoAssignment = "no_assignment" // the order's order.matched was never seen, so the time held is unknown
-	skipDriverCancel = "driver_cancel" // the driver cancelled: the rider never pays
-	skipUnknownActor = "unknown_actor" // cancelledBy is empty (an event from before it was recorded)
+	SkipNoPrice      = "no_price"      // the order predates priced orders (price is null)
+	SkipZeroAmount   = "zero_amount"   // a free ride, or no tip
+	SkipFeeDisabled  = "fee_disabled"  // the rider cancelled but the cancellation fee is 0
+	SkipWithinGrace  = "within_grace"  // the rider cancelled soon enough after the assignment to pay nothing
+	SkipNoAssignment = "no_assignment" // the order's order.matched was never seen, so the time held is unknown
+	SkipDriverCancel = "driver_cancel" // the driver cancelled: the rider never pays
+	SkipUnknownActor = "unknown_actor" // cancelledBy is empty (an event from before it was recorded)
 )
 
-// charge is what to take from the rider and how it is shared.
-type charge struct {
+// Charge is what to take from the rider and how it is shared.
+type Charge struct {
 	Kind     string
 	Total    int64
 	Driver   int64
 	Platform int64
 }
 
-func (p Policy) commissioned(kind string, total int64) charge {
-	d, pl := split(total, p.CommissionBps)
-	return charge{Kind: kind, Total: total, Driver: d, Platform: pl}
+func (p Policy) commissioned(kind string, total int64) Charge {
+	d, pl := Split(total, p.CommissionBps)
+	return Charge{Kind: kind, Total: total, Driver: d, Platform: pl}
 }
 
 // Fare is the charge for a COMPLETED trip: exactly the price locked at
 // booking less any promo discount (the caller passes that net price; the
 // commission is taken on it). skip is the reason there is nothing to charge, or empty.
-func (p Policy) Fare(price *int64) (c charge, skip string) {
+func (p Policy) Fare(price *int64) (c Charge, skip string) {
 	if price == nil {
-		return charge{}, skipNoPrice
+		return Charge{}, SkipNoPrice
 	}
 	if *price == 0 {
-		return charge{}, skipZeroAmount
+		return Charge{}, SkipZeroAmount
 	}
-	return p.commissioned(events.PaymentKindFare, *price), ""
+	return p.commissioned(KindFare, *price), ""
 }
 
 // Tip is the charge for a tip: all of it goes to the driver.
-func (p Policy) Tip(amount int64) (c charge, skip string) {
+func (p Policy) Tip(amount int64) (c Charge, skip string) {
 	if amount == 0 {
-		return charge{}, skipZeroAmount
+		return Charge{}, SkipZeroAmount
 	}
-	return charge{Kind: events.PaymentKindTip, Total: amount, Driver: amount}, ""
+	return Charge{Kind: KindTip, Total: amount, Driver: amount}, ""
 }
 
 // CancellationApplies says, from who cancelled and the fee setting alone,
@@ -89,14 +87,14 @@ func (p Policy) Tip(amount int64) (c charge, skip string) {
 // to charge) never depends on either being known.
 func (p Policy) CancellationApplies(cancelledBy string) (skip string) {
 	switch cancelledBy {
-	case events.CancelledByDriver:
-		return skipDriverCancel
-	case events.CancelledByRider:
+	case CancelledByDriver:
+		return SkipDriverCancel
+	case CancelledByRider:
 	default:
-		return skipUnknownActor
+		return SkipUnknownActor
 	}
 	if p.CancellationFee == 0 {
-		return skipFeeDisabled
+		return SkipFeeDisabled
 	}
 	return ""
 }
@@ -108,22 +106,22 @@ func (p Policy) CancellationApplies(cancelledBy string) (skip string) {
 // was never seen, which is not held against the rider. The driver cancelling is
 // never the rider's cost. price is the order's net price (after any promo discount),
 // which caps the fee: cancelling never costs more than the ride would have.
-func (p Policy) Cancellation(cancelledBy string, price *int64, assignedFor *time.Duration) (c charge, skip string) {
+func (p Policy) Cancellation(cancelledBy string, price *int64, assignedFor *time.Duration) (c Charge, skip string) {
 	if skip := p.CancellationApplies(cancelledBy); skip != "" {
-		return charge{}, skip
+		return Charge{}, skip
 	}
 	if assignedFor == nil {
-		return charge{}, skipNoAssignment
+		return Charge{}, SkipNoAssignment
 	}
 	if *assignedFor <= p.CancellationGrace {
-		return charge{}, skipWithinGrace
+		return Charge{}, SkipWithinGrace
 	}
 	fee := p.CancellationFee
 	if price != nil && *price < fee {
 		fee = *price
 	}
 	if fee == 0 {
-		return charge{}, skipZeroAmount
+		return Charge{}, SkipZeroAmount
 	}
-	return p.commissioned(events.PaymentKindCancellationFee, fee), ""
+	return p.commissioned(KindCancellationFee, fee), ""
 }

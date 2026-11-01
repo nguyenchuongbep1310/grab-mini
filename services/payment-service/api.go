@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
 )
@@ -73,7 +74,7 @@ func (s *service) handleCancellationPolicy(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"currency":     currencyVND,
+		"currency":     domain.CurrencyVND,
 		"fee":          s.policy.CancellationFee,
 		"graceSeconds": int64(s.policy.CancellationGrace / time.Second),
 	})
@@ -101,7 +102,7 @@ func (s *service) handleGetPayments(w http.ResponseWriter, r *http.Request) {
 			internalError(w, "load payouts", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"tripId": tripID, "currency": currencyVND, "payouts": payouts, "total": total})
+		writeJSON(w, http.StatusOK, map[string]any{"tripId": tripID, "currency": domain.CurrencyVND, "payouts": payouts, "total": total})
 		return
 	}
 	payments, total, err := s.riderPayments(r.Context(), tripID, id.Subject)
@@ -109,7 +110,7 @@ func (s *service) handleGetPayments(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "load payments", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tripId": tripID, "currency": currencyVND, "payments": payments, "total": total})
+	writeJSON(w, http.StatusOK, map[string]any{"tripId": tripID, "currency": domain.CurrencyVND, "payments": payments, "total": total})
 }
 
 func (s *service) riderPayments(ctx context.Context, tripID, riderID string) ([]riderPayment, int64, error) {
@@ -173,7 +174,7 @@ type earnings struct {
 }
 
 func (s *service) driverEarnings(ctx context.Context, driverID string, from, to *time.Time) (earnings, error) {
-	e := earnings{DriverID: driverID, Currency: currencyVND, From: from, To: to}
+	e := earnings{DriverID: driverID, Currency: domain.CurrencyVND, From: from, To: to}
 	rows, err := s.db.Query(ctx, `
 		SELECT kind, COALESCE(SUM(driver_amount), 0)::bigint, COALESCE(SUM(platform_amount), 0)::bigint, COUNT(*)
 		FROM payments
@@ -206,7 +207,7 @@ func (s *service) driverEarnings(ctx context.Context, driverID string, from, to 
 		return e, err
 	}
 	err = s.db.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)::bigint FROM ledger_entries WHERE account_id = $1`,
-		driverPayableAccount(driverID).id).Scan(&e.PayableBalance)
+		domain.DriverPayableAccount(driverID).ID).Scan(&e.PayableBalance)
 	return e, err
 }
 

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/secret"
 )
 
@@ -15,7 +16,7 @@ type Env struct {
 	DatabaseURL       string
 	KafkaBrokers      []string
 	Provider          string
-	Policy            Policy
+	Policy            domain.Policy
 }
 
 func loadEnv() Env {
@@ -25,7 +26,7 @@ func loadEnv() Env {
 		DatabaseURL:       databaseURL(),
 		KafkaBrokers:      []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
 		Provider:          getEnv("PAYMENT_PROVIDER", "fake"),
-		Policy: Policy{
+		Policy: domain.Policy{
 			// 20% of a fare is the platform's; tips are the driver's in full.
 			CommissionBps: getInt("PLATFORM_COMMISSION_BPS", 2000),
 			// A rider who cancels after the driver was assigned and the grace period

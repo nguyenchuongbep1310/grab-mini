@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/migrate"
 	"grab-mini/pkg/outbox"
@@ -98,13 +99,13 @@ type encoder interface {
 type service struct {
 	db       *pgxpool.Pool
 	provider PaymentProvider
-	policy   Policy
+	policy   domain.Policy
 	enc      encoder
 	relay    *outbox.Relay // may be nil in tests that don't publish
 	now      func() time.Time
 }
 
-func newService(db *pgxpool.Pool, provider PaymentProvider, policy Policy, enc encoder, relay *outbox.Relay) *service {
+func newService(db *pgxpool.Pool, provider PaymentProvider, policy domain.Policy, enc encoder, relay *outbox.Relay) *service {
 	return &service{db: db, provider: provider, policy: policy, enc: enc, relay: relay, now: time.Now}
 }
 
@@ -140,7 +141,7 @@ func (s *service) recordOrder(ctx context.Context, evt events.OrderCreated) erro
 	var price *int64
 	var discount int64
 	if evt.Price != nil {
-		p, err := priceToMinor(*evt.Price)
+		p, err := domain.PriceToMinor(*evt.Price)
 		if err != nil {
 			return err
 		}
@@ -148,7 +149,7 @@ func (s *service) recordOrder(ctx context.Context, evt events.OrderCreated) erro
 		// Order Service never locks more than the price. If one arrives it is a bug
 		// upstream; refuse it here (and page, through the dead-letter topic) rather than
 		// guess between a free ride and the full fare.
-		if err := checkDiscount(evt.Discount, p); err != nil {
+		if err := domain.CheckDiscount(evt.Discount, p); err != nil {
 			return err
 		}
 		discount = evt.Discount
@@ -159,27 +160,11 @@ func (s *service) recordOrder(ctx context.Context, evt events.OrderCreated) erro
 	return err
 }
 
-type orderInfo struct {
-	riderID  string
-	price    *int64 // nil: the order has no price
-	discount int64  // taken off price (0 for none)
-}
-
-// net is what the rider pays for the ride: the price less the discount; nil when
-// the order has no price.
-func (o orderInfo) net() *int64 {
-	if o.price == nil {
-		return nil
-	}
-	n := *o.price - o.discount
-	return &n
-}
-
-func (s *service) lookupOrder(ctx context.Context, orderID string) (orderInfo, error) {
-	var o orderInfo
-	err := s.db.QueryRow(ctx, `SELECT rider_id, price, discount FROM order_prices WHERE order_id = $1`, orderID).Scan(&o.riderID, &o.price, &o.discount)
+func (s *service) lookupOrder(ctx context.Context, orderID string) (domain.OrderInfo, error) {
+	var o domain.OrderInfo
+	err := s.db.QueryRow(ctx, `SELECT rider_id, price, discount FROM order_prices WHERE order_id = $1`, orderID).Scan(&o.RiderID, &o.Price, &o.Discount)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return orderInfo{}, &errOrderUnknown{orderID}
+		return domain.OrderInfo{}, &errOrderUnknown{orderID}
 	}
 	return o, err
 }
@@ -198,13 +183,13 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 		if err != nil {
 			return err
 		}
-		c, skip := s.policy.Fare(order.net())
+		c, skip := s.policy.Fare(order.Net())
 		if skip != "" {
 			return s.skip(skip, evt.TripID, "fare")
 		}
 		return s.settle(ctx, settlement{
 			eventID: evt.EventID, tripID: evt.TripID, orderID: evt.OrderID,
-			riderID: firstNonEmpty(evt.RiderID, order.riderID), driverID: evt.DriverID, charge: c,
+			riderID: firstNonEmpty(evt.RiderID, order.RiderID), driverID: evt.DriverID, Charge: c,
 		})
 
 	case events.TripStatusCancelled:
@@ -228,13 +213,13 @@ func (s *service) onTripStatus(ctx context.Context, evt events.TripStatusChanged
 		if err != nil {
 			return err
 		}
-		c, skip := s.policy.Cancellation(evt.CancelledBy, order.net(), assignedFor)
+		c, skip := s.policy.Cancellation(evt.CancelledBy, order.Net(), assignedFor)
 		if skip != "" {
 			return s.skip(skip, evt.TripID, "cancellation")
 		}
 		return s.settle(ctx, settlement{
 			eventID: evt.EventID, tripID: evt.TripID, orderID: evt.OrderID,
-			riderID: firstNonEmpty(evt.RiderID, order.riderID), driverID: evt.DriverID, charge: c,
+			riderID: firstNonEmpty(evt.RiderID, order.RiderID), driverID: evt.DriverID, Charge: c,
 		})
 
 	}
@@ -251,10 +236,10 @@ func (s *service) onTripRated(ctx context.Context, evt events.TripRated) error {
 	if evt.RiderID == "" {
 		return &invalidEvent{"trip.rated without riderId"}
 	}
-	if evt.Currency != "" && evt.Currency != currencyVND {
-		return &invalidEvent{fmt.Sprintf("tip currency %q, only %s is supported", evt.Currency, currencyVND)}
+	if evt.Currency != "" && evt.Currency != domain.CurrencyVND {
+		return &invalidEvent{fmt.Sprintf("tip currency %q, only %s is supported", evt.Currency, domain.CurrencyVND)}
 	}
-	if err := checkAmount(evt.TipAmount); err != nil {
+	if err := domain.CheckAmount(evt.TipAmount); err != nil {
 		return err
 	}
 	c, skip := s.policy.Tip(evt.TipAmount)
@@ -263,7 +248,7 @@ func (s *service) onTripRated(ctx context.Context, evt events.TripRated) error {
 	}
 	return s.settle(ctx, settlement{
 		eventID: evt.EventID, tripID: evt.TripID, orderID: evt.OrderID,
-		riderID: evt.RiderID, driverID: evt.DriverID, charge: c,
+		riderID: evt.RiderID, driverID: evt.DriverID, Charge: c,
 	})
 }
 
@@ -297,7 +282,7 @@ type settlement struct {
 	orderID  string
 	riderID  string
 	driverID string
-	charge
+	domain.Charge
 }
 
 func (st settlement) idempotencyKey() string {
@@ -328,8 +313,8 @@ func (s *service) settle(ctx context.Context, st settlement) error {
 	// The ledger transaction is built and checked before the provider is
 	// asked for money: an unbalanced one (a bug) must never follow a capture.
 	txnID := uuid.NewString()
-	txn := chargeTxn(txnID, st.idempotencyKey(), st.Kind, st.riderID, st.driverID, st.Driver, st.Platform)
-	if err := txn.Validate(); err != nil {
+	txn := domain.ChargeTxn(txnID, st.idempotencyKey(), st.Kind, st.riderID, st.driverID, st.Driver, st.Platform)
+	if err := validateTxn(txn); err != nil {
 		return err
 	}
 
@@ -337,7 +322,7 @@ func (s *service) settle(ctx context.Context, st settlement) error {
 		IdempotencyKey: st.idempotencyKey(),
 		RiderID:        st.riderID,
 		Amount:         st.Total,
-		Currency:       currencyVND,
+		Currency:       domain.CurrencyVND,
 		Description:    st.Kind + " for trip " + st.tripID,
 	})
 	if err != nil {
@@ -355,7 +340,7 @@ func (s *service) settle(ctx context.Context, st settlement) error {
 	rec := events.PaymentRecorded{
 		Envelope:  events.Envelope{EventID: uuid.NewString(), OccurredAt: s.now().UTC().Format(time.RFC3339)},
 		PaymentID: paymentID, TripID: st.tripID, OrderID: st.orderID, RiderID: st.riderID, DriverID: st.driverID,
-		Kind: st.Kind, Status: status, Amount: st.Total, Currency: currencyVND,
+		Kind: st.Kind, Status: status, Amount: st.Total, Currency: domain.CurrencyVND,
 	}
 	var ledgerID *string
 	var driverAmount, platformAmount int64
@@ -392,7 +377,7 @@ func (s *service) settle(ctx context.Context, st settlement) error {
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (trip_id, kind) DO NOTHING`,
 		paymentID, st.tripID, st.orderID, st.riderID, st.driverID, st.Kind, status, st.Total, driverAmount, platformAmount,
-		currencyVND, s.provider.Name(), res.Ref, res.DeclineReason, ledgerID, st.eventID)
+		domain.CurrencyVND, s.provider.Name(), res.Ref, res.DeclineReason, ledgerID, st.eventID)
 	if err != nil {
 		return err
 	}

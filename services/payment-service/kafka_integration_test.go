@@ -15,6 +15,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconn"
@@ -122,7 +123,7 @@ type kafkaFixture struct {
 	w       *kafka.Writer
 }
 
-func newKafkaFixture(t *testing.T, policy Policy) *kafkaFixture {
+func newKafkaFixture(t *testing.T, policy domain.Policy) *kafkaFixture {
 	t.Helper()
 	brokers := os.Getenv("TEST_KAFKA_BROKERS")
 	if brokers == "" {
@@ -209,10 +210,10 @@ func TestKafkaFlowFareTipAndRedelivery(t *testing.T) {
 	if n := k.payments(tripID); n != 2 {
 		t.Errorf("%d payments, want fare + tip only", n)
 	}
-	if got := k.balance(riderAccount(rider)); got != -150000 {
+	if got := k.balance(domain.RiderAccount(rider)); got != -150000 {
 		t.Errorf("rider balance = %d, want -150000", got)
 	}
-	if got := k.balance(driverPayableAccount(driver)); got != 126000 {
+	if got := k.balance(domain.DriverPayableAccount(driver)); got != 126000 {
 		t.Errorf("driver payable = %d, want 96000 + 30000", got)
 	}
 	k.assertLedgerBalances()

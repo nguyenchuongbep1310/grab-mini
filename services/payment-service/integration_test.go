@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
 )
@@ -34,7 +35,7 @@ type fixture struct {
 	svc      *service
 }
 
-func newFixture(t *testing.T, policy Policy) *fixture {
+func newFixture(t *testing.T, policy domain.Policy) *fixture {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -56,7 +57,7 @@ func newFixture(t *testing.T, policy Policy) *fixture {
 	return &fixture{t: t, db: db, provider: provider, svc: newService(db, provider, policy, jsonEncoder{}, nil)}
 }
 
-var defaultPolicy = Policy{CommissionBps: 2000}
+var defaultPolicy = domain.Policy{CommissionBps: 2000}
 
 func newID() string { return uuid.NewString() }
 
@@ -113,8 +114,8 @@ func (f *fixture) scalar(sql string, args ...any) int64 {
 	return n
 }
 
-func (f *fixture) balance(acct account) int64 {
-	return f.scalar(`SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account_id = $1`, acct.id)
+func (f *fixture) balance(acct domain.Account) int64 {
+	return f.scalar(`SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account_id = $1`, acct.ID)
 }
 
 func (f *fixture) payments(tripID string) int64 {
@@ -161,13 +162,13 @@ func TestCompletedTripCapturesTheLockedFareOnce(t *testing.T) {
 	if kind != "FARE" || st != "CAPTURED" || amount != 100000 || driver != 80000 || platform != 20000 {
 		t.Errorf("payment = %s %s %d (driver %d, platform %d)", kind, st, amount, driver, platform)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -100000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -100000 {
 		t.Errorf("rider balance = %d, want -100000", got)
 	}
-	if got := f.balance(driverPayableAccount("driver-1")); got != 80000 {
+	if got := f.balance(domain.DriverPayableAccount("driver-1")); got != 80000 {
 		t.Errorf("driver payable = %d, want 80000", got)
 	}
-	if got := f.balance(platformRevenueAccount()); got != 20000 {
+	if got := f.balance(domain.PlatformRevenueAccount()); got != 20000 {
 		t.Errorf("platform revenue = %d, want 20000", got)
 	}
 	f.assertLedgerBalances()
@@ -212,7 +213,7 @@ func TestRedeliveryAndReplayDoNotChargeTwice(t *testing.T) {
 	if n := f.scalar(`SELECT count(*) FROM ledger_transactions`); n != 1 {
 		t.Errorf("%d ledger transactions, want 1", n)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -100000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -100000 {
 		t.Errorf("rider balance = %d, want -100000 (charged once)", got)
 	}
 	if n := f.outboxRows(); n != 1 {
@@ -245,7 +246,7 @@ func TestConcurrentDeliveriesOfTheSameTripChargeOnce(t *testing.T) {
 	if n := f.payments(trip); n != 1 {
 		t.Errorf("%d payments, want 1", n)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -60000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -60000 {
 		t.Errorf("rider balance = %d, want -60000", got)
 	}
 	if n := f.outboxRows(); n != 1 {
@@ -278,13 +279,13 @@ func TestTipIsASeparateChargeAndAllOfItGoesToTheDriver(t *testing.T) {
 	if amount != 20000 || driver != 20000 || platform != 0 {
 		t.Errorf("tip = %d (driver %d, platform %d), want 20000 to the driver", amount, driver, platform)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -120000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -120000 {
 		t.Errorf("rider balance = %d, want -120000 (fare + tip)", got)
 	}
-	if got := f.balance(driverPayableAccount("driver-1")); got != 100000 {
+	if got := f.balance(domain.DriverPayableAccount("driver-1")); got != 100000 {
 		t.Errorf("driver payable = %d, want 100000 (80000 + the tip)", got)
 	}
-	if got := f.balance(platformRevenueAccount()); got != 20000 {
+	if got := f.balance(domain.PlatformRevenueAccount()); got != 20000 {
 		t.Errorf("platform revenue = %d, want 20000 (no commission on tips)", got)
 	}
 	f.assertLedgerBalances()
@@ -323,7 +324,7 @@ func TestZeroTipAndBadTipsChargeNothing(t *testing.T) {
 	}
 }
 
-var graceFixturePolicy = Policy{CommissionBps: 2000, CancellationFee: 15000, CancellationGrace: 3 * time.Minute}
+var graceFixturePolicy = domain.Policy{CommissionBps: 2000, CancellationFee: 15000, CancellationGrace: 3 * time.Minute}
 
 // assignedAndCancelled matches an order to a driver and then has the rider cancel its trip, held apart as given.
 func (f *fixture) assignedAndCancelled(order, trip, rider string, held time.Duration) error {
@@ -353,7 +354,7 @@ func TestRiderCancelAfterTheGracePeriodPaysTheConfiguredFee(t *testing.T) {
 	if kind != "CANCELLATION_FEE" || amount != 15000 || driver != 12000 || platform != 3000 {
 		t.Errorf("payment = %s %d (driver %d, platform %d)", kind, amount, driver, platform)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -15000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -15000 {
 		t.Errorf("rider balance = %d, want -15000", got)
 	}
 	f.assertLedgerBalances()
@@ -572,7 +573,7 @@ func TestDeclinedFareIsRecordedWithoutLedgerEntries(t *testing.T) {
 	if n := f.outboxRows(); n != 1 {
 		t.Errorf("%d events queued, want the DECLINED one", n)
 	}
-	if got := f.balance(driverPayableAccount("driver-1")); got != 0 {
+	if got := f.balance(domain.DriverPayableAccount("driver-1")); got != 0 {
 		t.Errorf("driver payable = %d after a declined fare, want 0", got)
 	}
 }
@@ -718,7 +719,7 @@ func TestPaymentsAPIShowsEachSideTheirOwnView(t *testing.T) {
 }
 
 func TestEarningsSummaryAndOwnership(t *testing.T) {
-	f := newFixture(t, Policy{CommissionBps: 2000, CancellationFee: 10000, CancellationGrace: 3 * time.Minute})
+	f := newFixture(t, domain.Policy{CommissionBps: 2000, CancellationFee: 10000, CancellationGrace: 3 * time.Minute})
 	ctx := context.Background()
 	o1, t1 := f.order("rider-1", fl(100000)), newID()
 	o2, t2 := f.order("rider-2", fl(50000)), newID()
@@ -790,7 +791,7 @@ func TestAPromoOrderIsChargedThePriceLessTheDiscountAndCommissionIsOnTheNet(t *t
 	if amount != 70000 || driver != 56000 || platform != 14000 {
 		t.Errorf("payment = %d (driver %d, platform %d), want 70000 (56000, 14000)", amount, driver, platform)
 	}
-	if got := f.balance(riderAccount("rider-1")); got != -70000 {
+	if got := f.balance(domain.RiderAccount("rider-1")); got != -70000 {
 		t.Errorf("rider balance = %d, want -70000", got)
 	}
 	f.assertLedgerBalances()
@@ -825,7 +826,7 @@ func TestAFreeRideIsASkippedPaymentNotAZeroCharge(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	order, trip := f.orderWithDiscount("rider-1", 50000, 50000), newID()
-	before := testutil.ToFloat64(paymentsSkipped.WithLabelValues(skipZeroAmount))
+	before := testutil.ToFloat64(paymentsSkipped.WithLabelValues(domain.SkipZeroAmount))
 
 	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
@@ -839,7 +840,7 @@ func TestAFreeRideIsASkippedPaymentNotAZeroCharge(t *testing.T) {
 	if n := f.scalar(`SELECT count(*) FROM ledger_transactions`); n != 0 {
 		t.Errorf("%d ledger transactions for a free ride", n)
 	}
-	if got := testutil.ToFloat64(paymentsSkipped.WithLabelValues(skipZeroAmount)); got != before+1 {
+	if got := testutil.ToFloat64(paymentsSkipped.WithLabelValues(domain.SkipZeroAmount)); got != before+1 {
 		t.Errorf("payments_skipped_total{reason=zero_amount} went from %v to %v, want one more", before, got)
 	}
 	// The tip is still the rider's to give.
