@@ -398,8 +398,8 @@ Plus the limitations in sections 13 and 14, and a small item left from phase 2 (
 
 ## 16. Payments: Payment Service (done)
 
-Trips are now charged. There is no real payment gateway: `PaymentProvider` is an interface (`services/payment-service/provider.go`)
-with only a `fake` implementation (sandbox; riders whose id starts with `decline-` are declined). The service **never** receives card numbers: `ChargeRequest`
+Trips are now charged. There is no real payment gateway: `PaymentProvider` is a port (`services/payment-service/internal/app/ports.go`)
+with only a `fake` implementation (`internal/adapters/provider`; sandbox; riders whose id starts with `decline-` are declined). The service **never** receives card numbers: `ChargeRequest`
 has only `RiderID`; the payment method lives on the provider's side.
 
 **How the price reaches Payment Service.** Chosen: consume `order.created` and keep a local copy, `order_prices(order_id, rider_id, price)`

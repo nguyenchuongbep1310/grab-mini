@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -15,6 +15,9 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	kafkaadapter "grab-mini/payment-service/internal/adapters/kafka"
+	"grab-mini/payment-service/internal/adapters/postgres"
+	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconn"
@@ -122,7 +125,7 @@ type kafkaFixture struct {
 	w       *kafka.Writer
 }
 
-func newKafkaFixture(t *testing.T, policy Policy) *kafkaFixture {
+func newKafkaFixture(t *testing.T, policy domain.Policy) *kafkaFixture {
 	t.Helper()
 	brokers := os.Getenv("TEST_KAFKA_BROKERS")
 	if brokers == "" {
@@ -135,14 +138,15 @@ func newKafkaFixture(t *testing.T, policy Policy) *kafkaFixture {
 
 	relayWriter := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll})
 	t.Cleanup(func() { relayWriter.Close() })
-	relay := outbox.NewRelay(f.db, relayWriter, outboxSource)
-	f.svc = newService(f.db, f.provider, policy, codec, relay)
+	relay := outbox.NewRelay(f.db, relayWriter, postgres.OutboxSource)
+	f.svc = wire(f.db, f.swap, policy, kafkaadapter.NewEncoder(codec), relay)
+	f.events = kafkaadapter.NewHandler(f.svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { relay.Run(ctx) })
 	wg.Go(func() {
-		f.svc.runConsumer(ctx, Env{KafkaBrokers: []string{brokers}}, "payment-test-"+newID(), codec)
+		f.events.Run(ctx, kafkaadapter.Config{Brokers: []string{brokers}, GroupOverride: "payment-test-" + newID()}, codec)
 	})
 	t.Cleanup(func() { cancel(); wg.Wait() })
 
@@ -209,10 +213,10 @@ func TestKafkaFlowFareTipAndRedelivery(t *testing.T) {
 	if n := k.payments(tripID); n != 2 {
 		t.Errorf("%d payments, want fare + tip only", n)
 	}
-	if got := k.balance(riderAccount(rider)); got != -150000 {
+	if got := k.balance(domain.RiderAccount(rider)); got != -150000 {
 		t.Errorf("rider balance = %d, want -150000", got)
 	}
-	if got := k.balance(driverPayableAccount(driver)); got != 126000 {
+	if got := k.balance(domain.DriverPayableAccount(driver)); got != 126000 {
 		t.Errorf("driver payable = %d, want 96000 + 30000", got)
 	}
 	k.assertLedgerBalances()

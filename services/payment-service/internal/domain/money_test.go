@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"errors"
@@ -18,35 +18,35 @@ func TestPriceToMinorRoundsToWholeDong(t *testing.T) {
 		{50000.4, 50000},
 		{50000.5, 50001},
 		{123000, 123000},
-		{float64(maxAmount), maxAmount},
+		{float64(MaxAmount), MaxAmount},
 	}
 	for _, c := range cases {
-		got, err := priceToMinor(c.price)
+		got, err := PriceToMinor(c.price)
 		if err != nil || got != c.want {
-			t.Errorf("priceToMinor(%v) = %d, %v; want %d", c.price, got, err, c.want)
+			t.Errorf("PriceToMinor(%v) = %d, %v; want %d", c.price, got, err, c.want)
 		}
 	}
 }
 
 func TestPriceToMinorRefusesValuesThatCanNeverBeCharged(t *testing.T) {
-	for _, price := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1), float64(maxAmount) * 2} {
-		_, err := priceToMinor(price)
-		var ae *amountError
+	for _, price := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1), float64(MaxAmount) * 2} {
+		_, err := PriceToMinor(price)
+		var ae *AmountError
 		if !errors.As(err, &ae) || !ae.Permanent() {
-			t.Errorf("priceToMinor(%v) error = %v, want a permanent amountError", price, err)
+			t.Errorf("PriceToMinor(%v) error = %v, want a permanent AmountError", price, err)
 		}
 	}
 }
 
 func TestCheckAmount(t *testing.T) {
-	for _, ok := range []int64{0, 1, 20000, maxAmount} {
-		if err := checkAmount(ok); err != nil {
-			t.Errorf("checkAmount(%d) = %v, want nil", ok, err)
+	for _, ok := range []int64{0, 1, 20000, MaxAmount} {
+		if err := CheckAmount(ok); err != nil {
+			t.Errorf("CheckAmount(%d) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []int64{-1, maxAmount + 1, math.MinInt64, math.MaxInt64} {
-		if err := checkAmount(bad); err == nil {
-			t.Errorf("checkAmount(%d) = nil, want an error", bad)
+	for _, bad := range []int64{-1, MaxAmount + 1, math.MinInt64, math.MaxInt64} {
+		if err := CheckAmount(bad); err == nil {
+			t.Errorf("CheckAmount(%d) = nil, want an error", bad)
 		}
 	}
 }
@@ -65,9 +65,9 @@ func TestSplitKnownValues(t *testing.T) {
 		{0, 2000, 0, 0},
 	}
 	for _, c := range cases {
-		d, p := split(c.amount, c.bps)
+		d, p := Split(c.amount, c.bps)
 		if d != c.driver || p != c.platform {
-			t.Errorf("split(%d, %d) = %d, %d; want %d, %d", c.amount, c.bps, d, p, c.driver, c.platform)
+			t.Errorf("Split(%d, %d) = %d, %d; want %d, %d", c.amount, c.bps, d, p, c.driver, c.platform)
 		}
 	}
 }
@@ -76,15 +76,15 @@ func TestSplitKnownValues(t *testing.T) {
 func TestSplitAlwaysSumsToTheAmount(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	for i := 0; i < 100000; i++ {
-		amount := rng.Int63n(maxAmount + 1)
-		bps := rng.Int63n(bpsDenominator + 1)
-		d, p := split(amount, bps)
+		amount := rng.Int63n(MaxAmount + 1)
+		bps := rng.Int63n(BpsDenominator + 1)
+		d, p := Split(amount, bps)
 		if d+p != amount || d < 0 || p < 0 {
-			t.Fatalf("split(%d, %d) = %d, %d", amount, bps, d, p)
+			t.Fatalf("Split(%d, %d) = %d, %d", amount, bps, d, p)
 		}
 	}
 	// The extremes: the largest amount at the largest rate must not overflow.
-	if d, p := split(maxAmount, bpsDenominator); d != 0 || p != maxAmount {
-		t.Errorf("split(max, 100%%) = %d, %d", d, p)
+	if d, p := Split(MaxAmount, BpsDenominator); d != 0 || p != MaxAmount {
+		t.Errorf("Split(max, 100%%) = %d, %d", d, p)
 	}
 }
