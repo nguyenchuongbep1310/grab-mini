@@ -52,8 +52,12 @@ beforeEach(() => {
     payments: [{ id: "p1", kind: "FARE", status: "CAPTURED", amount: 90000, currency: "VND", createdAt: new Date().toISOString() }],
   });
   vi.spyOn(client, "rateTrip").mockImplementation(async (_tripId, _riderId, stars, _c, tip = 0) => {
-    stored = { ...stored, rating: stars };
+    stored = { ...stored, rating: stars, receiptClosedAt: new Date().toISOString() };
     return { tripId: "trip-1", stars, tipAmount: tip };
+  });
+  vi.spyOn(client, "closeReceipt").mockImplementation(async (tripId) => {
+    stored = { ...stored, receiptClosedAt: new Date().toISOString() };
+    return { tripId, receiptClosedAt: stored.receiptClosedAt! };
   });
   vi.spyOn(client, "getRoute").mockRejectedValue(new Error("no routing"));
   vi.spyOn(client, "getRiderProfile").mockRejectedValue(new Error("no profile service"));
@@ -102,16 +106,78 @@ describe("Rider App after a reload that missed the trip-completed push", () => {
     expect(screen.queryByLabelText("Receipt")).toBeNull();
   });
 
-  it("does not bring the screen back after the rider closed it with New ride", async () => {
+  it("closes the receipt on the server with New ride and does not bring the screen back", async () => {
     renderApp();
     await screen.findByText("How was your ride with Minh Tran?");
     fireEvent.click(screen.getByRole("button", { name: "New ride" }));
     expect(await screen.findByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+    await waitFor(() => expect(client.closeReceipt).toHaveBeenCalledWith("trip-1"));
+    expect(client.closeReceipt).toHaveBeenCalledTimes(1);
 
     cleanup();
     renderApp();
     await waitFor(() => expect(client.waitForTripByOrder).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Receipt")).toBeNull();
+  });
+
+  it("goes idle at once even while closeReceipt is still pending", async () => {
+    vi.mocked(client.closeReceipt).mockReturnValue(new Promise(() => {}));
+    renderApp();
+    await screen.findByText("How was your ride with Minh Tran?");
+    fireEvent.click(screen.getByRole("button", { name: "New ride" }));
+    expect(await screen.findByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+  });
+
+  it("does not block or throw when closeReceipt fails", async () => {
+    vi.mocked(client.closeReceipt).mockRejectedValue(new Error("network"));
+    // vitest itself fails the run on an unhandled rejection, so a leak would show up here.
+    renderApp();
+    await screen.findByText("How was your ride with Minh Tran?");
+    fireEvent.click(screen.getByRole("button", { name: "New ride" }));
+    expect(await screen.findByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+    await waitFor(() => expect(client.closeReceipt).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it("does not call closeReceipt after a rating (the server closed it)", async () => {
+    renderApp();
+    await screen.findByText("How was your ride with Minh Tran?");
+    fireEvent.click(screen.getByRole("radio", { name: /5/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit rating" }));
+    await screen.findByText("Your rating");
+    fireEvent.click(screen.getByRole("button", { name: "New ride" }));
+    expect(await screen.findByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+    expect(client.closeReceipt).not.toHaveBeenCalled();
+  });
+
+  it("shows idle on a reload when the trip already has receiptClosedAt", async () => {
+    stored = { ...stored, receiptClosedAt: new Date().toISOString() };
+    renderApp();
+    await waitFor(() => expect(client.waitForTripByOrder).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+  });
+
+  it("agrees across devices: the decision comes from the trip, not from browser storage", async () => {
+    // Device A closes the receipt.
+    renderApp();
+    await screen.findByText("How was your ride with Minh Tran?");
+    fireEvent.click(screen.getByRole("button", { name: "New ride" }));
+    await waitFor(() => expect(client.closeReceipt).toHaveBeenCalled());
+    cleanup();
+
+    // Device B has empty storage, and still starts idle.
+    localStorage.clear();
+    renderApp();
+    await waitFor(() => expect(client.waitForTripByOrder).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("heading", { name: "Where to?" })).toBeInTheDocument();
+    cleanup();
+
+    // A device with stale storage on a still-open trip shows the receipt.
+    stored = { ...stored, receiptClosedAt: undefined };
+    localStorage.setItem("grab-mini.rider.rider-1.dismissedTrips", JSON.stringify(["trip-1"]));
+    renderApp();
+    expect(await screen.findByRole("heading", { name: "You've arrived" })).toBeInTheDocument();
   });
 
   it("stays idle, and bookable, when the trip lookup fails", async () => {

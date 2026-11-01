@@ -39,7 +39,7 @@ import { cancelFeeNote } from "./cancelFee";
 import { ProfileSheet } from "./ProfileSheet";
 import { PromoField } from "./PromoField";
 import { bookingMessage, usePromo } from "./usePromo";
-import { checkOutcome, dismissCompletedRide, findActiveRide } from "./recovery";
+import { checkOutcome, closeCompletedRide, findActiveRide } from "./recovery";
 import { Receipt } from "./Receipt";
 import { RatingSummary, TipPicker } from "./TipPicker";
 import { useDriverCard, useRiderProfile } from "./useRiderProfile";
@@ -240,7 +240,7 @@ export function App() {
     setSubmitting(true);
     try {
       await rateTrip(tripId, riderId, stars, comment, tip);
-      dismissCompletedRide(riderId, tripId);
+      // Trip Service closes the receipt when it stores the rating.
       setRated(true);
       toast.show("Thanks for your feedback!", "success");
     } catch (err) {
@@ -251,7 +251,8 @@ export function App() {
   };
 
   const newRide = () => {
-    if (phase === "completed" && tripId) dismissCompletedRide(riderId, tripId);
+    // Not awaited: the screen goes idle at once; closeCompletedRide retries and gives up quietly.
+    if (phase === "completed" && tripId && !rated) void closeCompletedRide(tripId);
     setStars(0);
     setRated(false);
     setComment("");

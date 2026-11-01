@@ -1,4 +1,4 @@
-import { getLatestOrder, getOrder, waitForTripByOrder, type Order, type Trip } from "@grab-mini/client";
+import { closeReceipt, getLatestOrder, getOrder, waitForTripByOrder, type Order, type Trip } from "@grab-mini/client";
 import type { ActiveRide, Outcome } from "./useRide";
 
 const inFlight = (trip: Trip) => trip.status === "ASSIGNED" || trip.status === "IN_PROGRESS";
@@ -12,30 +12,22 @@ async function tripFor(orderId: string): Promise<Trip | null> {
 /** How long after it ends a finished, unrated ride is still brought back after a reload. */
 export const COMPLETED_RIDE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-const DISMISSED_KEY = (riderId: string) => `grab-mini.rider.${riderId}.dismissedTrips`;
-const DISMISSED_KEEP = 20;
-
-function dismissedTrips(riderId: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(DISMISSED_KEY(riderId)) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
-  } catch {
-    return [];
-  }
-}
+const CLOSE_RETRIES = 2;
+const CLOSE_RETRY_DELAY_MS = 1500;
 
 /**
- * Remember that the rider is done with a finished trip (rated it or closed the screen), so a
- * reload does not bring its receipt and rating prompt back. This is per browser (localStorage):
- * the server has no "seen" flag, so another browser or cleared storage shows an unrated, recent
- * ride once more. Best effort: storage may be unavailable.
+ * Tell Trip Service the rider is done with a finished trip's receipt, so no device brings it back.
+ * Fire and forget: the caller has already moved on. A failure is retried a couple of times after a
+ * short delay and then dropped; the worst case is that the receipt shows once more after a reload.
  */
-export function dismissCompletedRide(riderId: string, tripId: string): void {
-  try {
-    const ids = [...dismissedTrips(riderId).filter((id) => id !== tripId), tripId].slice(-DISMISSED_KEEP);
-    localStorage.setItem(DISMISSED_KEY(riderId), JSON.stringify(ids));
-  } catch {
-    // Private mode or a full quota: the worst case is the prompt shows once more.
+export async function closeCompletedRide(tripId: string): Promise<void> {
+  for (let attempt = 0; attempt <= CLOSE_RETRIES; attempt++) {
+    try {
+      await closeReceipt(tripId);
+      return;
+    } catch {
+      if (attempt < CLOSE_RETRIES) await new Promise((r) => setTimeout(r, CLOSE_RETRY_DELAY_MS));
+    }
   }
 }
 
@@ -70,7 +62,7 @@ export async function findActiveRide(riderId: string): Promise<ActiveRide | null
   const trip = await tripFor(order.id);
   if (!trip) return null;
   if (trip.status === "COMPLETED") {
-    if (trip.rating != null || dismissedTrips(riderId).includes(trip.id)) return null;
+    if (trip.rating != null || trip.receiptClosedAt) return null;
     if (!endedRecently(trip)) return null;
     return { ...base, phase: "completed", driverId: trip.driverId, tripId: trip.id };
   }

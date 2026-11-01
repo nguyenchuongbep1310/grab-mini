@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "@grab-mini/client";
 import type { Order, Trip } from "@grab-mini/client";
-import { COMPLETED_RIDE_WINDOW_MS, dismissCompletedRide, findActiveRide } from "./recovery";
+import { COMPLETED_RIDE_WINDOW_MS, closeCompletedRide, findActiveRide } from "./recovery";
 
 const NOW = new Date("2026-06-10T12:00:00Z");
 const HOUR = 3600_000;
@@ -31,7 +31,6 @@ const completed = (completedAt?: string) => trip("COMPLETED", { completedAt });
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
-  localStorage.clear();
   vi.spyOn(client, "getLatestOrder").mockResolvedValue(order("MATCHED"));
   vi.spyOn(client, "waitForTripByOrder").mockResolvedValue(completed(endedAgo(HOUR)));
 });
@@ -106,11 +105,16 @@ describe("findActiveRide", () => {
     expect(await findActiveRide("rider-1")).toBeNull();
   });
 
-  it("is idle for a completed trip the rider already closed, and only for that rider", async () => {
-    dismissCompletedRide("rider-1", "t-1");
+  it("is idle for a completed trip whose receipt was closed, even if recent and unrated", async () => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(
+      trip("COMPLETED", { completedAt: endedAgo(HOUR), receiptClosedAt: endedAgo(HOUR / 2) }),
+    );
     expect(await findActiveRide("rider-1")).toBeNull();
-    dismissCompletedRide("rider-2", "t-9");
-    expect(await findActiveRide("rider-2")).toMatchObject({ phase: "completed" });
+  });
+
+  it("restores an unrated, open, recent trip whatever the browser storage holds", async () => {
+    localStorage.setItem("grab-mini.rider.rider-1.dismissedTrips", JSON.stringify(["t-1"]));
+    expect(await findActiveRide("rider-1")).toMatchObject({ phase: "completed", tripId: "t-1" });
   });
 
   it("gives the same answer on two quick reloads", async () => {
@@ -135,24 +139,36 @@ describe("findActiveRide", () => {
     expect(await findActiveRide("rider-1")).toBeNull();
   });
 
-  it("still restores when storage is unavailable", async () => {
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
-    expect(await findActiveRide("rider-1")).toMatchObject({ phase: "completed" });
-  });
-
   it("lets the latest-order lookup error through for the caller to ignore", async () => {
     vi.mocked(client.getLatestOrder).mockRejectedValue(new Error("down"));
     await expect(findActiveRide("rider-1")).rejects.toThrow("down");
   });
 });
 
-describe("dismissCompletedRide", () => {
-  it("does not throw when storage is unavailable", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("quota");
-    });
-    expect(() => dismissCompletedRide("rider-1", "t-1")).not.toThrow();
+describe("closeCompletedRide", () => {
+  beforeEach(() => {
+    vi.spyOn(client, "closeReceipt").mockResolvedValue({ tripId: "t-1", receiptClosedAt: NOW.toISOString() });
+  });
+
+  it("closes the receipt once when it works", async () => {
+    await closeCompletedRide("t-1");
+    expect(client.closeReceipt).toHaveBeenCalledTimes(1);
+    expect(client.closeReceipt).toHaveBeenCalledWith("t-1");
+  });
+
+  it("retries a failure after a delay and stops once it works", async () => {
+    vi.mocked(client.closeReceipt).mockRejectedValueOnce(new Error("net")).mockResolvedValue({ tripId: "t-1", receiptClosedAt: "x" });
+    const done = closeCompletedRide("t-1");
+    await vi.runAllTimersAsync();
+    await done;
+    expect(client.closeReceipt).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up quietly after the retries", async () => {
+    vi.mocked(client.closeReceipt).mockRejectedValue(new Error("net"));
+    const done = closeCompletedRide("t-1");
+    await vi.runAllTimersAsync();
+    await expect(done).resolves.toBeUndefined();
+    expect(client.closeReceipt).toHaveBeenCalledTimes(3);
   });
 });
