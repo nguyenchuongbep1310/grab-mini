@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 
 	"github.com/segmentio/kafka-go"
 
+	kafkaadapter "grab-mini/payment-service/internal/adapters/kafka"
+	"grab-mini/payment-service/internal/adapters/postgres"
 	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
@@ -136,14 +138,15 @@ func newKafkaFixture(t *testing.T, policy domain.Policy) *kafkaFixture {
 
 	relayWriter := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll})
 	t.Cleanup(func() { relayWriter.Close() })
-	relay := outbox.NewRelay(f.db, relayWriter, outboxSource)
-	f.svc = newService(f.db, f.provider, policy, codec, relay)
+	relay := outbox.NewRelay(f.db, relayWriter, postgres.OutboxSource)
+	f.svc = wire(f.db, f.swap, policy, kafkaadapter.NewEncoder(codec), relay)
+	f.events = kafkaadapter.NewHandler(f.svc)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { relay.Run(ctx) })
 	wg.Go(func() {
-		f.svc.runConsumer(ctx, Env{KafkaBrokers: []string{brokers}}, "payment-test-"+newID(), codec)
+		f.events.Run(ctx, kafkaadapter.Config{Brokers: []string{brokers}, GroupOverride: "payment-test-" + newID()}, codec)
 	})
 	t.Cleanup(func() { cancel(); wg.Wait() })
 

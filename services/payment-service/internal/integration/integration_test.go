@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -15,6 +15,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	httpadapter "grab-mini/payment-service/internal/adapters/http"
+	kafkaadapter "grab-mini/payment-service/internal/adapters/kafka"
+	paymetrics "grab-mini/payment-service/internal/adapters/metrics"
+	"grab-mini/payment-service/internal/adapters/postgres"
+	psp "grab-mini/payment-service/internal/adapters/provider"
+	"grab-mini/payment-service/internal/app"
 	"grab-mini/payment-service/internal/domain"
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
@@ -28,12 +34,42 @@ type jsonEncoder struct{}
 
 func (jsonEncoder) Encode(_ context.Context, _ string, v any) ([]byte, error) { return json.Marshal(v) }
 
+// swapProvider lets a test replace the provider after the service is built (the
+// outage test makes it fail, then recover).
+type swapProvider struct {
+	mu  sync.Mutex
+	cur app.Provider
+}
+
+func (s *swapProvider) set(p app.Provider) { s.mu.Lock(); s.cur = p; s.mu.Unlock() }
+func (s *swapProvider) get() app.Provider  { s.mu.Lock(); defer s.mu.Unlock(); return s.cur }
+func (s *swapProvider) Name() string       { return s.get().Name() }
+func (s *swapProvider) Charge(ctx context.Context, req app.ChargeRequest) (app.ChargeResult, error) {
+	return s.get().Charge(ctx, req)
+}
+
 type fixture struct {
 	t        *testing.T
 	db       *pgxpool.Pool
-	provider *FakeProvider
-	svc      *service
+	provider *psp.Fake
+	swap     *swapProvider
+	svc      *app.Service
+	events   *kafkaadapter.Handler // events in: what the Kafka consumer calls
+	api      *httpadapter.API      // HTTP in
 }
+
+// wire builds the service the way main does, with the real Postgres adapters.
+func wire(db *pgxpool.Pool, provider app.Provider, policy domain.Policy, enc app.PaymentEncoder, waker postgres.Waker) *app.Service {
+	store := postgres.NewStore(db)
+	return app.NewService(app.Deps{
+		Orders: store, Assignments: store, Payments: store, Reader: store,
+		UnitOfWork: postgres.NewUnitOfWork(db, waker),
+		Encoder:    enc, Provider: provider, Policy: policy, Metrics: paymetrics.Prometheus{},
+	})
+}
+
+// migrationFiles is the service's own migrations directory (this package sits two levels below it).
+var migrationFiles = os.DirFS("../..")
 
 func newFixture(t *testing.T, policy domain.Policy) *fixture {
 	t.Helper()
@@ -42,7 +78,7 @@ func newFixture(t *testing.T, policy domain.Policy) *fixture {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	db, err := connectDB(ctx, url)
+	db, err := postgres.Connect(ctx, url, migrationFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +89,13 @@ func newFixture(t *testing.T, policy domain.Policy) *fixture {
 		DELETE FROM outbox WHERE source = 'payment-service'`); err != nil {
 		t.Fatal(err)
 	}
-	provider := NewFakeProvider()
-	return &fixture{t: t, db: db, provider: provider, svc: newService(db, provider, policy, jsonEncoder{}, nil)}
+	fake := psp.NewFake()
+	swap := &swapProvider{cur: fake}
+	svc := wire(db, swap, policy, kafkaadapter.NewEncoder(jsonEncoder{}), nil)
+	return &fixture{
+		t: t, db: db, provider: fake, swap: swap, svc: svc,
+		events: kafkaadapter.NewHandler(svc), api: httpadapter.New(svc),
+	}
 }
 
 var defaultPolicy = domain.Policy{CommissionBps: 2000}
@@ -64,7 +105,7 @@ func newID() string { return uuid.NewString() }
 func (f *fixture) order(rider string, price *float64) string {
 	f.t.Helper()
 	orderID := newID()
-	err := f.svc.recordOrder(context.Background(), events.OrderCreated{
+	err := f.events.OnOrderCreated(context.Background(), events.OrderCreated{
 		Envelope: events.Envelope{EventID: newID()}, OrderID: orderID, RiderID: rider, Price: price, SurgeMultiplier: 1,
 	})
 	if err != nil {
@@ -146,7 +187,7 @@ func TestCompletedTripCapturesTheLockedFareOnce(t *testing.T) {
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
 
-	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -196,14 +237,14 @@ func TestRedeliveryAndReplayDoNotChargeTwice(t *testing.T) {
 	evt := status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")
 
 	for i := 0; i < 3; i++ { // the same event, redelivered
-		if err := f.svc.onTripStatus(ctx, evt); err != nil {
+		if err := f.events.OnTripStatus(ctx, evt); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A different event for the same trip (a replay from another producer run).
 	replay := evt
 	replay.EventID = newID()
-	if err := f.svc.onTripStatus(ctx, replay); err != nil {
+	if err := f.events.OnTripStatus(ctx, replay); err != nil {
 		t.Fatal(err)
 	}
 
@@ -236,7 +277,7 @@ func TestConcurrentDeliveriesOfTheSameTripChargeOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// Each goroutine is another instance with its own copy of the event.
-			if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+			if err := f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 				t.Error(err)
 			}
 		}()
@@ -259,11 +300,11 @@ func TestTipIsASeparateChargeAndAllOfItGoesToTheDriver(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
+	f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
 
 	evt := rated(order, trip, "driver-1", "rider-1", 20000)
 	for i := 0; i < 2; i++ { // and redelivered
-		if err := f.svc.onTripRated(ctx, evt); err != nil {
+		if err := f.events.OnTripRated(ctx, evt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -296,7 +337,7 @@ func TestZeroTipAndBadTipsChargeNothing(t *testing.T) {
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(50000)), newID()
 
-	if err := f.svc.onTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 0)); err != nil {
+	if err := f.events.OnTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 0)); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -313,7 +354,7 @@ func TestZeroTipAndBadTipsChargeNothing(t *testing.T) {
 		"driver": rated(order, trip, "", "rider-1", 100),
 		"rider":  rated(order, trip, "driver-1", "", 100),
 	} {
-		err := f.svc.onTripRated(ctx, evt)
+		err := f.events.OnTripRated(ctx, evt)
 		var p interface{ Permanent() bool }
 		if !errors.As(err, &p) || !p.Permanent() {
 			t.Errorf("%s: error = %v, want a permanent one (straight to the DLQ)", name, err)
@@ -330,10 +371,10 @@ var graceFixturePolicy = domain.Policy{CommissionBps: 2000, CancellationFee: 150
 func (f *fixture) assignedAndCancelled(order, trip, rider string, held time.Duration) error {
 	ctx := context.Background()
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
-	if err := f.svc.onOrderMatched(ctx, matched(order, "driver-1", t0)); err != nil {
+	if err := f.events.OnOrderMatched(ctx, matched(order, "driver-1", t0)); err != nil {
 		return err
 	}
-	return f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusCancelled, events.CancelledByRider), t0.Add(held)))
+	return f.events.OnTripStatus(ctx, at(status(order, trip, "driver-1", rider, events.TripStatusCancelled, events.CancelledByRider), t0.Add(held)))
 }
 
 func TestRiderCancelAfterTheGracePeriodPaysTheConfiguredFee(t *testing.T) {
@@ -388,11 +429,11 @@ func TestARedeliveredAssignmentDoesNotRestartTheGraceClock(t *testing.T) {
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 
 	for _, when := range []time.Time{t0, t0.Add(10 * time.Minute)} {
-		if err := f.svc.onOrderMatched(ctx, matched(order, "driver-1", when)); err != nil {
+		if err := f.events.OnOrderMatched(ctx, matched(order, "driver-1", when)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0.Add(11*time.Minute))); err != nil {
+	if err := f.events.OnTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0.Add(11*time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 1 {
@@ -406,7 +447,7 @@ func TestACancelWithoutAKnownAssignmentIsNotCharged(t *testing.T) {
 	f := newFixture(t, graceFixturePolicy)
 	order, trip := f.order("rider-1", fl(100000)), newID()
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
-	if err := f.svc.onTripStatus(context.Background(), at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0)); err != nil {
+	if err := f.events.OnTripStatus(context.Background(), at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider), t0)); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -422,7 +463,7 @@ func TestAnOrderMatchedThatCannotBeUsedIsAPermanentError(t *testing.T) {
 		"unreadable t": {Envelope: events.Envelope{EventID: newID(), OccurredAt: "later"}, OrderID: newID(), DriverID: "driver-1"},
 	}
 	for name, evt := range bad {
-		err := f.svc.onOrderMatched(ctx, evt)
+		err := f.events.OnOrderMatched(ctx, evt)
 		var p interface{ Permanent() bool }
 		if !errors.As(err, &p) || !p.Permanent() {
 			t.Errorf("%s: error = %v, want a permanent one", name, err)
@@ -438,7 +479,7 @@ func TestACancelEventWithAnUnreadableTimeIsAPermanentError(t *testing.T) {
 	order, trip := f.order("rider-1", fl(100000)), newID()
 	evt := status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider)
 	evt.OccurredAt = "yesterday"
-	err := f.svc.onTripStatus(context.Background(), evt)
+	err := f.events.OnTripStatus(context.Background(), evt)
 	var p interface{ Permanent() bool }
 	if !errors.As(err, &p) || !p.Permanent() {
 		t.Errorf("error = %v, want a permanent one (a retry cannot fix the time)", err)
@@ -448,7 +489,7 @@ func TestACancelEventWithAnUnreadableTimeIsAPermanentError(t *testing.T) {
 func TestCancellationPolicyIsServedToTheApps(t *testing.T) {
 	f := newFixture(t, graceFixturePolicy)
 	me := auth.Identity{Subject: "rider-1", Role: auth.Rider}
-	code, body := f.get("/cancellation-policy", me, f.svc.handleCancellationPolicy, "")
+	code, body := f.get("/cancellation-policy", me, f.api.CancellationPolicy, "")
 	if code != 200 || body["fee"] != float64(15000) || body["graceSeconds"] != float64(180) || body["currency"] != "VND" {
 		t.Errorf("policy = %d %v, want fee 15000, graceSeconds 180, VND", code, body)
 	}
@@ -457,7 +498,7 @@ func TestCancellationPolicyIsServedToTheApps(t *testing.T) {
 func TestRiderCancelFeeIsOffByDefault(t *testing.T) {
 	f := newFixture(t, defaultPolicy) // CancellationFee 0
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	if err := f.svc.onTripStatus(context.Background(), status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider)); err != nil {
+	if err := f.events.OnTripStatus(context.Background(), status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByRider)); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -470,9 +511,9 @@ func TestDriverCancelNeverCostsTheRider(t *testing.T) {
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
 	t0 := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
-	f.svc.onOrderMatched(ctx, matched(order, "driver-1", t0))
+	f.events.OnOrderMatched(ctx, matched(order, "driver-1", t0))
 	// An hour later, well past any grace period: still the driver's doing.
-	if err := f.svc.onTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByDriver), t0.Add(time.Hour))); err != nil {
+	if err := f.events.OnTripStatus(ctx, at(status(order, trip, "driver-1", "rider-1", events.TripStatusCancelled, events.CancelledByDriver), t0.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -487,7 +528,7 @@ func TestPendingCancelIsNeverSeenByPaymentService(t *testing.T) {
 	// A rider cancelling a PENDING order (no driver yet) publishes order.cancelled
 	// and no trip event. Payment Service does not read order.cancelled, so there
 	// is nothing to charge by construction.
-	for _, topic := range consumedTopics {
+	for _, topic := range kafkaadapter.ConsumedTopics {
 		if topic == events.TopicOrderCancelled {
 			t.Fatal("payment-service consumes order.cancelled: a PENDING cancel could be charged")
 		}
@@ -499,10 +540,10 @@ func TestAnUnknownOrderIsRetriedUntilOrderCreatedArrives(t *testing.T) {
 	ctx := context.Background()
 	orderID, trip := newID(), newID()
 
-	err := f.svc.onTripStatus(ctx, status(orderID, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
-	var unknown *errOrderUnknown
+	err := f.events.OnTripStatus(ctx, status(orderID, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
+	var unknown *app.OrderUnknownError
 	if !errors.As(err, &unknown) {
-		t.Fatalf("error = %v, want errOrderUnknown", err)
+		t.Fatalf("error = %v, want OrderUnknownError", err)
 	}
 	var p interface{ Permanent() bool }
 	if errors.As(err, &p) {
@@ -513,10 +554,10 @@ func TestAnUnknownOrderIsRetriedUntilOrderCreatedArrives(t *testing.T) {
 	}
 
 	// order.created shows up; the retry now charges.
-	if err := f.svc.recordOrder(ctx, events.OrderCreated{Envelope: events.Envelope{EventID: newID()}, OrderID: orderID, RiderID: "rider-1", Price: fl(40000)}); err != nil {
+	if err := f.events.OnOrderCreated(ctx, events.OrderCreated{Envelope: events.Envelope{EventID: newID()}, OrderID: orderID, RiderID: "rider-1", Price: fl(40000)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.svc.onTripStatus(ctx, status(orderID, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(ctx, status(orderID, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 1 {
@@ -527,7 +568,7 @@ func TestAnUnknownOrderIsRetriedUntilOrderCreatedArrives(t *testing.T) {
 func TestAnOrderWithoutAPriceChargesNothing(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	order, trip := f.order("rider-1", nil), newID() // order.created from before prices existed
-	if err := f.svc.onTripStatus(context.Background(), status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(context.Background(), status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -540,14 +581,14 @@ func TestRecordOrderKeepsTheFirstPrice(t *testing.T) {
 	ctx := context.Background()
 	orderID := newID()
 	for _, p := range []float64{80000, 99999} { // a redelivered or conflicting copy must not move the price
-		if err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Price: fl(p)}); err != nil {
+		if err := f.events.OnOrderCreated(ctx, events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Price: fl(p)}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := f.scalar(`SELECT price FROM order_prices WHERE order_id = $1`, orderID); got != 80000 {
 		t.Errorf("price = %d, want 80000", got)
 	}
-	err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: newID(), RiderID: "r", Price: fl(-1)})
+	err := f.events.OnOrderCreated(ctx, events.OrderCreated{OrderID: newID(), RiderID: "r", Price: fl(-1)})
 	var p interface{ Permanent() bool }
 	if !errors.As(err, &p) || !p.Permanent() {
 		t.Errorf("a negative price: error = %v, want a permanent one", err)
@@ -559,7 +600,7 @@ func TestDeclinedFareIsRecordedWithoutLedgerEntries(t *testing.T) {
 	ctx := context.Background()
 	order, trip := f.order("decline-rider", fl(100000)), newID()
 
-	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "decline-rider", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "decline-rider", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	var st string
@@ -581,17 +622,17 @@ func TestDeclinedFareIsRecordedWithoutLedgerEntries(t *testing.T) {
 func TestProviderOutageIsRetriedAndLeavesNothingBehind(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	f.svc.provider = failingProvider{}
+	f.swap.set(failingProvider{})
 	evt := status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")
 
-	if err := f.svc.onTripStatus(context.Background(), evt); err == nil {
+	if err := f.events.OnTripStatus(context.Background(), evt); err == nil {
 		t.Fatal("a provider outage must surface as an error so the event is retried")
 	}
 	if n := f.payments(trip); n != 0 {
 		t.Errorf("%d payments after an outage", n)
 	}
-	f.svc.provider = f.provider // recovered: the retry of the same event succeeds
-	if err := f.svc.onTripStatus(context.Background(), evt); err != nil {
+	f.swap.set(f.provider) // recovered: the retry of the same event succeeds
+	if err := f.events.OnTripStatus(context.Background(), evt); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 1 {
@@ -602,8 +643,8 @@ func TestProviderOutageIsRetriedAndLeavesNothingBehind(t *testing.T) {
 type failingProvider struct{}
 
 func (failingProvider) Name() string { return "down" }
-func (failingProvider) Charge(context.Context, ChargeRequest) (ChargeResult, error) {
-	return ChargeResult{}, errors.New("provider timeout")
+func (failingProvider) Charge(context.Context, app.ChargeRequest) (app.ChargeResult, error) {
+	return app.ChargeResult{}, errors.New("provider timeout")
 }
 
 // ------------------------------------------------ the database's own checks ----
@@ -639,7 +680,7 @@ func TestDatabaseRefusesToEditOrDeleteLedgerHistory(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
+	f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
 
 	for _, sql := range []string{
 		`UPDATE ledger_entries SET amount = amount + 1`,
@@ -684,17 +725,17 @@ func TestPaymentsAPIShowsEachSideTheirOwnView(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	order, trip := f.order("rider-1", fl(100000)), newID()
-	f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
-	f.svc.onTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 20000))
+	f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, ""))
+	f.events.OnTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 20000))
 
 	rider := auth.Identity{Subject: "rider-1", Role: auth.Rider}
-	code, body := f.get("/payments?tripId="+trip, rider, f.svc.handleGetPayments, "")
+	code, body := f.get("/payments?tripId="+trip, rider, f.api.GetPayments, "")
 	if code != 200 || body["total"] != float64(120000) || len(body["payments"].([]any)) != 2 {
 		t.Errorf("rider view = %d %v, want 2 payments totalling 120000", code, body)
 	}
 
 	driver := auth.Identity{Subject: "driver-1", Role: auth.Driver}
-	code, body = f.get("/payments?tripId="+trip, driver, f.svc.handleGetPayments, "")
+	code, body = f.get("/payments?tripId="+trip, driver, f.api.GetPayments, "")
 	if code != 200 || body["total"] != float64(100000) {
 		t.Errorf("driver view = %d %v, want payouts totalling 100000", code, body)
 	}
@@ -708,12 +749,12 @@ func TestPaymentsAPIShowsEachSideTheirOwnView(t *testing.T) {
 
 	// Someone else's trip looks the same as a trip with no payments.
 	for _, other := range []auth.Identity{{Subject: "rider-2", Role: auth.Rider}, {Subject: "driver-2", Role: auth.Driver}} {
-		code, body = f.get("/payments?tripId="+trip, other, f.svc.handleGetPayments, "")
+		code, body = f.get("/payments?tripId="+trip, other, f.api.GetPayments, "")
 		if code != 200 || body["total"] != float64(0) {
 			t.Errorf("%s sees %d %v of a trip that is not theirs", other.Subject, code, body)
 		}
 	}
-	if code, _ := f.get("/payments", rider, f.svc.handleGetPayments, ""); code != 400 {
+	if code, _ := f.get("/payments", rider, f.api.GetPayments, ""); code != 400 {
 		t.Errorf("no tripId: %d, want 400", code)
 	}
 }
@@ -724,18 +765,18 @@ func TestEarningsSummaryAndOwnership(t *testing.T) {
 	o1, t1 := f.order("rider-1", fl(100000)), newID()
 	o2, t2 := f.order("rider-2", fl(50000)), newID()
 	o3, t3 := f.order("rider-3", fl(70000)), newID()
-	f.svc.onTripStatus(ctx, status(o1, t1, "driver-1", "rider-1", events.TripStatusCompleted, ""))
-	f.svc.onTripRated(ctx, rated(o1, t1, "driver-1", "rider-1", 10000))
-	f.svc.onTripStatus(ctx, status(o2, t2, "driver-1", "rider-2", events.TripStatusCompleted, ""))
+	f.events.OnTripStatus(ctx, status(o1, t1, "driver-1", "rider-1", events.TripStatusCompleted, ""))
+	f.events.OnTripRated(ctx, rated(o1, t1, "driver-1", "rider-1", 10000))
+	f.events.OnTripStatus(ctx, status(o2, t2, "driver-1", "rider-2", events.TripStatusCompleted, ""))
 	if err := f.assignedAndCancelled(o3, t3, "rider-3", 5*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	// Another driver's money must not leak in.
 	o4 := f.order("rider-4", fl(90000))
-	f.svc.onTripStatus(ctx, status(o4, newID(), "driver-2", "rider-4", events.TripStatusCompleted, ""))
+	f.events.OnTripStatus(ctx, status(o4, newID(), "driver-2", "rider-4", events.TripStatusCompleted, ""))
 
 	me := auth.Identity{Subject: "driver-1", Role: auth.Driver}
-	code, body := f.get("/drivers/driver-1/earnings", me, f.svc.handleEarnings, "driver-1")
+	code, body := f.get("/drivers/driver-1/earnings", me, f.api.Earnings, "driver-1")
 	if code != 200 {
 		t.Fatalf("status %d: %v", code, body)
 	}
@@ -748,11 +789,11 @@ func TestEarningsSummaryAndOwnership(t *testing.T) {
 		}
 	}
 
-	if code, _ := f.get("/drivers/driver-2/earnings", me, f.svc.handleEarnings, "driver-2"); code != 403 {
+	if code, _ := f.get("/drivers/driver-2/earnings", me, f.api.Earnings, "driver-2"); code != 403 {
 		t.Errorf("reading another driver's earnings: %d, want 403", code)
 	}
 	rider := auth.Identity{Subject: "rider-1", Role: auth.Rider}
-	if code, _ := f.get("/drivers/driver-1/earnings", rider, f.svc.handleEarnings, "driver-1"); code != 403 {
+	if code, _ := f.get("/drivers/driver-1/earnings", rider, f.api.Earnings, "driver-1"); code != 403 {
 		t.Errorf("a rider reading earnings: %d, want 403", code)
 	}
 	f.assertLedgerBalances()
@@ -764,7 +805,7 @@ func TestEarningsSummaryAndOwnership(t *testing.T) {
 func (f *fixture) orderWithDiscount(rider string, price float64, discount int64) string {
 	f.t.Helper()
 	orderID := newID()
-	err := f.svc.recordOrder(context.Background(), events.OrderCreated{
+	err := f.events.OnOrderCreated(context.Background(), events.OrderCreated{
 		Envelope: events.Envelope{EventID: newID()}, OrderID: orderID, RiderID: rider, Price: fl(price), SurgeMultiplier: 1,
 		PromoCode: "WELCOME10", Discount: discount,
 	})
@@ -779,7 +820,7 @@ func TestAPromoOrderIsChargedThePriceLessTheDiscountAndCommissionIsOnTheNet(t *t
 	ctx := context.Background()
 	order, trip := f.orderWithDiscount("rider-1", 100000, 30000), newID()
 
-	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	var amount, driver, platform int64
@@ -813,7 +854,7 @@ func TestTheDiscountIsStoredWithTheOrderAndTheFirstCopyWins(t *testing.T) {
 	ctx := context.Background()
 	orderID := newID()
 	for _, d := range []int64{10000, 40000} { // a redelivered or conflicting copy must not move the discount
-		if err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Price: fl(80000), Discount: d}); err != nil {
+		if err := f.events.OnOrderCreated(ctx, events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Price: fl(80000), Discount: d}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -826,9 +867,9 @@ func TestAFreeRideIsASkippedPaymentNotAZeroCharge(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	order, trip := f.orderWithDiscount("rider-1", 50000, 50000), newID()
-	before := testutil.ToFloat64(paymentsSkipped.WithLabelValues(domain.SkipZeroAmount))
+	before := testutil.ToFloat64(paymetrics.PaymentsSkipped.WithLabelValues(domain.SkipZeroAmount))
 
-	if err := f.svc.onTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
+	if err := f.events.OnTripStatus(ctx, status(order, trip, "driver-1", "rider-1", events.TripStatusCompleted, "")); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 0 {
@@ -840,11 +881,11 @@ func TestAFreeRideIsASkippedPaymentNotAZeroCharge(t *testing.T) {
 	if n := f.scalar(`SELECT count(*) FROM ledger_transactions`); n != 0 {
 		t.Errorf("%d ledger transactions for a free ride", n)
 	}
-	if got := testutil.ToFloat64(paymentsSkipped.WithLabelValues(domain.SkipZeroAmount)); got != before+1 {
+	if got := testutil.ToFloat64(paymetrics.PaymentsSkipped.WithLabelValues(domain.SkipZeroAmount)); got != before+1 {
 		t.Errorf("payments_skipped_total{reason=zero_amount} went from %v to %v, want one more", before, got)
 	}
 	// The tip is still the rider's to give.
-	if err := f.svc.onTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 10000)); err != nil {
+	if err := f.events.OnTripRated(ctx, rated(order, trip, "driver-1", "rider-1", 10000)); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.payments(trip); n != 1 {
@@ -856,7 +897,7 @@ func TestADiscountThatCannotBeAppliedIsAPermanentError(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	ctx := context.Background()
 	for name, discount := range map[string]int64{"more than the price": 100001, "negative": -1} {
-		err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: discount})
+		err := f.events.OnOrderCreated(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: discount})
 		var p interface{ Permanent() bool }
 		if !errors.As(err, &p) || !p.Permanent() {
 			t.Errorf("%s: error = %v, want a permanent one", name, err)
@@ -866,7 +907,7 @@ func TestADiscountThatCannotBeAppliedIsAPermanentError(t *testing.T) {
 		t.Errorf("%d orders recorded from refused events", n)
 	}
 	// Equal to the price is allowed: a free ride.
-	if err := f.svc.recordOrder(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: 100000}); err != nil {
+	if err := f.events.OnOrderCreated(ctx, events.OrderCreated{OrderID: newID(), RiderID: "rider-1", Price: fl(100000), Discount: 100000}); err != nil {
 		t.Errorf("a full discount was refused: %v", err)
 	}
 }
@@ -874,7 +915,7 @@ func TestADiscountThatCannotBeAppliedIsAPermanentError(t *testing.T) {
 func TestAnOrderWithoutAPriceIgnoresADiscount(t *testing.T) {
 	f := newFixture(t, defaultPolicy)
 	orderID := newID()
-	if err := f.svc.recordOrder(context.Background(), events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Discount: 5000}); err != nil {
+	if err := f.events.OnOrderCreated(context.Background(), events.OrderCreated{OrderID: orderID, RiderID: "rider-1", Discount: 5000}); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.scalar(`SELECT discount FROM order_prices WHERE order_id = $1`, orderID); got != 0 {
