@@ -38,12 +38,12 @@ func (jsonEncoder) Encode(_ context.Context, _ string, v any) ([]byte, error) { 
 // outage test makes it fail, then recover).
 type swapProvider struct {
 	mu  sync.Mutex
-	cur app.Provider
+	cur app.PaymentProvider
 }
 
-func (s *swapProvider) set(p app.Provider) { s.mu.Lock(); s.cur = p; s.mu.Unlock() }
-func (s *swapProvider) get() app.Provider  { s.mu.Lock(); defer s.mu.Unlock(); return s.cur }
-func (s *swapProvider) Name() string       { return s.get().Name() }
+func (s *swapProvider) set(p app.PaymentProvider) { s.mu.Lock(); s.cur = p; s.mu.Unlock() }
+func (s *swapProvider) get() app.PaymentProvider  { s.mu.Lock(); defer s.mu.Unlock(); return s.cur }
+func (s *swapProvider) Name() string              { return s.get().Name() }
 func (s *swapProvider) Charge(ctx context.Context, req app.ChargeRequest) (app.ChargeResult, error) {
 	return s.get().Charge(ctx, req)
 }
@@ -59,7 +59,7 @@ type fixture struct {
 }
 
 // wire builds the service the way main does, with the real Postgres adapters.
-func wire(db *pgxpool.Pool, provider app.Provider, policy domain.Policy, enc app.PaymentEncoder, waker postgres.Waker) *app.Service {
+func wire(db *pgxpool.Pool, provider app.PaymentProvider, policy domain.Policy, enc app.PaymentEncoder, waker postgres.Waker) *app.Service {
 	store := postgres.NewStore(db)
 	return app.NewService(app.Deps{
 		Orders: store, Assignments: store, Payments: store, Reader: store,

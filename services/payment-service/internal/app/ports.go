@@ -13,7 +13,7 @@ import (
 
 // ---------------------------------------------------------------- provider ----
 
-// Provider is the seam to a card processor or wallet. The service never sees a
+// PaymentProvider is the seam to a card processor or wallet. The service never sees a
 // card number, expiry or CVV: the rider's payment method lives with the
 // provider (a tokenised method saved when the rider signed up there), and a
 // charge names only the rider. A real implementation would map RiderID to that
@@ -27,7 +27,7 @@ import (
 //     an error: return a ChargeResult with Status ChargeDeclined.
 //   - An error means "unknown, try again" (timeout, 5xx): the event is retried
 //     through the retry topics, and the same key makes the retry safe.
-type Provider interface {
+type PaymentProvider interface {
 	Name() string
 	Charge(ctx context.Context, req ChargeRequest) (ChargeResult, error)
 }

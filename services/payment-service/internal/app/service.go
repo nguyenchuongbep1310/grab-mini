@@ -15,7 +15,7 @@ type Service struct {
 	uow         UnitOfWork
 	enc         PaymentEncoder
 	reader      Reader
-	provider    Provider
+	provider    PaymentProvider
 	policy      domain.Policy
 	metrics     Metrics
 	now         func() time.Time
@@ -29,7 +29,7 @@ type Deps struct {
 	UnitOfWork  UnitOfWork
 	Encoder     PaymentEncoder
 	Reader      Reader
-	Provider    Provider
+	Provider    PaymentProvider
 	Policy      domain.Policy
 	Metrics     Metrics
 	Now         func() time.Time

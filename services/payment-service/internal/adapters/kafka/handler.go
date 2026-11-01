@@ -19,9 +19,6 @@ import (
 // ConsumedTopics are the topics read under one group.
 var ConsumedTopics = []string{events.TopicOrderCreated, events.TopicOrderMatched, events.TopicTripStatusChanged, events.TopicTripRated}
 
-// groupID is the consumer group; KEDA scales on it and scripts/kafka-acls.sh grants it.
-const groupID = "payment-service-group"
-
 // Decoder reads an event's Avro wire bytes (*eventcodec.Codec).
 type Decoder interface {
 	Decode(ctx context.Context, topic string, data []byte, v any) error
@@ -111,7 +108,7 @@ type Config struct {
 func (h *Handler) Run(ctx context.Context, cfg Config, dec Decoder) {
 	kc := kafkaconsumer.Config{
 		Brokers:    cfg.Brokers,
-		GroupID:    groupID,
+		GroupID:    "payment-service-group", // the literal is read by deploy/k8s/check.py
 		Topics:     ConsumedTopics,
 		LogLabel:   "[payment-service]",
 		RetryTiers: kafkaconsumer.DefaultRetryTiers,

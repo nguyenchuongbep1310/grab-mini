@@ -1,4 +1,4 @@
-// Package provider holds implementations of app.Provider. Only the sandbox fake exists.
+// Package provider holds implementations of app.PaymentProvider. Only the sandbox fake exists.
 package provider
 
 import (
@@ -64,7 +64,7 @@ func (f *Fake) Charge(ctx context.Context, req app.ChargeRequest) (app.ChargeRes
 
 // FromEnv picks the provider named by PAYMENT_PROVIDER. Only "fake"
 // exists; a real processor is a new case here and a new type above.
-func FromEnv(name string) (app.Provider, error) {
+func FromEnv(name string) (app.PaymentProvider, error) {
 	switch name {
 	case "", "fake":
 		return NewFake(), nil

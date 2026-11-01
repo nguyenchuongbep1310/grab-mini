@@ -72,7 +72,7 @@ Why `app` may not import `pkg/events`: the events are the *wire contract*. A use
 
 ### Enforcement
 
-A Go test in the service, `internal/arch_test.go`, parses every non-test `.go` file under `internal/` with `go/parser` (imports only) and fails with a list of `file: imports X (rule)` when a rule above is broken. It runs under plain `go test ./...`, so CI needs no new job. It is deliberately a per-service file (about 120 lines): when the second service migrates, extract it into a small `services/pkg/archtest` module (a dev-time helper, it carries no business rule) instead of copying it a second time. A rule that is easy to bypass is not a rule, so the check is on imports, not on naming conventions.
+A Go test in the service, `internal/arch_test.go`, parses every non-test `.go` file under `internal/` with `go/parser` (imports only) and fails with a list of `file: imports X (rule)` when a rule above is broken. It runs under plain `go test ./...`, so CI needs no new job. It is deliberately a per-service file (about 190 lines, half of it a table that tests the rule itself): when the second service migrates, extract it into a small `services/pkg/archtest` module (a dev-time helper, it carries no business rule) instead of copying it a second time. A rule that is easy to bypass is not a rule, so the check is on imports, not on naming conventions.
 
 ### Ports, transactions, outbox, idempotency
 
@@ -93,9 +93,18 @@ Everything under `services/<name>/internal/` can be imported only by code in `se
 ### Tests
 
 - Domain and app rules are plain unit tests with no containers (money, split, policy, ledger validation; app use cases against in-memory fakes where the behaviour does not depend on SQL).
-- The existing integration tests keep their names and what they prove. They run against real Postgres and Kafka in `internal/integration`, which wires the real adapters, so what they exercise is the same path as production.
-- Adapter-local tests live beside the adapter (the fake provider; the mapping from wire constants to domain constants).
+- The existing integration tests keep their names and what they prove. They run against real Postgres and Kafka in `internal/integration`, which wires the real adapters and enters through the Kafka `Handler` and the HTTP `API`, so what they exercise is the same path as production. (In `payment-service`: 33 tests, none renamed; one domain test that also counted a metric was split in two, see the pilot report.)
+- App use cases additionally have in-memory unit tests against fakes of the ports (no containers): charged once, redelivery, decline, provider outage, early trip event, cancellation grace.
+- Adapter-local tests live beside the adapter (the fake provider; the test that pins the domain's and the app's copies of wire constants to `services/pkg/events`).
 - The e2e test in `services/e2e-test` is unchanged and remains the final check.
+
+### Tooling that reads the source text
+
+Some repository checks grep Go source instead of running it, and moving code can silently blind them. Found while migrating `payment-service`:
+
+- `deploy/k8s/check.py` finds consumer groups with the regex `GroupID:\s*"..."` over every non-test `.go` file. The group name must therefore stay a literal in a `GroupID:` field (a named constant made the check fail with "scales on group ... which no code uses"). It scans recursively, so `internal/` is covered.
+- The same script decides which services call the routing service and which use Redis by searching only the **top-level** `*.go` files of a service for `"ROUTING_URL"` and `redisconn.`. A service that moves that code under `internal/` stops being checked without any error. Before migrating `pricing-service`, `trip-service` or `order-service`, change those two lookups to search recursively (a one-line change in `check.py`, to be made in the same pull request as that service).
+- `deploy/verify.sh` builds `services/<dir>` with `go build .`, so `main` stays at the service root.
 
 ### What is explicitly not changed
 
