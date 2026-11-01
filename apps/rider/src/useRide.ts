@@ -56,7 +56,7 @@ export const initialRide: RideState = {
 /** A ride that was already under way when the page opened. */
 export interface ActiveRide {
   orderId: string;
-  phase: "searching" | "assigned" | "in_progress";
+  phase: "searching" | "assigned" | "in_progress" | "completed";
   vehicleType: VehicleType;
   dropoff: LatLng;
   driverId?: string;

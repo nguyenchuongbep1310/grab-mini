@@ -84,6 +84,7 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 - [x] 11.2 Matching Service reacts to the review result
 - [x] 11.3 Rider App profile and driver card; Driver App onboarding; Ops review queue (admin)
 - [x] 11.4 Infra and docs
+- [x] Rider recovery of a completed ride: after a reload the Rider App restores the latest COMPLETED, unrated trip that settled within 24 h into the receipt and rating prompt (frontend only)
 
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
