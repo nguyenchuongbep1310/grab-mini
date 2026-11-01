@@ -63,6 +63,23 @@ func freePort(t *testing.T) string {
 	return port
 }
 
+// fleetTopics is every topic the fleet reads or writes. TestTopicListsCoverEveryTopicTheServicesUse
+// keeps it, docker-compose.yml's kafka-init and the Kubernetes topics in step with
+// scripts/kafka-acls.sh, which says who produces and consumes what.
+var fleetTopics = []string{
+	events.TopicOrderCreated,
+	events.TopicOrderMatched,
+	events.TopicOrderNoDriverFound,
+	events.TopicOrderCancelled,
+	events.TopicDriverLocationUpdate,
+	events.TopicTripStatusChanged,
+	events.TopicTripRated,
+	events.TopicPaymentRecorded,
+	events.TopicPromotionRedeemed,
+	events.TopicChatMessageSent,
+	events.TopicDriverApplicationReviewed,
+}
+
 // createTopics provisions the topics the fleet reads and writes, the way the
 // kafka-init service does in docker-compose.yml. The services create only their
 // own retry and dead-letter topics, never these: a production broker doesn't
@@ -75,19 +92,7 @@ func freePort(t *testing.T) string {
 // fail with Unknown Topic Or Partition while the broker creates the topic).
 func createTopics(t *testing.T, brokers string) {
 	t.Helper()
-	topics := []string{
-		events.TopicOrderCreated,
-		events.TopicOrderMatched,
-		events.TopicOrderNoDriverFound,
-		events.TopicOrderCancelled,
-		events.TopicDriverLocationUpdate,
-		events.TopicTripStatusChanged,
-		events.TopicTripRated,
-		events.TopicPaymentRecorded,
-		events.TopicPromotionRedeemed,
-		events.TopicChatMessageSent,
-		events.TopicDriverApplicationReviewed,
-	}
+	topics := fleetTopics
 
 	var specs []kafka.TopicConfig
 	for _, topic := range topics {
