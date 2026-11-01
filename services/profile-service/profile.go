@@ -41,7 +41,7 @@ var (
 
 	requestsRefused = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "profile_requests_rejected_total",
-		Help: "Requests refused, by reason: invalid_request, invalid_profile, forbidden, not_found, incomplete_profile, suspended, invalid_transition, rate_limited.",
+		Help: "Requests refused, by reason: invalid_request, invalid_profile, forbidden, not_found, incomplete_profile, suspended, invalid_transition, rate_limited, resync_running.",
 	}, []string{"reason"})
 
 	publicLookups = promauto.NewCounterVec(prometheus.CounterOpts{

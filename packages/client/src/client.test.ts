@@ -22,6 +22,7 @@ import {
   getQuote,
   getRiderProfile,
   getRoute,
+  closeReceipt,
   getTripByOrder,
   listChatMessages,
   listDriverApplications,
@@ -32,6 +33,7 @@ import {
   profileFieldOf,
   promoRejectionOf,
   rateTrip,
+  resyncDriverEligibility,
   reviewDriver,
   sendChatMessage,
   tripAction,
@@ -378,6 +380,30 @@ describe("auth & api client", () => {
     forgetToken();
   });
 
+  it("asks Profile Service to resync driver eligibility as an admin", async () => {
+    signIn("admin", "ops-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const done = { queued: 3, counts: { APPROVED: 2, REJECTED: 0, SUSPENDED: 1 }, skipped: 0 };
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt-a", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(done), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...done, queued: 1 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "x", code: "resync_running" }), { status: 409 }));
+
+    expect(await resyncDriverEligibility()).toEqual(done);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe("/profile-api/driver-applications/resync");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({});
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt-a");
+
+    expect((await resyncDriverEligibility("driver-7")).queued).toBe(1);
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({ driverId: "driver-7" });
+    const busy = await resyncDriverEligibility().catch((e) => e);
+    expect(profileErrorOf(busy)).toBe("resync_running");
+    forgetToken();
+  });
+
   it("lists driver applications and reviews a driver as an admin", async () => {
     signIn("admin", "ops-1");
     const future = new Date(Date.now() + 3600_000).toISOString();
@@ -533,6 +559,33 @@ describe("trip completedAt", () => {
 
     expect((await getTripByOrder("o-1")).completedAt).toBe("2026-03-01T10:30:00.123456Z");
     expect((await getTripByOrder("o-2")).completedAt).toBeUndefined();
+    forgetToken();
+  });
+});
+
+describe("closeReceipt", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockReset();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs without a body, with the bearer token, and returns the closing time", async () => {
+    signIn("rider", "rider-1");
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: "jwt", expiresAt: future }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ tripId: "t-1", receiptClosedAt: "2026-03-01T10:45:00Z" }), { status: 200 }));
+
+    expect((await closeReceipt("t-1")).receiptClosedAt).toBe("2026-03-01T10:45:00Z");
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(String(url)).toMatch(/\/trips\/t-1\/receipt\/close$/);
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer jwt");
     forgetToken();
   });
 });

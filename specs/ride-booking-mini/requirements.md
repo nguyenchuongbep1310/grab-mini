@@ -46,6 +46,10 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN either party cancels a trip in a valid state (not yet `COMPLETED`), THE Trip Service SHALL move the trip to `CANCELLED` and publish `trip.status.changed`.
   - IF the trip is already `COMPLETED`, THE Trip Service SHALL reject the cancellation.
   - THE Trip Service SHALL record who cancelled (`RIDER` or `DRIVER`, taken from the caller's role) and an optional reason, and include both in `trip.status.changed`.
+- **US-4.3a**: As a rider, I want a finished ride's receipt to stay closed on every device once I have closed it.
+  - WHEN the trip's rider calls `POST /trips/{id}/receipt/close` on a `COMPLETED` trip, THE Trip Service SHALL store `receiptClosedAt` and return it; a repeated call SHALL succeed and keep the first time.
+  - IF the trip is not `COMPLETED`, THE Trip Service SHALL answer `409 not_completed`; any caller other than the trip's rider gets `404` (a driver token `403`).
+  - WHEN the rider rates a `COMPLETED` trip, THE Trip Service SHALL also set `receiptClosedAt` (if still empty) in the same transaction.
 - **US-4.4**: As a rider, I want to cancel an order while still searching for a driver.
   - WHEN the owning rider cancels a `PENDING` order, THE Order Service SHALL move it to `CANCELLED` and publish `order.cancelled` in the same transaction; a repeated cancel SHALL succeed without a second event.
   - IF the order is already `MATCHED`, THE Order Service SHALL answer `409` telling the client to cancel the trip instead; any other caller gets `404`.
@@ -148,6 +152,7 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
   - WHEN an admin lists `GET /driver-applications?status=PENDING`, THE Profile Service SHALL return them oldest first, a page at a time, with a cursor that neither skips nor repeats a driver.
   - WHEN an admin approves, rejects or suspends a driver, THE Profile Service SHALL change the status and queue `driver.application.reviewed` (key `driverId`) in the same transaction; rejecting and suspending SHALL need a reason of 1 to 500 characters, which the driver can read.
   - THE Profile Service SHALL allow only `PENDING` to `APPROVED` or `REJECTED`, `APPROVED` to `SUSPENDED`, and `SUSPENDED` to `APPROVED` (and `REJECTED` to `PENDING` through the driver's new application), and SHALL answer any other review with 409 `invalid_transition` naming the status; a non-admin SHALL get 403.
+  - WHEN an admin calls `POST /driver-applications/resync` (or an operator runs `profile-service resync`), optionally for one `driverId`, THE Profile Service SHALL queue one `driver.application.reviewed` per `APPROVED`, `REJECTED` or `SUSPENDED` driver with their current status, vehicle type and `reviewedBy` `resync`, dated later than their previous result, without changing any profile, and answer the counts per status; it SHALL queue nothing for `PENDING` or `NONE` drivers, SHALL run one resync at a time (a second gets 409 `resync_running`), and a non-admin SHALL get 403.
   - WHEN an approved driver changes the plate or vehicle type, THE Profile Service SHALL set the status `PENDING` and queue a `driver.application.reviewed` with status `SUSPENDED` and `reviewedBy` `system` in the same transaction.
 - **US-10.4**: As an operator, I want the decision to decide who gets trips.
   - WHEN Matching Service receives an `APPROVED` result for a driver who has no active status, is `OFFLINE`, or whose assignment lease has run out, THE Matching Service SHALL make the driver `AVAILABLE` with the vehicle type, as seeding does; it SHALL NOT change a driver who is `ASSIGNED` or `ON_TRIP`.

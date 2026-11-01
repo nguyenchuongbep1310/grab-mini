@@ -87,6 +87,9 @@ type trip struct {
 	// COMPLETED trips have one; it is omitted for every other status, a
 	// cancelled trip included. Written once, by the first completion.
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	// When the rider closed the receipt of the finished ride, or rated it
+	// (RFC 3339, from trips.receipt_closed_at). Omitted while still open.
+	ReceiptClosedAt *time.Time `json:"receiptClosedAt,omitempty"`
 }
 
 // transitionBody is the response of pickup/complete/cancel: the trip id and
@@ -104,13 +107,13 @@ func transitionBody(t *trip) map[string]string {
 type cancelInfo struct{ By, Reason string }
 
 func getTripByID(ctx context.Context, db *pgxpool.Pool, id string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips WHERE id = $1`, id)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at, receipt_closed_at FROM trips WHERE id = $1`, id)
 }
 
 // getTripByOrderID lets a client that only knows the orderId (e.g. from an
 // order.matched push) find the trip Trip Service created for it.
 func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*trip, error) {
-	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips WHERE order_id = $1`, orderID)
+	return queryTrip(ctx, db, `SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at, receipt_closed_at FROM trips WHERE order_id = $1`, orderID)
 }
 
 // getActiveTripByDriver is the driver's trip still in flight (ASSIGNED or
@@ -119,17 +122,21 @@ func getTripByOrderID(ctx context.Context, db *pgxpool.Pool, orderID string) (*t
 // the newest wins.
 func getActiveTripByDriver(ctx context.Context, db *pgxpool.Pool, driverID string) (*trip, error) {
 	return queryTrip(ctx, db, `
-		SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at FROM trips
+		SELECT id, order_id, driver_id, rider_id, status, rating, cancelled_by, cancel_reason, completed_at, receipt_closed_at FROM trips
 		WHERE driver_id = $1 AND status IN ('ASSIGNED', 'IN_PROGRESS')
 		ORDER BY created_at DESC LIMIT 1`, driverID)
 }
 
 func queryTrip(ctx context.Context, db *pgxpool.Pool, query string, arg string) (*trip, error) {
 	var t trip
-	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating, &t.CancelledBy, &t.CancelReason, &t.CompletedAt)
+	err := db.QueryRow(ctx, query, arg).Scan(&t.ID, &t.OrderID, &t.DriverID, &t.RiderID, &t.Status, &t.Rating, &t.CancelledBy, &t.CancelReason, &t.CompletedAt, &t.ReceiptClosedAt)
 	if t.CompletedAt != nil {
 		u := t.CompletedAt.UTC()
 		t.CompletedAt = &u
+	}
+	if t.ReceiptClosedAt != nil {
+		u := t.ReceiptClosedAt.UTC()
+		t.ReceiptClosedAt = &u
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errTripNotFound
@@ -187,7 +194,8 @@ func statusesToStrings(statuses []events.TripStatus) []string {
 // concurrent submissions can't both succeed.
 func saveRating(ctx context.Context, db execer, tripID string, stars int, comment string, tip int64) (bool, error) {
 	tag, err := db.Exec(ctx, `
-		UPDATE trips SET rating = $1, rating_comment = $2, tip_amount = $3, rated_at = now()
+		UPDATE trips SET rating = $1, rating_comment = $2, tip_amount = $3, rated_at = now(),
+		    receipt_closed_at = COALESCE(receipt_closed_at, now())
 		WHERE id = $4 AND status = 'COMPLETED' AND rating IS NULL`,
 		stars, comment, tip, tripID,
 	)
@@ -195,4 +203,18 @@ func saveRating(ctx context.Context, db execer, tripID string, stars int, commen
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// closeReceipt marks the receipt of a completed trip as closed and returns the
+// time it was closed. The first call sets it; later calls (and a rating that
+// already closed it) leave it as it was. ok is false if the trip is not COMPLETED.
+func closeReceipt(ctx context.Context, db *pgxpool.Pool, tripID string) (at time.Time, ok bool, err error) {
+	err = db.QueryRow(ctx, `
+		UPDATE trips SET receipt_closed_at = COALESCE(receipt_closed_at, now())
+		WHERE id = $1 AND status = 'COMPLETED'
+		RETURNING receipt_closed_at`, tripID).Scan(&at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	return at.UTC(), err == nil, err
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/events"
 	"net/http"
 	"net/http/httptest"
@@ -100,5 +101,27 @@ func TestTripJSONCarriesCompletedAtOnlyWhenSet(t *testing.T) {
 	b, _ = json.Marshal(trip{ID: "t", Status: events.TripStatusAssigned})
 	if strings.Contains(string(b), "completedAt") {
 		t.Errorf("unfinished trip JSON has completedAt: %s", b)
+	}
+}
+
+func TestTripJSONCarriesReceiptClosedAtOnlyWhenSet(t *testing.T) {
+	at := time.Date(2026, 3, 1, 10, 45, 0, 0, time.UTC)
+	b, _ := json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted, ReceiptClosedAt: &at})
+	if !strings.Contains(string(b), `"receiptClosedAt":"2026-03-01T10:45:00Z"`) {
+		t.Errorf("closed trip JSON = %s", b)
+	}
+	b, _ = json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted})
+	if strings.Contains(string(b), "receiptClosedAt") {
+		t.Errorf("open receipt JSON has receiptClosedAt: %s", b)
+	}
+}
+
+func TestCloseReceiptRouteNeedsARiderToken(t *testing.T) {
+	_, verifier := authtest.Pair(t, time.Hour)
+	mux := (&server{}).routes(verifier)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/trips/x/receipt/close", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token = %d, want 401", rec.Code)
 	}
 }

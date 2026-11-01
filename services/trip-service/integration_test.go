@@ -455,3 +455,92 @@ func TestACancelledTripHasNoCompletedAt(t *testing.T) {
 		t.Errorf("cancelled trip has completedAt %v", got.CompletedAt)
 	}
 }
+
+func TestClosingAReceiptIsRiderOnlyCompletedOnlyAndKeepsTheFirstTime(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
+	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s, _ := newServer(db, rdb)
+	issuer, verifier := authtest.Pair(t, time.Hour)
+	mux := s.routes(verifier)
+	call := func(path string, role auth.Role, subject string) (int, map[string]any) {
+		req := httptest.NewRequest("POST", path, nil)
+		tok, _, _ := issuer.Issue(role, subject)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		var body map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+	path := "/trips/" + tr.ID + "/receipt/close"
+
+	// Not finished yet: 409 not_completed, nothing stored.
+	if code, body := call(path, auth.Rider, "rider-1"); code != 409 || body["error"] != "not_completed" {
+		t.Fatalf("close on ASSIGNED = %d %v", code, body)
+	}
+	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED', completed_at = now() WHERE id = $1`, tr.ID)
+
+	// Anyone but the trip's rider gets the same 404 as GET /trips/{id}.
+	if code, _ := call(path, auth.Rider, "rider-2"); code != 404 {
+		t.Errorf("other rider: close = %d, want 404", code)
+	}
+	if code, _ := call(path, auth.Driver, "driver-1"); code != 403 { // rider-only route, like rating
+		t.Errorf("driver token: close = %d, want 403", code)
+	}
+	if got, _ := getTripByID(ctx, db, tr.ID); got.ReceiptClosedAt != nil {
+		t.Fatalf("refused calls still closed the receipt: %v", got.ReceiptClosedAt)
+	}
+
+	code, first := call(path, auth.Rider, "rider-1")
+	if code != 200 {
+		t.Fatalf("close = %d", code)
+	}
+	stored, _ := getTripByID(ctx, db, tr.ID)
+	want := stored.ReceiptClosedAt.UTC().Format(time.RFC3339Nano)
+	if stored.ReceiptClosedAt == nil || first["receiptClosedAt"] != want {
+		t.Fatalf("closed at %v, response %v", stored.ReceiptClosedAt, first["receiptClosedAt"])
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if code, again := call(path, auth.Rider, "rider-1"); code != 200 || again["receiptClosedAt"] != want {
+		t.Errorf("second close = %d %v, want 200 %s", code, again, want)
+	}
+	if got, _ := getTripByID(ctx, db, tr.ID); !got.ReceiptClosedAt.Equal(*stored.ReceiptClosedAt) {
+		t.Errorf("receiptClosedAt moved from %v to %v", stored.ReceiptClosedAt, got.ReceiptClosedAt)
+	}
+}
+
+func TestRatingATripClosesItsReceiptWithoutMovingAnEarlierClose(t *testing.T) {
+	db, rdb := testEnv(t)
+	ctx := context.Background()
+	s, _ := newServer(db, rdb)
+	rate := func(orderID string, preclose bool) (*trip, *trip) {
+		handleOrderMatched(ctx, db, rdb, matched(orderID, "d1"))
+		tr, _ := getTripByOrderID(ctx, db, orderID)
+		db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
+		if preclose {
+			db.Exec(ctx, `UPDATE trips SET receipt_closed_at = now() - interval '1 hour' WHERE id = $1`, tr.ID)
+		}
+		before, _ := getTripByID(ctx, db, tr.ID)
+		if ok, err := s.rateWithEvent(ctx, tr, rateRequest{RiderID: "rider-1", Stars: 4}, []byte("rated")); err != nil || !ok {
+			t.Fatalf("rating = %v, %v", ok, err)
+		}
+		after, _ := getTripByID(ctx, db, tr.ID)
+		return before, after
+	}
+
+	before, after := rate("o1", false)
+	if before.ReceiptClosedAt != nil {
+		t.Fatalf("receipt closed before rating: %v", before.ReceiptClosedAt)
+	}
+	if after.ReceiptClosedAt == nil || time.Since(*after.ReceiptClosedAt) > time.Minute {
+		t.Errorf("after rating receiptClosedAt = %v, want about now", after.ReceiptClosedAt)
+	}
+
+	before, after = rate("o2", true)
+	if !after.ReceiptClosedAt.Equal(*before.ReceiptClosedAt) {
+		t.Errorf("rating moved receiptClosedAt from %v to %v", before.ReceiptClosedAt, after.ReceiptClosedAt)
+	}
+}

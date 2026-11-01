@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,7 @@ func (s *service) routes(verifier *auth.Verifier) *http.ServeMux {
 	mux.Handle("POST /drivers/{id}/application", driver(s.handleApply))
 	mux.Handle("GET /drivers/{id}/public", verifier.Require(http.HandlerFunc(s.handlePublic))) // any signed-in user
 	mux.Handle("GET /driver-applications", admin(s.handleList))
+	mux.Handle("POST /driver-applications/resync", admin(s.handleResync))
 	for action := range reviewActions {
 		mux.Handle("POST /drivers/{id}/"+action, admin(s.handleReview(action)))
 	}
@@ -507,4 +509,52 @@ func (s *service) handleReview(action string) http.HandlerFunc {
 		log.Printf("driver %s: %s by %s -> %s", id, action, caller.Subject, d.Status)
 		writeJSON(w, http.StatusOK, newAdminDriverView(d))
 	}
+}
+
+type resyncRequest struct {
+	DriverID string `json:"driverId"`
+}
+
+// handleResync serves POST /driver-applications/resync (admin): re-publishes the current
+// status of every APPROVED, REJECTED or SUSPENDED driver as driver.application.reviewed, or of
+// the one in the optional body {"driverId": "..."}, so Matching can rebuild what a Redis that
+// lost its data forgot (see resync). 200 with the counts per status; 404 for an unknown
+// driverId; 409 resync_running while another resync runs. The run finishes even if the caller
+// goes away. For a very large fleet the response can outlast the server's write timeout: the
+// work is done all the same, and `profile-service resync` has no such limit.
+func (s *service) handleResync(w http.ResponseWriter, r *http.Request) {
+	caller, ok := auth.From(r.Context())
+	if !ok {
+		auth.Deny(w, http.StatusUnauthorized, "missing bearer token")
+		return
+	}
+	var req resyncRequest
+	if !readBody(w, r, &req, true) {
+		return
+	}
+	if req.DriverID != "" && !validDriverID(req.DriverID) {
+		refuse(w, http.StatusNotFound, "not_found", "no such driver")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resyncTimeout)
+	defer cancel()
+	res, err := s.resync(ctx, req.DriverID)
+	switch {
+	case errors.Is(err, errResyncRunning):
+		refuse(w, http.StatusConflict, "resync_running", "a resync is already running; try again when it has finished")
+		return
+	case errors.Is(err, errNoDriver):
+		refuse(w, http.StatusNotFound, "not_found", "no such driver")
+		return
+	case err != nil:
+		internalError(w, "resync", err)
+		return
+	}
+	scope := "all drivers"
+	if req.DriverID != "" {
+		scope = "driver " + req.DriverID
+	}
+	log.Printf("resync by %s: %s: %d event(s) queued (APPROVED %d, REJECTED %d, SUSPENDED %d, %d skipped)", caller.Subject, scope,
+		res.Total, res.Counts[statusApproved], res.Counts[statusRejected], res.Counts[statusSuspended], res.Skipped)
+	writeJSON(w, http.StatusOK, map[string]any{"queued": res.Total, "counts": res.Counts, "skipped": res.Skipped})
 }

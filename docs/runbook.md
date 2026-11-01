@@ -464,7 +464,19 @@ SELECT id, topic, created_at FROM outbox WHERE source = 'profile-service' ORDER 
 
 ### Rebuild Matching's view after Redis lost its data
 
-A failover to a replica that missed writes, or a flush, loses `driver:<id>:suspended`, `:status` and `:review_at`: suspended drivers are no longer blocked and nobody is `AVAILABLE` (except drivers seeded in development). Replay the topic into Matching (7 days are kept; see [Replay a topic](#replay-a-topic-reprocess-from-the-beginning), group `matching-service-driver-review-group`, topic `driver.application.reviewed`, KEDA paused for `matching-service`): every result is applied in order, ending in each driver's last decision. Drivers whose last decision is older than the topic's retention must be re-applied by hand from `driver_profiles`: for each `SUSPENDED`, `REJECTED` or `PENDING` driver set the `suspended` key, and for each `APPROVED` driver follow step 5 above. Do the suspensions first.
+**When:** after a Redis restore, a flush, or a failover to a replica that missed writes. Those lose `driver:<id>:suspended`, `:status`, `:vehicle` and `:review_at`: suspended drivers may no longer be blocked and approved drivers are not `AVAILABLE`. Nothing does this by itself: **run the resync as soon as Redis is back**, suspensions are the urgent part.
+
+**How:** Profile Service re-publishes the current status of every `APPROVED`, `REJECTED` or `SUSPENDED` driver (`PENDING` and drivers without an application emit nothing) as `driver.application.reviewed`, `reviewedBy` `resync`, without changing any profile. Either with an admin token:
+```bash
+curl -sS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" https://<host>/driver-applications/resync                       # every driver
+curl -sS -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"driverId":"driver-7"}' https://<host>/driver-applications/resync   # one driver
+# {"queued":412,"counts":{"APPROVED":390,"REJECTED":9,"SUSPENDED":13},"skipped":0}
+```
+or, without a token, from a pod or a machine that can reach Profile Service's Postgres and the Schema Registry (same `DATABASE_URL`/`SCHEMA_REGISTRY_URL` as the service; it only queues the events, the running service publishes them): `kubectl -n grab-mini exec deploy/profile-service -- /app resync [--driver driver-7]` (the image has no shell and the binary is `/app`; locally `go run ./services/profile-service resync`) (use the CLI for a very large fleet: the HTTP response must finish within the server's 30 s write timeout, although the run itself does not stop). A second resync while one runs is refused (409 `resync_running`; the command exits with an error): wait and repeat if unsure. It is safe to run again: Matching applies the same state.
+
+**Verify:** `profile_resync_events_total{status}` and `profile_resync_runs_total{result="completed"}` increased; `outbox_oldest_pending_age_seconds{source="profile-service"}` returns to 0; the lag of `matching-service-driver-review-group` drains ([Consumer lag](#consumer-lag)); then for a sample driver `redis-cli MGET driver:driver-7:status driver:driver-7:vehicle` (`AVAILABLE` and `CAR` for an approved one, `OFFLINE` for a suspended or rejected one) and `redis-cli EXISTS driver:driver-7:suspended` (1 for those two); and the public view `GET /drivers/driver-7/public` (200 only for an approved driver). `matching_driver_reviews_total{result}` shows `available`, `offline`, `approved_busy`, `after_trip`; `stale` for a driver whose Redis kept a newer result.
+
+**Limits:** the resync restores *decisions*. A driver on a trip whose `ON_TRIP` was lost is made `AVAILABLE` (nothing here knows about trips) and may be offered another order; Trip Service's own release later sets them free as usual. A driver who applied or was decided while Redis was down is applied once the consumer reaches the event (it retries while Redis is down); a resync run before that covers the decisions already saved. Replaying the topic ([Replay a topic](#replay-a-topic-reprocess-from-the-beginning)) also works within its 7 days but is no longer the procedure.
 
 ### Profile Service errors seen by the apps
 

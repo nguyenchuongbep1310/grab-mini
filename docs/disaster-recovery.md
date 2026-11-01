@@ -9,7 +9,7 @@ Scope: loss of a region, or loss of data. Losing a single broker or a single zon
 |---|---|---|---|
 | Orders, trips, ratings, outbox | Postgres (order, trip, rating) | **Truly lost**: it is the source of truth | Postgres backups + PITR (below) |
 | Business events (`order.*`, `trip.*`) | Kafka, retained 7 days | Committed data can be rebuilt from Postgres; a consumer more than 7 days behind loses events | MirrorMaker 2 to the standby region; S3 archive |
-| Driver location, driver status, leases | Redis (one master + replica, monitored by Sentinel) | **Self-healing**: drivers report again every few seconds; when a lease expires the driver can receive orders again | No backup needed |
+| Driver location, driver status, leases | Redis (one master + replica, monitored by Sentinel) | **Self-healing for locations and leases**: drivers report again every few seconds; when a lease expires the driver can receive orders again. **Driver eligibility (approved / suspended) is not**: after data loss it is restored by the Profile Service resync (below) | No backup needed |
 | Avro schemas | Schema Registry (Kafka topic `_schemas`) | New producers/consumers cannot decode messages | Lives in Kafka: replicated by MirrorMaker 2 if `_schemas` is added to `topicsPattern`; or re-register from `services/pkg/events/schemas/` (services register themselves on startup) |
 
 RPO/RTO per layer, separating what has been **measured** from **targets** (adjust to your actual contracts):
@@ -23,7 +23,7 @@ RPO/RTO per layer, separating what has been **measured** from **targets** (adjus
 
 ## 0. Redis: Sentinel (losing a node, not a region)
 
-Redis needs no backup (see the table above) but it does need to be **available**: when the master dies, Matching and Driver Location Service stop. Every service uses
+Redis needs no backup (see the table above; its content is rebuilt: locations by the drivers, and driver eligibility by the Profile Service resync after any data loss, see the runbook) but it does need to be **available**: when the master dies, Matching and Driver Location Service stop. Every service uses
 `pkg/redisconn`: `REDIS_SENTINEL_ADDRS` (ConfigMap `grab-mini-config`, the list of Sentinels) and `REDIS_MASTER_NAME` make the client ask Sentinel for
 the current master and **follow failovers by itself**, without restarting the service. Passwords come through `REDIS_PASSWORD_FILE` and `REDIS_SENTINEL_PASSWORD_FILE`
 (the same `grab-mini-redis` Secret, key `password`, which you create).
@@ -108,7 +108,7 @@ Only when the primary region will not recover soon. Each step should be rehearse
 3. **Postgres**: promote the replica in the standby region (or restore from PITR to the most recent point). Record the timestamp.
 4. **Kafka**: check how far MirrorMaker 2 has caught up (the connector's `kafka_consumer_lag`, or compare end offsets); stop MirrorMaker 2.
 5. **Schema Registry**: make sure all schemas are present (the `_schemas` topic was replicated, or re-register them).
-6. **Redis**: bring up a fresh, empty instance. Drivers will report their locations again on their own; for the first few seconds Matching may return `NO_DRIVER`.
+6. **Redis**: bring up a fresh, empty instance. Drivers will report their locations again on their own; for the first few seconds Matching may return `NO_DRIVER`. Locations and leases heal themselves, **eligibility does not**: run the Profile Service resync (`POST /driver-applications/resync` or `profile-service resync`, see the runbook, "Driver approval and suspension") once Profile Service is up, or approved drivers get no trips and suspended ones are not marked.
 7. **Start the services** in the standby region (`kubectl apply -k deploy/k8s/base`, replace `DATABASE_URL`, set the Kafka bootstrap through the ConfigMap). Run
    `migrate` first.
 8. **Switch DNS/gateway** to the standby region.

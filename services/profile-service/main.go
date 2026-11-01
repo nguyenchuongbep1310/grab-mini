@@ -44,6 +44,9 @@ func main() {
 		case "seed-dev":
 			runSeedDev(env)
 			return
+		case "resync":
+			runResync(env, os.Args[2:])
+			return
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

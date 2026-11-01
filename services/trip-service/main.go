@@ -476,6 +476,47 @@ func (s *server) rateWithEvent(ctx context.Context, t *trip, req rateRequest, pa
 	return true, nil
 }
 
+// handleCloseReceipt records that the rider closed the finished ride's receipt,
+// so no device shows it again. Idempotent: the first time is kept.
+func (s *server) handleCloseReceipt(w http.ResponseWriter, r *http.Request) {
+	c, ok := caller(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		http.Error(w, `{"error":"trip not found"}`, http.StatusNotFound)
+		return
+	}
+	ctx := r.Context()
+	t, err := getTripByID(ctx, s.db, id)
+	if errors.Is(err, errTripNotFound) || (err == nil && !isRiderOf(c, t)) {
+		http.Error(w, `{"error":"trip not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("failed to load trip: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if t.Status != events.TripStatusCompleted {
+		http.Error(w, `{"error":"not_completed"}`, http.StatusConflict)
+		return
+	}
+	at, found, err := closeReceipt(ctx, s.db, id)
+	if err != nil {
+		log.Printf("failed to close receipt: %v", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	if !found { // the trip stopped being COMPLETED between the read and the write
+		http.Error(w, `{"error":"not_completed"}`, http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"tripId": id, "receiptClosedAt": at.Format(time.RFC3339Nano)})
+}
+
 // routes is the HTTP API. Every route but /health needs a token and names the
 // roles allowed; the handlers then check the caller is a party to the trip.
 func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
@@ -494,6 +535,7 @@ func (s *server) routes(verifier *auth.Verifier) *http.ServeMux {
 	mux.Handle("POST /trips/{id}/pickup", only(auth.Driver, limited(s.handlePickup)))
 	mux.Handle("POST /trips/{id}/complete", only(auth.Driver, limited(s.handleComplete)))
 	mux.Handle("POST /trips/{id}/cancel", anyone(limited(s.handleCancel)))
+	mux.Handle("POST /trips/{id}/receipt/close", only(auth.Rider, limited(s.handleCloseReceipt)))
 	mux.Handle("POST /trips/{id}/rating", only(auth.Rider, limited(s.handleRateTrip)))
 	return mux
 }

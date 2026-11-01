@@ -81,6 +81,8 @@ export interface Trip {
   cancelReason?: string;
   /** When the trip was completed (RFC 3339). Only COMPLETED trips have it; absent for every other status, CANCELLED included. */
   completedAt?: string;
+  /** When the rider closed this finished ride's receipt (or rated it, which closes it too), RFC 3339. Absent while still open. */
+  receiptClosedAt?: string;
 }
 
 export interface DriverRating {
@@ -283,6 +285,15 @@ export function cancelOrder(orderId: string, reason?: string): Promise<Order> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(reason ? { reason } : {}),
   });
+}
+
+/**
+ * Records that the rider closed the receipt of a finished ride, so no device
+ * shows it again. Idempotent: the first closing time is kept. Rejects with 409
+ * if the trip is not COMPLETED.
+ */
+export function closeReceipt(tripId: string): Promise<{ tripId: string; receiptClosedAt: string }> {
+  return request(`${TRIP_API}/trips/${tripId}/receipt/close`, { method: "POST" });
 }
 
 export function rateTrip(
@@ -763,6 +774,7 @@ export type ProfileErrorCode =
   | "incomplete_profile" // 422 applying without a name, vehicle type or plate (`body.field` is the first missing one)
   | "suspended" // 409 applying while suspended
   | "invalid_transition" // 409 review not allowed from the driver's status (`body.status` is the status they have)
+  | "resync_running" // 409 another eligibility resync is running
   | "rate_limited"; // 429
 
 const PROFILE_ERRORS: readonly string[] = [
@@ -773,6 +785,7 @@ const PROFILE_ERRORS: readonly string[] = [
   "incomplete_profile",
   "suspended",
   "invalid_transition",
+  "resync_running",
   "rate_limited",
 ];
 
@@ -850,6 +863,27 @@ export function listDriverApplications(
   if (opts.cursor) q.set("cursor", opts.cursor);
   const qs = q.toString();
   return request(`${PROFILE_API}/driver-applications${qs ? `?${qs}` : ""}`);
+}
+
+/** What a resync queued: events per status (APPROVED, REJECTED, SUSPENDED), and drivers looked at and left alone. */
+export interface ResyncResult {
+  queued: number;
+  counts: { APPROVED: number; REJECTED: number; SUSPENDED: number };
+  skipped: number;
+}
+
+/**
+ * Admin only. Asks Profile Service to re-publish the current status of every APPROVED, REJECTED or SUSPENDED driver
+ * (or only `driverId`) so Matching rebuilds who may be offered trips after Redis lost its data. Run it by hand after a
+ * Redis restore or failover, not routinely. Rejects with `resync_running` (409) while another one runs and `not_found`
+ * (404) for an unknown `driverId`.
+ */
+export function resyncDriverEligibility(driverId?: string): Promise<ResyncResult> {
+  return request(`${PROFILE_API}/driver-applications/resync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(driverId === undefined ? {} : { driverId }),
+  });
 }
 
 /**

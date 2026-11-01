@@ -25,10 +25,10 @@ Profile Service publishes `driver.application.reviewed` (key `driverId`; status 
 ## Consequences
 
 - Good: Matching's path is unchanged and still one Redis script; a suspension takes effect as soon as the event is consumed; ordering is handled by the event's time, not by Kafka ordering luck.
-- Bad: **eligibility lives only in Redis.** If Redis loses data the `suspended` flag is lost, and a suspended driver could become matchable again when they report a location. Recovery is to replay the topic within its 7-day retention or re-apply by hand (see the runbook); there is no resync command.
+- Bad: **eligibility lives only in Redis, and restoring it is a manual step.** If Redis loses data the `suspended` flag and the driver's status and vehicle are lost, and a suspended driver could become matchable again until the loss is repaired. The repair is the resync: an operator runs `POST /driver-applications/resync` or `profile-service resync`, and Profile Service re-publishes the current status of every approved, rejected or suspended driver as `driver.application.reviewed` (dated after the driver's last result, the rows unchanged). Matching applies it unchanged (no new consumer code): without `review_at` it applies; with Redis intact it is idempotent and does not make a busy driver available or lift a suspension. It is deliberately not periodic. The window is real: from the loss until someone runs the resync, eligibility is wrong (approved drivers get no trips; a suspended driver whose status survived on a replica may still be claimed). Resync restores the *decisions*, not the driver's activity: a driver on a trip whose `ON_TRIP` was lost becomes `AVAILABLE`, and a driver who applied or was decided during an outage is covered only once the event reaches the topic (the consumer retries while Redis is down) or the next resync covers them.
 - Bad: between the decision and the consumer applying it there is a short window where a suspended driver can still be claimed.
 - Bad: the public driver view returns 404 for every non-approved driver (so it cannot reveal who applied), so a rider whose driver is suspended mid-trip sees only an id until the trip ends.
 
 ## Revisit when
 
-Redis can no longer be treated as rebuildable state: add a periodic resync from Profile Service, or move eligibility into the database that Matching can read.
+Redis can no longer be treated as rebuildable state by an operator action: run the resync periodically (it is idempotent), or move eligibility into the database that Matching can read.

@@ -197,10 +197,11 @@ curl localhost:3001/riders/<riderId>/latest-order     # what a reloaded Rider Ap
 
 # Trip Service
 curl localhost:3002/trips/by-order/<orderId>
-curl localhost:3002/trips/<tripId>                    # a COMPLETED trip also has completedAt (RFC 3339); empty for the others
+curl localhost:3002/trips/<tripId>                    # a COMPLETED trip also has completedAt (RFC 3339), and receiptClosedAt once the rider closed or rated it; both empty for the others
 curl localhost:3002/drivers/<driverId>/active-trip    # the driver's ASSIGNED or IN_PROGRESS trip, else 404
 curl -X POST localhost:3002/trips/<tripId>/pickup     # ASSIGNED -> IN_PROGRESS
 curl -X POST localhost:3002/trips/<tripId>/complete   # IN_PROGRESS -> COMPLETED (answers with completedAt), driver becomes AVAILABLE
+curl -X POST localhost:3002/trips/<tripId>/receipt/close   # rider token; COMPLETED only (409 not_completed); repeat keeps the first receiptClosedAt; rating closes it too
 curl -X POST localhost:3002/trips/<tripId>/cancel     # from ASSIGNED or IN_PROGRESS; 409 once COMPLETED
 curl -X POST localhost:3002/trips/<tripId>/rating -H "Content-Type: application/json" \
   -d '{"riderId": "rider-1", "stars": 5, "comment": "Smooth ride", "tipAmount": 20000}'   # COMPLETED trips only, once (409 otherwise); tipAmount is optional whole VND, 0 to 1,000,000
@@ -235,6 +236,7 @@ curl -X POST localhost:3012/drivers/driver-9/application -H "Authorization: Bear
 curl "localhost:3012/driver-applications?status=PENDING&limit=20" -H "Authorization: Bearer <admin token>"   # {"applications":[oldest first, with phone],"nextCursor":"..."}; pass nextCursor as ?cursor=
 curl -X POST localhost:3012/drivers/driver-9/approve -H "Authorization: Bearer <admin token>"   # PENDING or SUSPENDED to APPROVED; Matching then makes the driver AVAILABLE (if not on a trip). The driver must also send locations
 curl -X POST localhost:3012/drivers/driver-9/suspend -H "Authorization: Bearer <admin token>" -H "Content-Type: application/json" -d '{"reason":"Complaint 4412"}'   # APPROVED to SUSPENDED; reject (from PENDING) and suspend need a reason of 1 to 500 characters; any other transition is 409 invalid_transition with the current status. A driver on a trip finishes it and is then offered no more
+curl -X POST localhost:3012/driver-applications/resync -H "Authorization: Bearer <admin token>"   # after Redis lost its data: re-publishes the current status of every APPROVED, REJECTED or SUSPENDED driver so Matching rebuilds eligibility; {"queued":3,"counts":{"APPROVED":2,"REJECTED":0,"SUSPENDED":1},"skipped":0}. Add -H "Content-Type: application/json" -d '{"driverId":"driver-9"}' for one driver; 409 resync_running while another runs; without a token: profile-service resync [--driver driver-9]
 curl localhost:3012/drivers/driver-1/public -H "Authorization: Bearer <any token>"   # {"driverId":...,"name":...,"vehicleType":"CAR","plate":"51A-123.45","model":...,"color":...} for an APPROVED driver, never the phone; 404 for anyone else
 
 # Payment Service (tokens as above; a rider sees what they were charged, a driver what they earn)
