@@ -24,7 +24,7 @@ let stored: Trip;
 
 beforeEach(() => {
   localStorage.clear();
-  stored = { id: "trip-1", orderId: "order-1", driverId: "driver-2", status: "COMPLETED" };
+  stored = { id: "trip-1", orderId: "order-1", driverId: "driver-2", status: "COMPLETED", completedAt: new Date().toISOString() };
   vi.mocked(client.listChatMessages).mockResolvedValue({
     messages: [],
     nextBefore: null,

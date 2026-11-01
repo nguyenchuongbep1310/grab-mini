@@ -1,4 +1,4 @@
-import { getLatestOrder, getOrder, getTripPayments, waitForTripByOrder, type Order, type Trip } from "@grab-mini/client";
+import { getLatestOrder, getOrder, waitForTripByOrder, type Order, type Trip } from "@grab-mini/client";
 import type { ActiveRide, Outcome } from "./useRide";
 
 const inFlight = (trip: Trip) => trip.status === "ASSIGNED" || trip.status === "IN_PROGRESS";
@@ -26,7 +26,9 @@ function dismissedTrips(riderId: string): string[] {
 
 /**
  * Remember that the rider is done with a finished trip (rated it or closed the screen), so a
- * reload does not bring its receipt and rating prompt back. Best effort: storage may be unavailable.
+ * reload does not bring its receipt and rating prompt back. This is per browser (localStorage):
+ * the server has no "seen" flag, so another browser or cleared storage shows an unrated, recent
+ * ride once more. Best effort: storage may be unavailable.
  */
 export function dismissCompletedRide(riderId: string, tripId: string): void {
   try {
@@ -38,19 +40,13 @@ export function dismissCompletedRide(riderId: string, tripId: string): void {
 }
 
 /**
- * Whether a COMPLETED trip is recent enough to show again. Neither Trip nor Order Service says
- * when a trip ended, so use when Payment Service settled it (moments after completion). A trip
- * not settled yet has just ended. If payments can't be read the age is unknown: say no.
+ * Whether a COMPLETED trip ended recently enough to show again, by the completedAt Trip Service
+ * returns. Missing or unparseable means the age is unknown: say no, never guess. A time slightly
+ * in the future (clock skew between server and browser) counts as recent.
  */
-async function endedRecently(tripId: string): Promise<boolean> {
-  try {
-    const { payments } = await getTripPayments(tripId);
-    const times = (payments ?? []).map((p) => Date.parse(p.createdAt)).filter((t) => !Number.isNaN(t));
-    if (times.length === 0) return true;
-    return Date.now() - Math.min(...times) <= COMPLETED_RIDE_WINDOW_MS;
-  } catch {
-    return false;
-  }
+function endedRecently(trip: Trip): boolean {
+  const endedAt = trip.completedAt ? Date.parse(trip.completedAt) : NaN;
+  return !Number.isNaN(endedAt) && Date.now() - endedAt <= COMPLETED_RIDE_WINDOW_MS;
 }
 
 /** The ride the rider is still in the middle of, or just finished and has yet to rate, if any. */
@@ -75,7 +71,7 @@ export async function findActiveRide(riderId: string): Promise<ActiveRide | null
   if (!trip) return null;
   if (trip.status === "COMPLETED") {
     if (trip.rating != null || dismissedTrips(riderId).includes(trip.id)) return null;
-    if (!(await endedRecently(trip.id))) return null;
+    if (!endedRecently(trip)) return null;
     return { ...base, phase: "completed", driverId: trip.driverId, tripId: trip.id };
   }
   if (!inFlight(trip)) return null;

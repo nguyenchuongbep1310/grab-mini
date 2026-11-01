@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "@grab-mini/client";
-import type { Order, RiderPayment, Trip } from "@grab-mini/client";
+import type { Order, Trip } from "@grab-mini/client";
 import { COMPLETED_RIDE_WINDOW_MS, dismissCompletedRide, findActiveRide } from "./recovery";
 
 const NOW = new Date("2026-06-10T12:00:00Z");
@@ -25,23 +25,15 @@ const trip = (status: Trip["status"], extra: Partial<Trip> = {}): Trip => ({
   status,
   ...extra,
 });
-const fare = (agoMs: number): RiderPayment => ({
-  id: "p-1",
-  kind: "FARE",
-  status: "CAPTURED",
-  amount: 90000,
-  currency: "VND",
-  createdAt: new Date(NOW.getTime() - agoMs).toISOString(),
-});
-const payments = (...p: RiderPayment[]) => ({ tripId: "t-1", currency: "VND", total: 0, payments: p });
+const endedAgo = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
+const completed = (completedAt?: string) => trip("COMPLETED", { completedAt });
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   localStorage.clear();
   vi.spyOn(client, "getLatestOrder").mockResolvedValue(order("MATCHED"));
-  vi.spyOn(client, "waitForTripByOrder").mockResolvedValue(trip("COMPLETED"));
-  vi.spyOn(client, "getTripPayments").mockResolvedValue(payments(fare(HOUR)));
+  vi.spyOn(client, "waitForTripByOrder").mockResolvedValue(completed(endedAgo(HOUR)));
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -65,7 +57,6 @@ describe("findActiveRide", () => {
   ] as const)("restores a %s trip as %s", async (status, phase) => {
     vi.mocked(client.waitForTripByOrder).mockResolvedValue(trip(status));
     expect(await findActiveRide("rider-1")).toMatchObject({ phase, tripId: "t-1", driverId: "driver-2" });
-    expect(client.getTripPayments).not.toHaveBeenCalled();
   });
 
   it("restores a completed, unrated trip that ended within the window, with its price and promo", async () => {
@@ -83,27 +74,36 @@ describe("findActiveRide", () => {
     });
   });
 
-  it("restores a completed trip Payment Service has not settled yet", async () => {
-    vi.mocked(client.getTripPayments).mockResolvedValue(payments());
+  it("restores at the window edge and not just past it", async () => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(endedAgo(COMPLETED_RIDE_WINDOW_MS)));
     expect(await findActiveRide("rider-1")).toMatchObject({ phase: "completed" });
-  });
-
-  it("restores just inside the window and not just past it", async () => {
-    vi.mocked(client.getTripPayments).mockResolvedValue(payments(fare(COMPLETED_RIDE_WINDOW_MS)));
-    expect(await findActiveRide("rider-1")).toMatchObject({ phase: "completed" });
-    vi.mocked(client.getTripPayments).mockResolvedValue(payments(fare(COMPLETED_RIDE_WINDOW_MS + 1000)));
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(endedAgo(COMPLETED_RIDE_WINDOW_MS + 1)));
     expect(await findActiveRide("rider-1")).toBeNull();
   });
 
-  it("is idle for a completed trip that ended before the window", async () => {
-    vi.mocked(client.getTripPayments).mockResolvedValue(payments(fare(3 * 24 * HOUR)));
+  it("is idle for a completed trip that ended long before the window", async () => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(endedAgo(3 * 24 * HOUR)));
     expect(await findActiveRide("rider-1")).toBeNull();
+  });
+
+  it("is idle for a completed trip without completedAt", async () => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(undefined));
+    expect(await findActiveRide("rider-1")).toBeNull();
+  });
+
+  it.each(["", "not a date"])("is idle for an invalid completedAt (%j)", async (bad) => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(bad));
+    expect(await findActiveRide("rider-1")).toBeNull();
+  });
+
+  it("accepts a completedAt in the future as recent (clock skew)", async () => {
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(completed(endedAgo(-5 * 60_000)));
+    expect(await findActiveRide("rider-1")).toMatchObject({ phase: "completed" });
   });
 
   it("is idle for a completed trip that was rated", async () => {
-    vi.mocked(client.waitForTripByOrder).mockResolvedValue(trip("COMPLETED", { rating: 5 }));
+    vi.mocked(client.waitForTripByOrder).mockResolvedValue(trip("COMPLETED", { rating: 5, completedAt: endedAgo(HOUR) }));
     expect(await findActiveRide("rider-1")).toBeNull();
-    expect(client.getTripPayments).not.toHaveBeenCalled();
   });
 
   it("is idle for a completed trip the rider already closed, and only for that rider", async () => {
@@ -132,11 +132,6 @@ describe("findActiveRide", () => {
 
   it("is idle when the trip can't be found", async () => {
     vi.mocked(client.waitForTripByOrder).mockRejectedValue(new client.ApiError("not found", 404));
-    expect(await findActiveRide("rider-1")).toBeNull();
-  });
-
-  it("is idle when the age of a completed trip can't be read", async () => {
-    vi.mocked(client.getTripPayments).mockRejectedValue(new Error("payment down"));
     expect(await findActiveRide("rider-1")).toBeNull();
   });
 
