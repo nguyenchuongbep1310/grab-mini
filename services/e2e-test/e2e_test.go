@@ -84,6 +84,9 @@ func createTopics(t *testing.T, brokers string) {
 		events.TopicTripStatusChanged,
 		events.TopicTripRated,
 		events.TopicPaymentRecorded,
+		events.TopicPromotionRedeemed,
+		events.TopicChatMessageSent,
+		events.TopicDriverApplicationReviewed,
 	}
 
 	var specs []kafka.TopicConfig
