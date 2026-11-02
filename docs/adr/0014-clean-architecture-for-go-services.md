@@ -1,6 +1,6 @@
 # 0014. Layer the larger Go services with Clean Architecture, one service at a time
 
-Status: accepted for the pilot (`payment-service`); the other services follow only as listed in the migration order below.
+Status: accepted. Migrated so far: `payment-service` (the pilot) and `trip-service`; the other services follow only as listed in the migration order below.
 
 ## Context
 
@@ -72,7 +72,7 @@ Why `app` may not import `pkg/events`: the events are the *wire contract*. A use
 
 ### Enforcement
 
-A Go test in the service, `internal/arch_test.go`, parses every non-test `.go` file under `internal/` with `go/parser` (imports only) and fails with a list of `file: imports X (rule)` when a rule above is broken. It runs under plain `go test ./...`, so CI needs no new job. It is deliberately a per-service file (about 190 lines, half of it a table that tests the rule itself): when the second service migrates, extract it into a small `services/pkg/archtest` module (a dev-time helper, it carries no business rule) instead of copying it a second time. A rule that is easy to bypass is not a rule, so the check is on imports, not on naming conventions.
+A Go test in the service, `internal/arch_test.go`, parses every non-test `.go` file under `internal/` with `go/parser` (imports only) and fails with a list of `file: imports X (rule)` when a rule above is broken. It runs under plain `go test ./...`, so CI needs no new job. The rule and the checker live in the small `services/pkg/archtest` module (a dev-time helper, imported from `_test.go` files only; it carries no business rule), with its own table test on made-up imports; each service's `internal/arch_test.go` is a few lines that name the service's module (`archtest.Default(module).Test(t, ".")`). A service that needs another layer layout or allow-list changes the `Rules` fields instead of copying the checker. A rule that is easy to bypass is not a rule, so the check is on imports, not on naming conventions.
 
 ### Ports, transactions, outbox, idempotency
 
