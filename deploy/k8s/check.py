@@ -244,7 +244,7 @@ from urllib.parse import urlparse
 route_url = urlparse(config.get("ROUTING_URL", ""))
 callee = route_url.hostname
 callers = sorted(n for n in deployments
-                 if any('"ROUTING_URL"' in p.read_text() for p in (ROOT / "services" / n).glob("*.go") if not p.name.endswith("_test.go")))
+                 if any('"ROUTING_URL"' in p.read_text() for p in (ROOT / "services" / n).rglob("*.go") if not p.name.endswith("_test.go")))
 if callers and callee not in deployments:
     err(f"ROUTING_URL points at {callee!r}, which is not a Deployment")
 elif callers:
@@ -290,7 +290,7 @@ def unpinned(image):
 
 # Which services use Redis is read from the code (they build their client with pkg/redisconn).
 uses_redis = {n for n in deployments
-              if any("redisconn." in p.read_text() for p in (ROOT / "services" / n).glob("*.go") if not p.name.endswith("_test.go"))}
+              if any("redisconn." in p.read_text() for p in (ROOT / "services" / n).rglob("*.go") if not p.name.endswith("_test.go"))}
 sentinels = [a for a in config.get("REDIS_SENTINEL_ADDRS", "").split(",") if a]
 for dep_name in sorted(uses_redis):
     pod = deployments[dep_name]["spec"]["template"]["spec"]
