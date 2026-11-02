@@ -1,8 +1,9 @@
-package main
+package integration
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -19,7 +20,10 @@ import (
 	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/events"
-	"grab-mini/pkg/outbox"
+	tripmetrics "grab-mini/trip-service/internal/adapters/metrics"
+	"grab-mini/trip-service/internal/adapters/postgres"
+	"grab-mini/trip-service/internal/app"
+	"grab-mini/trip-service/internal/domain"
 )
 
 // These tests need Postgres and Redis: set TEST_DATABASE_URL and
@@ -31,7 +35,7 @@ func testEnv(t *testing.T) (*pgxpool.Pool, *redis.Client) {
 		t.Skip("TEST_DATABASE_URL and TEST_REDIS_ADDR not set")
 	}
 	ctx := context.Background()
-	db, err := connectDB(ctx, url)
+	db, err := postgres.Connect(ctx, url, migrationFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +67,7 @@ func matched(orderID, driverID string) events.OrderMatched {
 
 func TestMatchedOrderCreatesATripAndConfirmsTheDriver(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
 	driverstatus.SetVehicle(ctx, rdb, "d1", "CAR")
 	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available)
@@ -70,11 +75,11 @@ func TestMatchedOrderCreatesATripAndConfirmsTheDriver(t *testing.T) {
 		t.Fatal("setup claim failed")
 	}
 
-	if err := handleOrderMatched(ctx, db, rdb, matched("o1", "d1")); err != nil {
+	if err := s.events.OnOrderMatched(ctx, matched("o1", "d1")); err != nil {
 		t.Fatal(err)
 	}
 
-	if tr, err := getTripByOrderID(ctx, db, "o1"); err != nil || tr.Status != events.TripStatusAssigned || tr.DriverID != "d1" || tr.RiderID != "rider-1" {
+	if tr, err := s.store.ByOrderID(ctx, "o1"); err != nil || tr.Status != domain.Assigned || tr.DriverID != "d1" || tr.RiderID != "rider-1" {
 		t.Fatalf("trip = %+v, %v; want an ASSIGNED trip for d1 and rider-1 (status events name the rider from this)", tr, err)
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.OnTrip {
@@ -84,18 +89,19 @@ func TestMatchedOrderCreatesATripAndConfirmsTheDriver(t *testing.T) {
 
 func TestReplayingAMatchedEventDoesNotRevertAFinishedTripsDriver(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
 	evt := matched("o1", "d1")
-	if err := handleOrderMatched(ctx, db, rdb, evt); err != nil {
+	if err := s.events.OnOrderMatched(ctx, evt); err != nil {
 		t.Fatal(err)
 	}
 	// The trip finished and the driver was released; then the topic is replayed.
 	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available)
 
-	if err := handleOrderMatched(ctx, db, rdb, evt); err != nil {
+	if err := s.events.OnOrderMatched(ctx, evt); err != nil {
 		t.Fatal(err)
 	}
-	if err := handleOrderMatched(ctx, db, rdb, matched("o1", "d1")); err != nil { // same order, new eventId (Matching re-announced)
+	if err := s.events.OnOrderMatched(ctx, matched("o1", "d1")); err != nil { // same order, new eventId (Matching re-announced)
 		t.Fatal(err)
 	}
 
@@ -109,29 +115,25 @@ func TestReplayingAMatchedEventDoesNotRevertAFinishedTripsDriver(t *testing.T) {
 	}
 }
 
-func newServer(db *pgxpool.Pool, rdb *redis.Client) (*server, *recordingWriter) {
-	w := &recordingWriter{}
-	return &server{db: db, rdb: rdb, relay: outbox.NewRelay(db, w, outboxSource)}, w
-}
-
 func TestATransitionQueuesItsEventInTheSameTransaction(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, w := newServer(db, rdb)
+	s := newStack(t, db, rdb)
+	s.rewire(proximityOff(), nil)
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 
-	ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("evt"))
-	if err != nil || !ok {
-		t.Fatalf("transition = %v, %v; want true", ok, err)
+	got, err := s.svc.Pickup(ctx, driverOf("d1"), tr.ID)
+	if err != nil || got.Status != domain.InProgress {
+		t.Fatalf("pickup = %+v, %v; want IN_PROGRESS", got, err)
 	}
-	if got, _ := getTripByID(ctx, db, tr.ID); got.Status != events.TripStatusInProgress {
+	if got, _ := s.store.ByID(ctx, tr.ID); got.Status != domain.InProgress {
 		t.Errorf("trip is %s, want IN_PROGRESS", got.Status)
 	}
 	if n, err := s.relay.Flush(ctx); err != nil || n != 1 {
 		t.Fatalf("Flush = %d, %v; want the status event", n, err)
 	}
-	if m := w.sent[0]; m.Topic != events.TopicTripStatusChanged || string(m.Key) != tr.ID {
+	if m := s.w.sent[0]; m.Topic != events.TopicTripStatusChanged || string(m.Key) != tr.ID {
 		t.Errorf("published topic=%s key=%s", m.Topic, m.Key)
 	}
 }
@@ -139,34 +141,57 @@ func TestATransitionQueuesItsEventInTheSameTransaction(t *testing.T) {
 func TestARejectedTransitionQueuesNothing(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, w := newServer(db, rdb)
+	s := newStack(t, db, rdb)
+	s.rewire(proximityOff(), nil)
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 
 	// Completing needs IN_PROGRESS; the trip is still ASSIGNED.
-	ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusInProgress}, events.TripStatusCompleted, completedAt, []byte(tr.ID), []byte("evt"))
-	if err != nil || ok {
-		t.Fatalf("transition = %v, %v; want false, nil", ok, err)
+	_, err := s.svc.Complete(ctx, driverOf("d1"), tr.ID)
+	var cannot *app.CannotTransitionError
+	if !errors.As(err, &cannot) {
+		t.Fatalf("complete from ASSIGNED = %v; want a refused transition", err)
 	}
-	if n, _ := s.relay.Flush(ctx); n != 0 || len(w.sent) != 0 {
+	if n, _ := s.relay.Flush(ctx); n != 0 || len(s.w.sent) != 0 {
 		t.Errorf("a rejected transition queued %d event(s)", n)
 	}
+}
+
+// staleTrips keeps answering with the first trip it read, as a request does
+// that read the trip just before another one rated it.
+type staleTrips struct {
+	app.TripReader
+	seen map[string]domain.Trip
+}
+
+func (s *staleTrips) ByID(ctx context.Context, id string) (domain.Trip, error) {
+	if t, ok := s.seen[id]; ok {
+		return t, nil
+	}
+	t, err := s.TripReader.ByID(ctx, id)
+	if err == nil {
+		s.seen[id] = t
+	}
+	return t, err
 }
 
 func TestARatingQueuesItsEventAndASecondOneDoesNot(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s := newStack(t, db, rdb)
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
-	s, w := newServer(db, rdb)
-	req := rateRequest{RiderID: "r1", Stars: 5, TipAmount: 20000}
+	// Both submissions saw the trip unrated: the second one is stopped by the
+	// UPDATE's own condition, not by the check that precedes it.
+	s.wire(domain.DefaultProximity(), nil, &staleTrips{TripReader: s.store, seen: map[string]domain.Trip{}})
+	in := app.RateInput{RiderID: "rider-1", Stars: 5, Tip: 20000}
 
-	if ok, err := s.rateWithEvent(ctx, tr, req, []byte("rated")); err != nil || !ok {
-		t.Fatalf("first rating = %v, %v; want true", ok, err)
+	if _, err := s.svc.RateTrip(ctx, rider1, tr.ID, in); err != nil {
+		t.Fatalf("first rating = %v; want it saved", err)
 	}
-	if ok, err := s.rateWithEvent(ctx, tr, req, []byte("rated again")); err != nil || ok {
-		t.Fatalf("second rating = %v, %v; want false, nil", ok, err)
+	if _, err := s.svc.RateTrip(ctx, rider1, tr.ID, in); !errors.Is(err, app.ErrAlreadyRated) {
+		t.Fatalf("second rating = %v; want ErrAlreadyRated", err)
 	}
 
 	var tip int64
@@ -176,7 +201,7 @@ func TestARatingQueuesItsEventAndASecondOneDoesNot(t *testing.T) {
 	if n, _ := s.relay.Flush(ctx); n != 1 {
 		t.Fatalf("%d trip.rated events queued, want exactly 1", n)
 	}
-	if m := w.sent[0]; m.Topic != events.TopicTripRated || string(m.Key) != "d1" {
+	if m := s.w.sent[0]; m.Topic != events.TopicTripRated || string(m.Key) != "d1" {
 		t.Errorf("published topic=%s key=%s, want trip.rated keyed by the driver", m.Topic, m.Key)
 	}
 }
@@ -188,12 +213,13 @@ func ended(tripID, orderID, driverID string, status events.TripStatus) events.Tr
 func TestAFinishedTripReleasesItsDriver(t *testing.T) {
 	for _, status := range []events.TripStatus{events.TripStatusCompleted, events.TripStatusCancelled} {
 		db, rdb := testEnv(t)
+		s := newStack(t, db, rdb)
 		ctx := context.Background()
-		handleOrderMatched(ctx, db, rdb, matched("o1", "d1")) // driver ON_TRIP
-		tr, _ := getTripByOrderID(ctx, db, "o1")
+		s.events.OnOrderMatched(ctx, matched("o1", "d1")) // driver ON_TRIP
+		tr, _ := s.store.ByOrderID(ctx, "o1")
 		db.Exec(ctx, `UPDATE trips SET status = $2 WHERE id = $1`, tr.ID, status)
 
-		if err := releaseDriverAfterTrip(ctx, db, rdb, ended(tr.ID, "o1", "d1", status)); err != nil {
+		if err := s.events.OnTripStatusChanged(ctx, ended(tr.ID, "o1", "d1", status)); err != nil {
 			t.Fatal(err)
 		}
 		if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Available {
@@ -204,12 +230,13 @@ func TestAFinishedTripReleasesItsDriver(t *testing.T) {
 
 func TestEventsThatAreNotTheEndOfATripReleaseNobody(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 
 	for _, status := range []events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress} {
-		if err := releaseDriverAfterTrip(ctx, db, rdb, ended(tr.ID, "o1", "d1", status)); err != nil {
+		if err := s.events.OnTripStatusChanged(ctx, ended(tr.ID, "o1", "d1", status)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -222,14 +249,15 @@ func TestEventsThatAreNotTheEndOfATripReleaseNobody(t *testing.T) {
 // already driving someone else.
 func TestAnOldTripEndingDoesNotReleaseADriverOnANewTrip(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("old", "d1"))
-	old, _ := getTripByOrderID(ctx, db, "old")
+	s.events.OnOrderMatched(ctx, matched("old", "d1"))
+	old, _ := s.store.ByOrderID(ctx, "old")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, old.ID)
 	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available) // released by the request path
-	handleOrderMatched(ctx, db, rdb, matched("new", "d1"))   // next ride: ON_TRIP, trip ASSIGNED
+	s.events.OnOrderMatched(ctx, matched("new", "d1"))       // next ride: ON_TRIP, trip ASSIGNED
 
-	if err := releaseDriverAfterTrip(ctx, db, rdb, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
+	if err := s.events.OnTripStatusChanged(ctx, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
 		t.Fatal(err)
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.OnTrip {
@@ -241,9 +269,10 @@ func TestAnOldTripEndingDoesNotReleaseADriverOnANewTrip(t *testing.T) {
 // the database shows nothing active. Only the compare-and-set protects that claim.
 func TestAnOldTripEndingDoesNotUndoANewClaim(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("old", "d1"))
-	old, _ := getTripByOrderID(ctx, db, "old")
+	s.events.OnOrderMatched(ctx, matched("old", "d1"))
+	old, _ := s.store.ByOrderID(ctx, "old")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, old.ID)
 	driverstatus.SetVehicle(ctx, rdb, "d1", "CAR")
 	driverstatus.Set(ctx, rdb, "d1", driverstatus.Available)
@@ -251,7 +280,7 @@ func TestAnOldTripEndingDoesNotUndoANewClaim(t *testing.T) {
 		t.Fatal("setup claim failed")
 	}
 
-	if err := releaseDriverAfterTrip(ctx, db, rdb, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
+	if err := s.events.OnTripStatusChanged(ctx, ended(old.ID, "old", "d1", events.TripStatusCompleted)); err != nil {
 		t.Fatal(err)
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Assigned {
@@ -261,14 +290,15 @@ func TestAnOldTripEndingDoesNotUndoANewClaim(t *testing.T) {
 
 func TestReleasingTwiceIsHarmless(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
 	evt := ended(tr.ID, "o1", "d1", events.TripStatusCompleted)
 
 	for i := 0; i < 2; i++ {
-		if err := releaseDriverAfterTrip(ctx, db, rdb, evt); err != nil {
+		if err := s.events.OnTripStatusChanged(ctx, evt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -280,14 +310,14 @@ func TestReleasingTwiceIsHarmless(t *testing.T) {
 // The API as a client sees it: who may do what to a trip.
 func TestTripAccessFollowsTheTokenAndWhoIsPartyToTheTrip(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1")) // rider-1's trip, ASSIGNED
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, _ := newServer(db, rdb)
-	s.codec = nil // the transitions below are refused before they would encode
+	s.events.OnOrderMatched(ctx, matched("o1", "driver-1")) // rider-1's trip, ASSIGNED
+	tr, _ := s.store.ByOrderID(ctx, "o1")
+	// the transitions below are refused before they would encode
 
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	mux := s.routes(verifier)
+	mux := s.api.Routes(verifier)
 	do := func(method, path string, role auth.Role, subject, body string) int {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		if role != "" {
@@ -332,7 +362,7 @@ func TestTripAccessFollowsTheTokenAndWhoIsPartyToTheTrip(t *testing.T) {
 	}
 
 	// And nothing above changed the trip.
-	if got, _ := getTripByID(ctx, db, id); got.Status != events.TripStatusAssigned {
+	if got, _ := s.store.ByID(ctx, id); got.Status != domain.Assigned {
 		t.Errorf("a refused request moved the trip to %s", got.Status)
 	}
 }
@@ -341,80 +371,101 @@ func TestTripAccessFollowsTheTokenAndWhoIsPartyToTheTrip(t *testing.T) {
 func TestTheTripsRiderCanRateItAndTheEventNamesThem(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s := newStack(t, db, rdb)
+	s.events.OnOrderMatched(ctx, matched("o1", "driver-1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 	db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
 
-	if !isRiderOf(auth.Identity{Subject: "rider-1", Role: auth.Rider}, tr) {
-		t.Error("the trip's rider isn't recognised as its rider")
+	if _, err := s.svc.RateTrip(ctx, rider1, tr.ID, app.RateInput{Stars: 5}); err != nil {
+		t.Fatalf("the trip's rider could not rate it: %v", err)
 	}
-	if isRiderOf(auth.Identity{Subject: "rider-1", Role: auth.Driver}, tr) {
-		t.Error("a driver token with the rider's id counted as the rider")
+	if n, _ := s.relay.Flush(ctx); n != 1 {
+		t.Fatalf("%d events queued", n)
 	}
-	old := &trip{ID: "x", DriverID: "d", RiderID: ""}
-	if isRiderOf(auth.Identity{Subject: "", Role: auth.Rider}, old) {
-		t.Error("a trip with no recorded rider matched an empty subject")
+	var evt events.TripRated
+	if err := s.codec.Decode(ctx, events.TopicTripRated, s.w.sent[0].Value, &evt); err != nil {
+		t.Fatal(err)
+	}
+	if evt.RiderID != "rider-1" || evt.DriverID != "driver-1" || evt.TripID != tr.ID || evt.OrderID != "o1" || evt.Stars != 5 || evt.Currency != "VND" {
+		t.Errorf("trip.rated = %+v, want it to name the rider from the token", evt)
 	}
 }
 
 func TestOnlyCommittedTransitionsAreCounted(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, _ := newServer(db, rdb)
-	moved := func() float64 { return testutil.ToFloat64(tripTransitions.WithLabelValues("IN_PROGRESS")) }
-	before := moved()
+	s := newStack(t, db, rdb)
+	s.rewire(proximityOff(), nil)
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
+	counted := func(status string) float64 {
+		return testutil.ToFloat64(tripmetrics.Transitions.WithLabelValues(status))
+	}
+	moved, completed := counted("IN_PROGRESS"), counted("COMPLETED")
 
 	// Refused (wrong starting status): not counted.
-	s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusCompleted}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e"))
-	if moved() != before {
+	if _, err := s.svc.Complete(ctx, driverOf("d1"), tr.ID); err == nil {
+		t.Fatal("completing an ASSIGNED trip succeeded")
+	}
+	if counted("COMPLETED") != completed {
 		t.Error("a refused transition was counted")
 	}
-	s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e"))
-	if moved()-before != 1 {
-		t.Errorf("a committed transition moved the counter by %v, want 1", moved()-before)
+	if _, err := s.svc.Pickup(ctx, driverOf("d1"), tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	if counted("IN_PROGRESS")-moved != 1 {
+		t.Errorf("a committed transition moved the counter by %v, want 1", counted("IN_PROGRESS")-moved)
+	}
+	// Repeating it is a no-op: not counted again.
+	if _, err := s.svc.Pickup(ctx, driverOf("d1"), tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	if counted("IN_PROGRESS")-moved != 1 {
+		t.Errorf("a repeated pickup was counted: %v", counted("IN_PROGRESS")-moved)
 	}
 }
 
 func TestCompletedAtIsSetOnceByTheFirstCompletionAndServedByTheAPI(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
+	s.events.OnOrderMatched(ctx, matched("o1", "driver-1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 	if tr.CompletedAt != nil {
 		t.Fatalf("a new trip has completedAt %v", tr.CompletedAt)
 	}
-	s, _ := newServer(db, rdb)
-	inProgress := []events.TripStatus{events.TripStatusInProgress}
+	s.rewire(proximityOff(), nil)
 
-	if ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusInProgress, startedAt, []byte(tr.ID), []byte("e1")); err != nil || !ok {
-		t.Fatalf("pickup = %v, %v", ok, err)
+	if _, err := s.svc.Pickup(ctx, driver1, tr.ID); err != nil {
+		t.Fatalf("pickup = %v", err)
 	}
-	if got, _ := getTripByID(ctx, db, tr.ID); got.CompletedAt != nil {
+	if got, _ := s.store.ByID(ctx, tr.ID); got.CompletedAt != nil {
 		t.Errorf("an in-progress trip has completedAt %v", got.CompletedAt)
 	}
-	if ok, err := s.transitionWithEvent(ctx, tr.ID, inProgress, events.TripStatusCompleted, completedAt, []byte(tr.ID), []byte("e2")); err != nil || !ok {
-		t.Fatalf("complete = %v, %v", ok, err)
+	if _, err := s.svc.Complete(ctx, driver1, tr.ID); err != nil {
+		t.Fatalf("complete = %v", err)
 	}
-	first, _ := getTripByID(ctx, db, tr.ID)
+	first, _ := s.store.ByID(ctx, tr.ID)
 	if first.CompletedAt == nil || time.Since(*first.CompletedAt) > time.Minute {
 		t.Fatalf("completedAt = %v, want about now", first.CompletedAt)
 	}
 
 	// Completing again is a no-op: no transition, and the time does not move.
 	time.Sleep(20 * time.Millisecond)
-	if ok, err := s.transitionWithEvent(ctx, tr.ID, inProgress, events.TripStatusCompleted, completedAt, []byte(tr.ID), []byte("e3")); err != nil || ok {
-		t.Fatalf("second complete = %v, %v; want false, nil", ok, err)
+	if _, err := s.svc.Complete(ctx, driver1, tr.ID); err != nil {
+		t.Fatalf("second complete = %v; want the no-op success", err)
 	}
-	second, _ := getTripByID(ctx, db, tr.ID)
+	if n, _ := s.relay.Flush(ctx); n != 2 {
+		t.Fatalf("%d events queued for a pickup and a complete (the repeated complete queues none), want 2", n)
+	}
+	second, _ := s.store.ByID(ctx, tr.ID)
 	if !second.CompletedAt.Equal(*first.CompletedAt) {
 		t.Errorf("completedAt moved from %v to %v", first.CompletedAt, second.CompletedAt)
 	}
 
 	// The HTTP endpoints serve it, and the repeat call answers with the same time.
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	mux := s.routes(verifier)
+	mux := s.api.Routes(verifier)
 	call := func(method, path string, role auth.Role, subject string) map[string]any {
 		req := httptest.NewRequest(method, path, nil)
 		tok, _, _ := issuer.Issue(role, subject)
@@ -445,25 +496,25 @@ func TestCompletedAtIsSetOnceByTheFirstCompletionAndServedByTheAPI(t *testing.T)
 func TestACancelledTripHasNoCompletedAt(t *testing.T) {
 	db, rdb := testEnv(t)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "d1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, _ := newServer(db, rdb)
-	if ok, err := s.transitionWithEvent(ctx, tr.ID, []events.TripStatus{events.TripStatusAssigned}, events.TripStatusCancelled, cancelledAt, []byte(tr.ID), []byte("e"), cancelInfo{By: "RIDER"}); err != nil || !ok {
-		t.Fatalf("cancel = %v, %v", ok, err)
+	s := newStack(t, db, rdb)
+	s.events.OnOrderMatched(ctx, matched("o1", "d1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
+	if _, err := s.svc.Cancel(ctx, rider1, tr.ID, ""); err != nil {
+		t.Fatalf("cancel = %v", err)
 	}
-	if got, _ := getTripByID(ctx, db, tr.ID); got.CompletedAt != nil {
+	if got, _ := s.store.ByID(ctx, tr.ID); got.CompletedAt != nil {
 		t.Errorf("cancelled trip has completedAt %v", got.CompletedAt)
 	}
 }
 
 func TestClosingAReceiptIsRiderOnlyCompletedOnlyAndKeepsTheFirstTime(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	handleOrderMatched(ctx, db, rdb, matched("o1", "driver-1"))
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, _ := newServer(db, rdb)
+	s.events.OnOrderMatched(ctx, matched("o1", "driver-1"))
+	tr, _ := s.store.ByOrderID(ctx, "o1")
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	mux := s.routes(verifier)
+	mux := s.api.Routes(verifier)
 	call := func(path string, role auth.Role, subject string) (int, map[string]any) {
 		req := httptest.NewRequest("POST", path, nil)
 		tok, _, _ := issuer.Issue(role, subject)
@@ -489,7 +540,7 @@ func TestClosingAReceiptIsRiderOnlyCompletedOnlyAndKeepsTheFirstTime(t *testing.
 	if code, _ := call(path, auth.Driver, "driver-1"); code != 403 { // rider-only route, like rating
 		t.Errorf("driver token: close = %d, want 403", code)
 	}
-	if got, _ := getTripByID(ctx, db, tr.ID); got.ReceiptClosedAt != nil {
+	if got, _ := s.store.ByID(ctx, tr.ID); got.ReceiptClosedAt != nil {
 		t.Fatalf("refused calls still closed the receipt: %v", got.ReceiptClosedAt)
 	}
 
@@ -497,7 +548,7 @@ func TestClosingAReceiptIsRiderOnlyCompletedOnlyAndKeepsTheFirstTime(t *testing.
 	if code != 200 {
 		t.Fatalf("close = %d", code)
 	}
-	stored, _ := getTripByID(ctx, db, tr.ID)
+	stored, _ := s.store.ByID(ctx, tr.ID)
 	want := stored.ReceiptClosedAt.UTC().Format(time.RFC3339Nano)
 	if stored.ReceiptClosedAt == nil || first["receiptClosedAt"] != want {
 		t.Fatalf("closed at %v, response %v", stored.ReceiptClosedAt, first["receiptClosedAt"])
@@ -507,27 +558,27 @@ func TestClosingAReceiptIsRiderOnlyCompletedOnlyAndKeepsTheFirstTime(t *testing.
 	if code, again := call(path, auth.Rider, "rider-1"); code != 200 || again["receiptClosedAt"] != want {
 		t.Errorf("second close = %d %v, want 200 %s", code, again, want)
 	}
-	if got, _ := getTripByID(ctx, db, tr.ID); !got.ReceiptClosedAt.Equal(*stored.ReceiptClosedAt) {
+	if got, _ := s.store.ByID(ctx, tr.ID); !got.ReceiptClosedAt.Equal(*stored.ReceiptClosedAt) {
 		t.Errorf("receiptClosedAt moved from %v to %v", stored.ReceiptClosedAt, got.ReceiptClosedAt)
 	}
 }
 
 func TestRatingATripClosesItsReceiptWithoutMovingAnEarlierClose(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
-	s, _ := newServer(db, rdb)
-	rate := func(orderID string, preclose bool) (*trip, *trip) {
-		handleOrderMatched(ctx, db, rdb, matched(orderID, "d1"))
-		tr, _ := getTripByOrderID(ctx, db, orderID)
+	rate := func(orderID string, preclose bool) (domain.Trip, domain.Trip) {
+		s.events.OnOrderMatched(ctx, matched(orderID, "d1"))
+		tr, _ := s.store.ByOrderID(ctx, orderID)
 		db.Exec(ctx, `UPDATE trips SET status = 'COMPLETED' WHERE id = $1`, tr.ID)
 		if preclose {
 			db.Exec(ctx, `UPDATE trips SET receipt_closed_at = now() - interval '1 hour' WHERE id = $1`, tr.ID)
 		}
-		before, _ := getTripByID(ctx, db, tr.ID)
-		if ok, err := s.rateWithEvent(ctx, tr, rateRequest{RiderID: "rider-1", Stars: 4}, []byte("rated")); err != nil || !ok {
-			t.Fatalf("rating = %v, %v", ok, err)
+		before, _ := s.store.ByID(ctx, tr.ID)
+		if _, err := s.svc.RateTrip(ctx, rider1, tr.ID, app.RateInput{RiderID: "rider-1", Stars: 4}); err != nil {
+			t.Fatalf("rating = %v", err)
 		}
-		after, _ := getTripByID(ctx, db, tr.ID)
+		after, _ := s.store.ByID(ctx, tr.ID)
 		return before, after
 	}
 

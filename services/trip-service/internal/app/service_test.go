@@ -313,7 +313,7 @@ func TestTheProximityConfigurationIsHonoured(t *testing.T) {
 	}
 }
 
-func TestATripWithoutARouteOrWithTheCheckOffIsNotBlocked(t *testing.T) {
+func TestATripWithoutARecordedRouteSkipsTheCheck(t *testing.T) {
 	w := newWorld()
 	tr := w.add(trip(domain.Assigned)) // no route recorded, no location
 	if _, err := w.service(domain.DefaultProximity(), t0).Pickup(ctx, driver, tr.ID); err != nil {

@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -20,7 +20,8 @@ import (
 	"grab-mini/pkg/driverstatus"
 	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
-	"grab-mini/pkg/outbox"
+	"grab-mini/trip-service/internal/adapters/postgres"
+	"grab-mini/trip-service/internal/domain"
 )
 
 // These tests need only Postgres (TEST_DATABASE_URL, a throwaway database).
@@ -49,7 +50,7 @@ func registry(t *testing.T) *eventcodec.Codec {
 
 type cancelEnv struct {
 	db     *pgxpool.Pool
-	s      *server
+	s      *stack
 	mux    http.Handler
 	issuer *auth.Issuer
 }
@@ -61,7 +62,7 @@ func newCancelEnv(t *testing.T) *cancelEnv {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	db, err := connectDB(ctx, url)
+	db, err := postgres.Connect(ctx, url, migrationFiles)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +75,12 @@ func newCancelEnv(t *testing.T) *cancelEnv {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialTimeout: 50 * time.Millisecond})
 	t.Cleanup(func() { rdb.Close() })
 
-	s := &server{db: db, rdb: rdb, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: registry(t)}
+	s := newStack(t, db, rdb)
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	return &cancelEnv{db, s, s.routes(verifier), issuer}
+	return &cancelEnv{db, s, s.api.Routes(verifier), issuer}
 }
 
-func (e *cancelEnv) trip(t *testing.T, orderID string, status events.TripStatus) string {
+func (e *cancelEnv) trip(t *testing.T, orderID string, status domain.Status) string {
 	t.Helper()
 	id := uuid.NewString()
 	_, err := e.db.Exec(context.Background(),
@@ -132,13 +133,13 @@ func TestTheCancelEventAndRecordNameWhoCancelled(t *testing.T) {
 	}
 	for _, c := range cases {
 		e := newCancelEnv(t)
-		id := e.trip(t, "o1", events.TripStatusAssigned)
+		id := e.trip(t, "o1", domain.Assigned)
 
 		if code := e.cancel(id, c.role, c.subject, `{"reason":"too slow"}`); code != 200 {
 			t.Fatalf("%s: status %d, want 200", c.name, code)
 		}
-		tr, _ := getTripByID(context.Background(), e.db, id)
-		if tr.Status != events.TripStatusCancelled || tr.CancelledBy != c.want || tr.CancelReason != "too slow" {
+		tr, _ := e.s.store.ByID(context.Background(), id)
+		if tr.Status != domain.Cancelled || tr.CancelledBy != c.want || tr.CancelReason != "too slow" {
 			t.Errorf("%s: trip = %+v, want CANCELLED by %s with the reason", c.name, tr, c.want)
 		}
 		evs := e.statusEvents(t)
@@ -150,7 +151,7 @@ func TestTheCancelEventAndRecordNameWhoCancelled(t *testing.T) {
 
 func TestCancellingNeedsNoBodyAndAnInProgressTripCanBeCancelled(t *testing.T) {
 	e := newCancelEnv(t)
-	id := e.trip(t, "o1", events.TripStatusInProgress)
+	id := e.trip(t, "o1", domain.InProgress)
 	if code := e.cancel(id, auth.Driver, "driver-1", ``); code != 200 {
 		t.Fatalf("status %d, want 200", code)
 	}
@@ -161,7 +162,7 @@ func TestCancellingNeedsNoBodyAndAnInProgressTripCanBeCancelled(t *testing.T) {
 
 func TestACompletedTripCannotBeCancelled(t *testing.T) {
 	e := newCancelEnv(t)
-	id := e.trip(t, "o1", events.TripStatusCompleted)
+	id := e.trip(t, "o1", domain.Completed)
 
 	for _, who := range []struct {
 		role    auth.Role
@@ -171,7 +172,7 @@ func TestACompletedTripCannotBeCancelled(t *testing.T) {
 			t.Errorf("%s: status %d, want 409", who.role, code)
 		}
 	}
-	if tr, _ := getTripByID(context.Background(), e.db, id); tr.Status != events.TripStatusCompleted {
+	if tr, _ := e.s.store.ByID(context.Background(), id); tr.Status != domain.Completed {
 		t.Errorf("trip is %s, want COMPLETED", tr.Status)
 	}
 	if evs := e.statusEvents(t); len(evs) != 0 {
@@ -181,7 +182,7 @@ func TestACompletedTripCannotBeCancelled(t *testing.T) {
 
 func TestCancellingTwiceIsIdempotentAndBadInputIsRefused(t *testing.T) {
 	e := newCancelEnv(t)
-	id := e.trip(t, "o1", events.TripStatusAssigned)
+	id := e.trip(t, "o1", domain.Assigned)
 
 	if code := e.cancel(id, auth.Rider, "rider-1", `nope`); code != http.StatusBadRequest {
 		t.Errorf("a bad body got %d, want 400", code)
@@ -198,7 +199,7 @@ func TestCancellingTwiceIsIdempotentAndBadInputIsRefused(t *testing.T) {
 	if code := e.cancel(id, auth.Driver, "driver-1", `{"reason":"b"}`); code != 200 {
 		t.Errorf("a repeat by the driver got %d, want 200", code)
 	}
-	if tr, _ := getTripByID(context.Background(), e.db, id); tr.CancelledBy != events.CancelledByRider || tr.CancelReason != "a" {
+	if tr, _ := e.s.store.ByID(context.Background(), id); tr.CancelledBy != events.CancelledByRider || tr.CancelReason != "a" {
 		t.Errorf("trip = %+v, want the first cancellation kept", tr)
 	}
 	if evs := e.statusEvents(t); len(evs) != 1 {
@@ -216,13 +217,13 @@ func orderCancelled(orderID string) events.OrderCancelled {
 func TestAnOrderCancelledEventCancelsItsExistingTrip(t *testing.T) {
 	e := newCancelEnv(t)
 	ctx := context.Background()
-	id := e.trip(t, "o1", events.TripStatusAssigned)
+	id := e.trip(t, "o1", domain.Assigned)
 
-	if err := e.s.handleOrderCancelled(ctx, orderCancelled("o1")); err != nil {
+	if err := e.s.events.OnOrderCancelled(ctx, orderCancelled("o1")); err != nil {
 		t.Fatal(err)
 	}
-	tr, _ := getTripByID(ctx, e.db, id)
-	if tr.Status != events.TripStatusCancelled || tr.CancelledBy != events.CancelledByRider || tr.CancelReason != "changed my mind" {
+	tr, _ := e.s.store.ByID(ctx, id)
+	if tr.Status != domain.Cancelled || tr.CancelledBy != events.CancelledByRider || tr.CancelReason != "changed my mind" {
 		t.Fatalf("trip = %+v, want CANCELLED by the RIDER", tr)
 	}
 	evs := e.statusEvents(t)
@@ -234,11 +235,11 @@ func TestAnOrderCancelledEventCancelsItsExistingTrip(t *testing.T) {
 func TestRedeliveringOrderCancelledChangesNothing(t *testing.T) {
 	e := newCancelEnv(t)
 	ctx := context.Background()
-	e.trip(t, "o1", events.TripStatusAssigned)
+	e.trip(t, "o1", domain.Assigned)
 
 	evt := orderCancelled("o1")
 	for i := 0; i < 3; i++ {
-		if err := e.s.handleOrderCancelled(ctx, evt); err != nil {
+		if err := e.s.events.OnOrderCancelled(ctx, evt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -248,21 +249,21 @@ func TestRedeliveringOrderCancelledChangesNothing(t *testing.T) {
 }
 
 func TestOrderCancelledLeavesFinishedTripsAlone(t *testing.T) {
-	for _, status := range []events.TripStatus{events.TripStatusCompleted, events.TripStatusCancelled} {
+	for _, status := range []domain.Status{domain.Completed, domain.Cancelled} {
 		e := newCancelEnv(t)
 		id := e.trip(t, "o1", status)
 		if _, err := e.db.Exec(context.Background(), `UPDATE trips SET cancelled_by = 'DRIVER' WHERE id = $1 AND status = 'CANCELLED'`, id); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := e.s.handleOrderCancelled(context.Background(), orderCancelled("o1")); err != nil {
+		if err := e.s.events.OnOrderCancelled(context.Background(), orderCancelled("o1")); err != nil {
 			t.Fatal(err)
 		}
-		tr, _ := getTripByID(context.Background(), e.db, id)
+		tr, _ := e.s.store.ByID(context.Background(), id)
 		if tr.Status != status {
 			t.Errorf("%s trip became %s", status, tr.Status)
 		}
-		if status == events.TripStatusCancelled && tr.CancelledBy != events.CancelledByDriver {
+		if status == domain.Cancelled && tr.CancelledBy != events.CancelledByDriver {
 			t.Errorf("an earlier cancellation was rewritten to %q", tr.CancelledBy)
 		}
 		if evs := e.statusEvents(t); len(evs) != 0 {
@@ -275,13 +276,13 @@ func TestOrderCancelledBeforeTheTripExistsIsRemembered(t *testing.T) {
 	e := newCancelEnv(t)
 	ctx := context.Background()
 
-	if err := e.s.handleOrderCancelled(ctx, orderCancelled("o1")); err != nil {
+	if err := e.s.events.OnOrderCancelled(ctx, orderCancelled("o1")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := orderIsCancelled(ctx, e.db, "o1"); err != nil || !got {
+	if got, err := e.s.store.IsCancelled(ctx, "o1"); err != nil || !got {
 		t.Errorf("orderIsCancelled = %v, %v; want true (so a late order.matched creates no trip)", got, err)
 	}
-	if got, _ := orderIsCancelled(ctx, e.db, "o2"); got {
+	if got, _ := e.s.store.IsCancelled(ctx, "o2"); got {
 		t.Error("an order nobody cancelled is reported cancelled")
 	}
 	if evs := e.statusEvents(t); len(evs) != 0 {
@@ -295,14 +296,14 @@ func TestARedeliveredOrderCancelledCancelsATripThatCameLate(t *testing.T) {
 	e := newCancelEnv(t)
 	ctx := context.Background()
 
-	if err := e.s.handleOrderCancelled(ctx, orderCancelled("o1")); err != nil { // no trip yet
+	if err := e.s.events.OnOrderCancelled(ctx, orderCancelled("o1")); err != nil { // no trip yet
 		t.Fatal(err)
 	}
-	id := e.trip(t, "o1", events.TripStatusAssigned)
-	if err := e.s.handleOrderCancelled(ctx, orderCancelled("o1")); err != nil { // the redelivery
+	id := e.trip(t, "o1", domain.Assigned)
+	if err := e.s.events.OnOrderCancelled(ctx, orderCancelled("o1")); err != nil { // the redelivery
 		t.Fatal(err)
 	}
-	if tr, _ := getTripByID(ctx, e.db, id); tr.Status != events.TripStatusCancelled {
+	if tr, _ := e.s.store.ByID(ctx, id); tr.Status != domain.Cancelled {
 		t.Errorf("trip is %s, want CANCELLED", tr.Status)
 	}
 }
@@ -310,6 +311,7 @@ func TestARedeliveredOrderCancelledCancelsATripThatCameLate(t *testing.T) {
 // Needs Redis too: the driver Matching claimed goes back to the pool.
 func TestALateMatchedEventForACancelledOrderCreatesNoTrip(t *testing.T) {
 	db, rdb := testEnv(t)
+	s := newStack(t, db, rdb)
 	ctx := context.Background()
 	if _, err := db.Exec(ctx, `DELETE FROM cancelled_orders; INSERT INTO cancelled_orders (order_id) VALUES ('o1')`); err != nil {
 		t.Fatal(err)
@@ -320,10 +322,10 @@ func TestALateMatchedEventForACancelledOrderCreatesNoTrip(t *testing.T) {
 		t.Fatal("setup claim failed")
 	}
 
-	if err := handleOrderMatched(ctx, db, rdb, matched("o1", "d1")); err != nil {
+	if err := s.events.OnOrderMatched(ctx, matched("o1", "d1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := getTripByOrderID(ctx, db, "o1"); err == nil {
+	if _, err := s.store.ByOrderID(ctx, "o1"); err == nil {
 		t.Error("a trip was created for a cancelled order")
 	}
 	if s, _ := driverstatus.Get(ctx, rdb, "d1"); s != driverstatus.Available {
