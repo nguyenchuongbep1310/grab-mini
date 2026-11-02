@@ -260,7 +260,7 @@ The consumer checks the current state rather than trusting the event, because ev
 - if the driver still has an active trip in the DB, leave them as they are;
 - the release is a compare-and-set `ON_TRIP` → `AVAILABLE` (`driverstatus.Transition`), so if Matching has just claimed the driver for a new order (the DB has no trip yet), that claim is not overwritten.
 
-Code: `trip-service/consumer.go` (`releaseDriverAfterTrip`), `pkg/driverstatus` (`Transition`).
+Code: `trip-service/internal/app/events.go` (`ReleaseDriver`), `pkg/driverstatus` (`Transition`).
 
 ### Known limitations of phase 1
 

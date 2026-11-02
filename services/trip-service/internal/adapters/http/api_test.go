@@ -1,17 +1,22 @@
-package main
+package http
 
 import (
 	"encoding/json"
-	"grab-mini/pkg/auth"
-	"grab-mini/pkg/auth/authtest"
-	"grab-mini/pkg/events"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
+
+	"grab-mini/pkg/auth"
+	"grab-mini/pkg/auth/authtest"
+	"grab-mini/trip-service/internal/app"
+	"grab-mini/trip-service/internal/domain"
 )
+
+// api is an API with no dependencies at all: the tests below are answered
+// before any port is used.
+func api() *API { return New(app.NewService(app.Deps{})) }
 
 // Validation runs before the database or Kafka is touched, so a server with
 // no dependencies can test what gets rejected.
@@ -20,7 +25,7 @@ func rate(id, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/trips/"+id+"/rating", strings.NewReader(body))
 	req.SetPathValue("id", id)
 	req = req.WithContext(auth.With(req.Context(), auth.Identity{Subject: "r", Role: auth.Rider}))
-	(&server{}).handleRateTrip(rec, req)
+	api().handleRateTrip(rec, req)
 	return rec
 }
 
@@ -78,27 +83,13 @@ func TestRateTripTipBoundsAndCommentAreAccepted(t *testing.T) {
 	}
 }
 
-func TestNormalizeRatingTrimsAndCountsRunesAfterTrimming(t *testing.T) {
-	req := rateRequest{Stars: 5, Comment: "  " + strings.Repeat("é", 500) + "  "}
-	if msg := normalizeRating(&req); msg != "" {
-		t.Fatalf("500 runes plus padding rejected: %s", msg)
-	}
-	if utf8.RuneCountInString(req.Comment) != 500 {
-		t.Errorf("comment not trimmed: %d runes", utf8.RuneCountInString(req.Comment))
-	}
-	req = rateRequest{Stars: 5, Comment: strings.Repeat("é", 501)}
-	if normalizeRating(&req) == "" {
-		t.Error("501 runes accepted")
-	}
-}
-
 func TestTripJSONCarriesCompletedAtOnlyWhenSet(t *testing.T) {
 	at := time.Date(2026, 3, 1, 10, 30, 0, 0, time.UTC)
-	b, _ := json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted, CompletedAt: &at})
+	b, _ := json.Marshal(toJSON(domain.Trip{ID: "t", Status: domain.Completed, CompletedAt: &at}))
 	if !strings.Contains(string(b), `"completedAt":"2026-03-01T10:30:00Z"`) {
 		t.Errorf("completed trip JSON = %s", b)
 	}
-	b, _ = json.Marshal(trip{ID: "t", Status: events.TripStatusAssigned})
+	b, _ = json.Marshal(toJSON(domain.Trip{ID: "t", Status: domain.Assigned}))
 	if strings.Contains(string(b), "completedAt") {
 		t.Errorf("unfinished trip JSON has completedAt: %s", b)
 	}
@@ -106,11 +97,11 @@ func TestTripJSONCarriesCompletedAtOnlyWhenSet(t *testing.T) {
 
 func TestTripJSONCarriesReceiptClosedAtOnlyWhenSet(t *testing.T) {
 	at := time.Date(2026, 3, 1, 10, 45, 0, 0, time.UTC)
-	b, _ := json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted, ReceiptClosedAt: &at})
+	b, _ := json.Marshal(toJSON(domain.Trip{ID: "t", Status: domain.Completed, ReceiptClosedAt: &at}))
 	if !strings.Contains(string(b), `"receiptClosedAt":"2026-03-01T10:45:00Z"`) {
 		t.Errorf("closed trip JSON = %s", b)
 	}
-	b, _ = json.Marshal(trip{ID: "t", Status: events.TripStatusCompleted})
+	b, _ = json.Marshal(toJSON(domain.Trip{ID: "t", Status: domain.Completed}))
 	if strings.Contains(string(b), "receiptClosedAt") {
 		t.Errorf("open receipt JSON has receiptClosedAt: %s", b)
 	}
@@ -118,7 +109,7 @@ func TestTripJSONCarriesReceiptClosedAtOnlyWhenSet(t *testing.T) {
 
 func TestCloseReceiptRouteNeedsARiderToken(t *testing.T) {
 	_, verifier := authtest.Pair(t, time.Hour)
-	mux := (&server{}).routes(verifier)
+	mux := api().Routes(verifier)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/trips/x/receipt/close", nil))
 	if rec.Code != http.StatusUnauthorized {

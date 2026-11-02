@@ -13,6 +13,7 @@ use (
 	./services/matching-service
 	./services/notification-service
 	./services/order-service
+	./services/pkg/archtest
 	./services/pkg/auth
 	./services/pkg/driverlocation
 	./services/pkg/driverstatus

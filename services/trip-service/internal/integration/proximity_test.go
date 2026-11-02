@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -9,117 +9,54 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
-
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/driverlocation"
-	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
+	"grab-mini/trip-service/internal/domain"
 )
-
-func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
-
-func TestLoadProximityDefaults(t *testing.T) {
-	p, err := loadProximity(env(nil))
-	if err != nil || p != defaultProximity() {
-		t.Fatalf("got %+v, %v; want the defaults", p, err)
-	}
-	if p.PickupRadiusM != 200 || p.DropoffRadiusM != 300 || p.MaxLocationAge != time.Minute || p.Off {
-		t.Errorf("defaults are %+v, want 200m / 300m / 60s / on", p)
-	}
-}
-
-func TestLoadProximityReadsTheRadii(t *testing.T) {
-	p, err := loadProximity(env(map[string]string{"PICKUP_RADIUS_M": "50.5", "DROPOFF_RADIUS_M": "1000", "LOCATION_MAX_AGE": "15s"}))
-	if err != nil || p.PickupRadiusM != 50.5 || p.DropoffRadiusM != 1000 || p.MaxLocationAge != 15*time.Second {
-		t.Errorf("got %+v, %v", p, err)
-	}
-	for _, bad := range []map[string]string{
-		{"PICKUP_RADIUS_M": "abc"}, {"PICKUP_RADIUS_M": "0"}, {"DROPOFF_RADIUS_M": "-5"},
-		{"LOCATION_MAX_AGE": "soon"}, {"LOCATION_MAX_AGE": "0s"}, {"PROXIMITY_CHECK": "maybe"},
-	} {
-		if _, err := loadProximity(env(bad)); err == nil {
-			t.Errorf("%v was accepted", bad)
-		}
-	}
-}
-
-func TestTheCheckCanOnlyBeTurnedOffInDevelopment(t *testing.T) {
-	for _, appEnv := range []string{"", "production", "staging", "Development "} {
-		if _, err := loadProximity(env(map[string]string{"PROXIMITY_CHECK": "off", "APP_ENV": appEnv})); err == nil {
-			t.Errorf("PROXIMITY_CHECK=off was accepted with APP_ENV=%q", appEnv)
-		}
-	}
-	p, err := loadProximity(env(map[string]string{"PROXIMITY_CHECK": "off", "APP_ENV": "development"}))
-	if err != nil || !p.Off {
-		t.Errorf("development + off = %+v, %v; want the check off", p, err)
-	}
-	if p, err := loadProximity(env(map[string]string{"PROXIMITY_CHECK": "on", "APP_ENV": "production"})); err != nil || p.Off {
-		t.Errorf("explicit on = %+v, %v", p, err)
-	}
-}
-
-func TestATripWithoutARecordedRouteSkipsTheCheck(t *testing.T) {
-	// No Redis client is needed: nothing is read when there is no target.
-	if r := checkProximity(context.Background(), nil, defaultProximity(), time.Now(), "pickup", "d1", nil, 200); r != nil {
-		t.Errorf("refused a legacy trip: %+v", r)
-	}
-	off := defaultProximity()
-	off.Off = true
-	if r := checkProximity(context.Background(), nil, off, time.Now(), "pickup", "d1", &events.LatLng{}, 200); r != nil {
-		t.Errorf("refused with the check off: %+v", r)
-	}
-}
-
-// ---- integration (Postgres and Redis) ----
 
 var (
 	pickupPoint  = events.LatLng{Lat: 10.7760, Lng: 106.7000}
 	dropoffPoint = events.LatLng{Lat: 10.7900, Lng: 106.7100}
 )
 
-// fakeRegistry is just enough Schema Registry for the codec to encode.
-func fakeRegistry(t *testing.T) *eventcodec.Codec {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]int{"id": 1})
-	}))
-	t.Cleanup(srv.Close)
-	return eventcodec.New(srv.URL)
-}
-
 type proxFixture struct {
-	t      *testing.T
-	db     *pgxpool.Pool
-	rdb    *redis.Client
-	s      *server
-	mux    *http.ServeMux
-	issuer *auth.Issuer
-	trip   *trip
-	now    time.Time
+	t        *testing.T
+	s        *stack
+	mux      *http.ServeMux
+	issuer   *auth.Issuer
+	verifier *auth.Verifier
+	trip     domain.Trip
+	now      time.Time
 }
 
 func newProxFixture(t *testing.T) *proxFixture {
 	t.Helper()
 	db, rdb := testEnv(t)
 	ctx := context.Background()
+	s := newStack(t, db, rdb)
 	evt := matched("o1", "driver-1")
 	evt.Pickup, evt.Dropoff = &pickupPoint, &dropoffPoint
-	if err := handleOrderMatched(ctx, db, rdb, evt); err != nil {
+	if err := s.events.OnOrderMatched(ctx, evt); err != nil {
 		t.Fatal(err)
 	}
-	tr, _ := getTripByOrderID(ctx, db, "o1")
-	s, _ := newServer(db, rdb)
-	s.codec = fakeRegistry(t)
-	f := &proxFixture{t: t, db: db, rdb: rdb, s: s, trip: tr, now: time.Now()}
-	s.now = func() time.Time { return f.now }
+	tr, _ := s.store.ByOrderID(ctx, "o1")
+	f := &proxFixture{t: t, s: s, trip: tr, now: time.Now()}
+	f.useProximity(domain.DefaultProximity())
 
-	issuer, verifier := authtest.Pair(t, time.Hour)
-	f.issuer = issuer
-	f.mux = s.routes(verifier)
+	f.issuer, f.verifier = authtest.Pair(t, time.Hour)
+	f.mux = s.api.Routes(f.verifier)
 	return f
+}
+
+// useProximity changes the check's configuration, as another deployment would
+// run it; the fixture clock stays the service's clock.
+func (f *proxFixture) useProximity(p domain.Proximity) {
+	f.s.rewire(p, func() time.Time { return f.now })
+	if f.verifier != nil {
+		f.mux = f.s.api.Routes(f.verifier)
+	}
 }
 
 // at reports the driver's position as of age ago. Each call moves the fixture clock
@@ -127,7 +64,7 @@ func newProxFixture(t *testing.T) *proxFixture {
 func (f *proxFixture) at(p events.LatLng, age time.Duration) {
 	f.t.Helper()
 	f.now = f.now.Add(10 * time.Minute)
-	if _, err := driverlocation.Update(context.Background(), f.rdb, "driver-1", p.Lat, p.Lng, f.now.Add(-age).UnixMilli()); err != nil {
+	if _, err := driverlocation.Update(context.Background(), f.s.rdb, "driver-1", p.Lat, p.Lng, f.now.Add(-age).UnixMilli()); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -149,8 +86,8 @@ func (f *proxFixture) post(step string) (int, map[string]any) {
 	return rec.Code, body
 }
 
-func (f *proxFixture) status() events.TripStatus {
-	got, _ := getTripByID(context.Background(), f.db, f.trip.ID)
+func (f *proxFixture) status() domain.Status {
+	got, _ := f.s.store.ByID(context.Background(), f.trip.ID)
 	return got.Status
 }
 
@@ -165,7 +102,7 @@ func TestPickupFromFarAwayIsRefused(t *testing.T) {
 	if d, _ := body["distanceM"].(float64); d < 1400 || d > 1600 {
 		t.Errorf("distanceM = %v, want about 1500", body["distanceM"])
 	}
-	if f.status() != events.TripStatusAssigned {
+	if f.status() != domain.Assigned {
 		t.Errorf("a refused pickup moved the trip to %s", f.status())
 	}
 }
@@ -177,7 +114,7 @@ func TestPickupNearThePickupPointWorks(t *testing.T) {
 	if code, body := f.post("pickup"); code != http.StatusOK {
 		t.Fatalf("pickup 150 m away = %d %v, want 200", code, body)
 	}
-	if f.status() != events.TripStatusInProgress {
+	if f.status() != domain.InProgress {
 		t.Errorf("trip is %s, want IN_PROGRESS", f.status())
 	}
 }
@@ -188,8 +125,9 @@ func TestThePickupRadiusIsTheEdge(t *testing.T) {
 	if code, _ := f.post("pickup"); code != http.StatusConflict {
 		t.Errorf("230 m away = %d, want 409 with the default 200 m", code)
 	}
-	f.s.prox = defaultProximity()
-	f.s.prox.PickupRadiusM = 250
+	wide := domain.DefaultProximity()
+	wide.PickupRadiusM = 250
+	f.useProximity(wide)
 	if code, _ := f.post("pickup"); code != http.StatusOK {
 		t.Errorf("230 m away with PICKUP_RADIUS_M=250 = %d, want 200", code)
 	}
@@ -229,7 +167,7 @@ func TestCompleteChecksTheDropoff(t *testing.T) {
 	if code != http.StatusConflict || body["code"] != "driver_too_far" {
 		t.Fatalf("complete from the pickup point = %d %v, want 409 driver_too_far", code, body)
 	}
-	if f.status() != events.TripStatusInProgress {
+	if f.status() != domain.InProgress {
 		t.Errorf("a refused complete moved the trip to %s", f.status())
 	}
 	// 250 m from the dropoff is inside DROPOFF_RADIUS_M (300) but outside the pickup radius (200).
@@ -237,7 +175,7 @@ func TestCompleteChecksTheDropoff(t *testing.T) {
 	if code, body := f.post("complete"); code != http.StatusOK {
 		t.Fatalf("complete 250 m from the dropoff = %d %v, want 200", code, body)
 	}
-	if f.status() != events.TripStatusCompleted {
+	if f.status() != domain.Completed {
 		t.Errorf("trip is %s, want COMPLETED", f.status())
 	}
 }
@@ -258,8 +196,7 @@ func TestRepeatingAFinishedPickupNeedsNoProximity(t *testing.T) {
 
 func TestACheckSwitchedOffLetsAnyPickupThrough(t *testing.T) {
 	f := newProxFixture(t)
-	f.s.prox = defaultProximity()
-	f.s.prox.Off = true
+	f.useProximity(proximityOff())
 	if code, _ := f.post("pickup"); code != http.StatusOK {
 		t.Errorf("pickup with PROXIMITY_CHECK=off and no location = %d, want 200", code)
 	}
@@ -267,7 +204,7 @@ func TestACheckSwitchedOffLetsAnyPickupThrough(t *testing.T) {
 
 func TestATripWithoutARouteIsNotBlocked(t *testing.T) {
 	f := newProxFixture(t)
-	f.db.Exec(context.Background(), `UPDATE trips SET pickup_lat = NULL, pickup_lng = NULL, dropoff_lat = NULL, dropoff_lng = NULL WHERE id = $1`, f.trip.ID)
+	f.s.db.Exec(context.Background(), `UPDATE trips SET pickup_lat = NULL, pickup_lng = NULL, dropoff_lat = NULL, dropoff_lng = NULL WHERE id = $1`, f.trip.ID)
 	if code, _ := f.post("pickup"); code != http.StatusOK {
 		t.Errorf("pickup of a trip with no recorded route = %d, want 200", code)
 	}
@@ -275,8 +212,8 @@ func TestATripWithoutARouteIsNotBlocked(t *testing.T) {
 
 func TestTheRouteIsStoredWithTheTrip(t *testing.T) {
 	f := newProxFixture(t)
-	r, err := getTripRoute(context.Background(), f.db, f.trip.ID)
-	if err != nil || r.Pickup == nil || *r.Pickup != pickupPoint || r.Dropoff == nil || *r.Dropoff != dropoffPoint {
+	r, err := f.s.store.Route(context.Background(), f.trip.ID)
+	if err != nil || r.Pickup == nil || *r.Pickup != domain.LatLng(pickupPoint) || r.Dropoff == nil || *r.Dropoff != domain.LatLng(dropoffPoint) {
 		t.Errorf("route = %+v, %v; want %v -> %v", r, err, pickupPoint, dropoffPoint)
 	}
 }
