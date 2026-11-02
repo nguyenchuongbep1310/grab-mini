@@ -79,10 +79,12 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # Mapped to 16379, not 6379: some tests flush Redis and refuse an address ending in :6379,
+      # the port a developer's own Redis would be on.
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 16379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -90,7 +92,7 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgres://grabmini:grabmini@localhost:5432/grabmini?sslmode=disable
-      TEST_REDIS_ADDR: localhost:6379
+      TEST_REDIS_ADDR: localhost:16379
     defaults:
       run:
         working-directory: ${{ matrix.module }}
@@ -216,7 +218,7 @@ jobs:
       redis:
         image: redis:7-alpine
         ports:
-          - 6379:6379
+          - 16379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -225,7 +227,7 @@ jobs:
     env:
       TEST_KAFKA_BROKERS: localhost:9092
       TEST_DATABASE_URL: postgres://grabmini:grabmini@localhost:5432/grabmini?sslmode=disable
-      TEST_REDIS_ADDR: localhost:6379
+      TEST_REDIS_ADDR: localhost:16379
     defaults:
       run:
         working-directory: ${{ matrix.module }}
