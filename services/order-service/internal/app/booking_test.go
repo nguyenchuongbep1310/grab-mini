@@ -47,6 +47,9 @@ func TestAnOrderAndItsEventAreSavedTogether(t *testing.T) {
 	if !bytes.Equal(res.Body, want) {
 		t.Errorf("body %s, want the receipt %s", res.Body, want)
 	}
+	if len(e.claims.released) != 0 {
+		t.Errorf("released %v after a 201; a saved booking keeps its claims", e.claims.released)
+	}
 	if e.relay.count() != 1 || e.metrics.created["CAR"] != 1 || e.metrics.idem["new"] != 0 {
 		t.Errorf("wakes=%d created=%v idem=%v; want one wake, one CAR order and no key counted",
 			e.relay.count(), e.metrics.created, e.metrics.idem)
@@ -163,7 +166,7 @@ func TestAReplayIsAnsweredBeforeTheQuoteIsLookedAt(t *testing.T) {
 
 func TestADuplicateKeyAtSaveFallsBackToReplayingTheWinner(t *testing.T) {
 	e := newTestEnv(t)
-	req := tripRequest()
+	req, quoteID, promoID := quotedPromoRequest(e)
 	winner := domain.KeyRecord{Key: "k1", Fingerprint: req.Fingerprint(), OrderID: "winner-order", Status: 201, Body: []byte("winner\n")}
 	e.db.onSaveKey = func() error {
 		e.db.putKey("rider-1", winner) // a request that raced past the lock committed first
@@ -182,6 +185,11 @@ func TestADuplicateKeyAtSaveFallsBackToReplayingTheWinner(t *testing.T) {
 	}
 	if e.metrics.idem["replayed"] != 1 || e.metrics.idem["new"] != 0 {
 		t.Errorf("idem=%v", e.metrics.idem)
+	}
+	// The loser's order was never saved: both claims go back.
+	if e.claims.used[quoteID] || e.claims.used[promoID] ||
+		!slices.Contains(e.claims.released, quoteID) || !slices.Contains(e.claims.released, promoID) {
+		t.Errorf("used=%v released=%v; want the quote and the promo token given back", e.claims.used, e.claims.released)
 	}
 
 	// With no winner to be found it is an internal error.
@@ -273,13 +281,16 @@ func TestWithoutAKeyThePricingRunsBeforeTheTransactionOpens(t *testing.T) {
 
 func TestAPromoBookingCarriesItsDiscountToTheOrderTheEventAndTheReceipt(t *testing.T) {
 	e := newTestEnv(t)
-	req := tripRequest()
-	q := quoteFor(e.pricer, "rider-1", req, 1.4, t0.Add(-10*time.Second))
-	req.QuoteID, req.PromoToken = q.QuoteID, issue(e.promos, "rider-1", roundVND(q.Price), "CAR", 5000, t0)
+	req, quoteID, promoID := quotedPromoRequest(e)
+	q := quoteFor(e.pricer, "rider-1", tripRequest(), 1.4, t0.Add(-10*time.Second))
 
 	res, err := e.book("rider-1", "k1", req)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A saved booking keeps both claims: the quote and the token cannot be spent again.
+	if len(e.claims.released) != 0 || !e.claims.used[quoteID] || !e.claims.used[promoID] {
+		t.Errorf("released=%v used=%v after a 201; want both claims kept", e.claims.released, e.claims.used)
 	}
 	o := e.db.allOrders()[0]
 	ev := e.enc.created[0]
@@ -290,4 +301,13 @@ func TestAPromoBookingCarriesItsDiscountToTheOrderTheEventAndTheReceipt(t *testi
 	if !bytes.Equal(res.Body, want) {
 		t.Errorf("body %s, want %s", res.Body, want)
 	}
+}
+
+// quotedPromoRequest is a booking by rider-1 with a valid quote (1.4) and a
+// promo token (5000 off) bound to its price, and the claim ids of both.
+func quotedPromoRequest(e *testEnv) (req domain.BookingRequest, quoteID, promoID string) {
+	req = tripRequest()
+	q := quoteFor(e.pricer, "rider-1", req, 1.4, t0.Add(-10*time.Second))
+	req.QuoteID, req.PromoToken = q.QuoteID, issue(e.promos, "rider-1", roundVND(q.Price), "CAR", 5000, t0)
+	return req, q.QuoteID, "promo:" + req.PromoToken
 }

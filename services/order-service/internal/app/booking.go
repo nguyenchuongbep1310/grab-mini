@@ -66,9 +66,9 @@ func (s *Service) CreateOrder(ctx context.Context, cmd CreateOrderCommand) (Crea
 	}
 
 	var (
-		res                      CreateOrderResult
-		entered, answered, saved bool
-		saveErr                  error
+		res                         CreateOrderResult
+		entered, answered, inserted bool
+		saveErr                     error
 	)
 	err := s.uow.Do(ctx, func(tx Tx) error {
 		entered = true
@@ -95,7 +95,7 @@ func (s *Service) CreateOrder(ctx context.Context, cmd CreateOrderCommand) (Crea
 		if saveErr = s.insert(ctx, tx, b, riderID, idem); saveErr != nil {
 			return saveErr
 		}
-		saved = true
+		inserted = true
 		return nil
 	})
 	switch {
@@ -106,7 +106,7 @@ func (s *Service) CreateOrder(ctx context.Context, cmd CreateOrderCommand) (Crea
 	case !entered:
 		log.Printf("failed to begin transaction: %v", err)
 		return CreateOrderResult{}, ErrInternal
-	case saveErr == nil && !saved:
+	case saveErr == nil && !inserted:
 		// Answered from the key, or a failure that was already logged or is the caller's.
 		return CreateOrderResult{}, err
 	}
