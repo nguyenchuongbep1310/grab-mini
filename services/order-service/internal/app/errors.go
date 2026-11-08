@@ -40,3 +40,25 @@ type PromoError struct {
 }
 
 func (e *PromoError) Error() string { return e.Code + ": " + e.Message }
+
+// ErrDuplicateKey is what Tx.SaveKey returns when another request with the same
+// rider and Idempotency-Key committed first.
+var ErrDuplicateKey = errors.New("idempotency key already saved")
+
+// ErrKeyMismatch is an Idempotency-Key used again with a different request body.
+var ErrKeyMismatch = errors.New("this Idempotency-Key was already used with a different request body")
+
+// ErrForbidden is a rider asking for another rider's orders.
+var ErrForbidden = errors.New("you can only read your own orders")
+
+// ErrInternal is a failure the caller cannot fix; it has been logged.
+var ErrInternal = errors.New("internal error")
+
+// BadOutcomeError is an event that can never be applied (its order id isn't a
+// UUID). Permanent, so it goes straight to the dead-letter topic.
+type BadOutcomeError struct{ Reason string }
+
+func (e *BadOutcomeError) Error() string { return "unusable matching outcome: " + e.Reason }
+
+// Permanent tells the consumer not to retry.
+func (e *BadOutcomeError) Permanent() bool { return true }
