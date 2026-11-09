@@ -27,23 +27,6 @@ var (
 // embed lives in the flat main package, which this one must not import.
 func migrations() fs.FS { return os.DirFS("../../..") }
 
-func testDB(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	db, err := Connect(context.Background(), url, migrations())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(db.Close)
-	if _, err := db.Exec(context.Background(), `DELETE FROM outbox; DELETE FROM idempotency_keys; DELETE FROM orders`); err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
-
 func count(t *testing.T, db *pgxpool.Pool, table string) int {
 	t.Helper()
 	var n int
@@ -75,10 +58,7 @@ func insert(t *testing.T, u *UnitOfWork, o app.NewOrder) {
 }
 
 func TestConnectAndMigrateAreIdempotent(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
+	url := testDB(t).Config().ConnString() // already migrated by Connect
 	if err := Migrate(context.Background(), url, migrations()); err != nil {
 		t.Fatal(err)
 	}
