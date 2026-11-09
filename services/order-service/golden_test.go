@@ -113,6 +113,13 @@ func TestErrorResponsesAreStable(t *testing.T) {
 		if got := rec.Header().Get("Content-Type"); got != want.ct {
 			t.Errorf("%s: Content-Type = %q, want %q", c.name, got, want.ct)
 		}
+		wantAuth := ""
+		if want.status == http.StatusUnauthorized {
+			wantAuth = "Bearer"
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != wantAuth {
+			t.Errorf("%s: WWW-Authenticate = %q, want %q", c.name, got, wantAuth)
+		}
 		if got := rec.Body.String(); got != want.body {
 			t.Errorf("%s: body = %q, want %q", c.name, got, want.body)
 		}
@@ -125,7 +132,7 @@ func TestErrorResponsesAreStable(t *testing.T) {
 func TestTheReceiptEncodingIsStable(t *testing.T) {
 	a := newAPI(t) // skips without TEST_DATABASE_URL
 
-	got := a.book("rider-1", "", bookingBody)
+	got := a.book("rider-1", "k1", bookingBody)
 	if got.Code != http.StatusCreated {
 		t.Fatalf("booking = %d %s", got.Code, got.Raw)
 	}
@@ -136,8 +143,13 @@ func TestTheReceiptEncodingIsStable(t *testing.T) {
 		t.Errorf("receipt = %q\nwant      %q", got.Raw, want)
 	}
 
+	replay := a.book("rider-1", "k1", bookingBody)
+	if replay.Code != http.StatusCreated || !replay.Replay || replay.Raw != got.Raw {
+		t.Errorf("replay = %d replayed=%v %q, want the stored body %q", replay.Code, replay.Replay, replay.Raw, got.Raw)
+	}
+
 	discount := price / 10
-	promoted := a.book("rider-2", "", withToken(a.token("rider-2", price, "CAR", discount, t0.Add(-time.Minute))))
+	promoted := a.book("rider-2", "k2", withToken(a.token("rider-2", price, "CAR", discount, t0.Add(-time.Minute))))
 	if promoted.Code != http.StatusCreated {
 		t.Fatalf("promo booking = %d %s", promoted.Code, promoted.Raw)
 	}
@@ -145,5 +157,10 @@ func TestTheReceiptEncodingIsStable(t *testing.T) {
 		discount, price-discount, promoted.OrderID, price)
 	if promoted.Raw != want {
 		t.Errorf("promo receipt = %q\nwant           %q", promoted.Raw, want)
+	}
+
+	replay = a.book("rider-2", "k2", withToken(a.token("rider-2", price, "CAR", discount, t0.Add(-time.Minute))))
+	if replay.Code != http.StatusCreated || !replay.Replay || replay.Raw != promoted.Raw {
+		t.Errorf("promo replay = %d replayed=%v %q, want the stored body %q", replay.Code, replay.Replay, replay.Raw, promoted.Raw)
 	}
 }
