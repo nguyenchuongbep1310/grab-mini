@@ -1,6 +1,6 @@
 # 0014. Layer the larger Go services with Clean Architecture, one service at a time
 
-Status: accepted. Migrated so far: `payment-service` (the pilot) and `trip-service`; the other services follow only as listed in the migration order below.
+Status: accepted. Migrated so far: `payment-service` (the pilot), `trip-service` and `order-service`; the other services follow only as listed in the migration order below.
 
 ## Context
 
@@ -64,7 +64,7 @@ services/<name>/
 Source dependencies point inward: `adapters -> app -> domain`. In detail:
 
 - `internal/domain` imports the standard library only (no `net/http`, `database/sql`, `os`), and nothing from this module except other domain packages.
-- `internal/app` imports `internal/domain`, the standard library (not `net/http`, `database/sql`), and pure helper libraries on an explicit allow-list (`github.com/google/uuid`). It never imports `pgx`, `kafka-go`, `redis`, `prometheus`, or anything under `services/pkg/*` (module path `grab-mini/pkg/...`), and never an adapter.
+- `internal/app` imports `internal/domain`, the standard library (not `net/http`, `database/sql`), and pure helper libraries on an explicit allow-list (`github.com/google/uuid` by default; a service may extend `Rules.AppAllowed` for a `services/pkg` library whose functions the app code calls are pure, as `order-service` does for `pkg/surge` and `pkg/promo`, see the order-service result below). It never imports `pgx`, `kafka-go`, `redis`, `prometheus`, or anything under `services/pkg/*` (module path `grab-mini/pkg/...`), and never an adapter.
 - `internal/adapters/*` may import app, domain, the infrastructure libraries and `services/pkg/*`. An adapter never imports another adapter: only `main` (and the integration tests) join them.
 - `services/pkg/*` never imports a service.
 
@@ -103,12 +103,27 @@ Everything under `services/<name>/internal/` can be imported only by code in `se
 Some repository checks grep Go source instead of running it, and moving code can silently blind them. Found while migrating `payment-service`:
 
 - `deploy/k8s/check.py` finds consumer groups with the regex `GroupID:\s*"..."` over every non-test `.go` file. The group name must therefore stay a literal in a `GroupID:` field (a named constant made the check fail with "scales on group ... which no code uses"). It scans recursively, so `internal/` is covered.
-- The same script decides which services call the routing service and which use Redis by searching only the **top-level** `*.go` files of a service for `"ROUTING_URL"` and `redisconn.`. A service that moves that code under `internal/` stops being checked without any error. Before migrating `pricing-service`, `trip-service` or `order-service`, change those two lookups to search recursively (a one-line change in `check.py`, to be made in the same pull request as that service).
+- The same script decides which services call the routing service and which use Redis by searching the `*.go` files of a service for `"ROUTING_URL"` and `redisconn.`. It used to look at the top-level files only, which would have blinded it as soon as that code moved under `internal/`; it now searches recursively (commit 91f5d2a). `order-service` neither reads `ROUTING_URL` nor ever did; its `redisconn.` call stays in the root `main.go`, and its consumer group sits in `internal/adapters/kafka/handler.go` and is found by the recursive scan (hiding `internal/` makes `check.py` fail with "scales on group 'order-service-group', which no code uses").
 - `deploy/verify.sh` builds `services/<dir>` with `go build .`, so `main` stays at the service root.
 
 ### What is explicitly not changed
 
 HTTP routes, status codes and JSON bodies; topics, keys, consumer groups and Avro schemas; tables, constraints and migration files (none renumbered, none edited, none moved); environment variable names and defaults; metric names, labels and help text; log lines that docs or alerts reference; `deploy/` and `scripts/kafka-acls.sh`.
+
+### Result: order-service (third)
+
+`order-service` is migrated: `internal/domain` (booking validation, order and cancel rules, idempotency key and fingerprint, access rules), `internal/app` (booking, cancel, outcomes, queries, pricing and promo decisions, ports), `internal/adapters/{http,kafka,postgres,redis,metrics}`, and `internal/integration` (the old flat integration tests, entering through the real `http.API` and kafka `Handler`). `main.go` is the composition root only (522 lines became 156); `env.go`, the migrations, `deploy/`, `scripts/`, `services/pkg/events` and the rendered Kubernetes manifests are byte-identical to before. The dependency rule is checked by `internal/arch_test.go`, which was shown to fail on a forbidden import in each layer.
+
+What this migration taught that the recipe above did not say:
+
+- **A pure `services/pkg` library may be allow-listed per service.** The quote and promo decision logic is the heart of booking, and it needs `*surge.Signer`, `surge.Quote` and `*promo.Signer`. The packages are not import-pure (`surge` imports `os`, `strconv`, `time`, `fmt` and `pkg/secret`; `promo` imports `pkg/secret`, which imports `os`), but `app` only calls their pure functions (`surge.Quote`, `Price`, `CellID`, `BaseFare`, `HaversineKm`, `NewSigner`; `promo.NewSigner` and the signer's methods), while the environment-reading ones (`SignerFromEnv`, `surge.CellDegrees`) are called only from `main`. So `order-service` sets `rules.AppAllowed = append(rules.AppAllowed, "grab-mini/pkg/surge", "grab-mini/pkg/promo")` in its own `arch_test.go` instead of wrapping them in a port. The shared `Default` is unchanged, and anything else under `services/pkg` (for example `pkg/auth`, `pkg/events`) is still rejected in `app`. Add an entry only if the app code calls no function of the package that does I/O or reads the environment. `archtest` checks direct imports only, so this is a review-time rule.
+- **Packages that touch the same tables need their own database when `go test ./...` runs them in parallel.** The flat tests and the new Postgres adapter tests both deleted from the same tables, so one shared database made them flake (two failures in the flat package) unless run with `-p 1`. Each DB-backed package (`adapters/postgres`, `integration`) now creates a database named after itself (`ordertest_<package>_<random>`) per test and drops it `WITH (FORCE)`; no `-p 1` is needed, and a leftover database after a run is a bug.
+- **Keep the golden replay test.** Before touching anything, a table of exact status, `Content-Type` and body for the error paths, and the exact bytes of the stored idempotent response, was recorded from the old code. The stored response is rendered through an `app.ReceiptEncoder` port that the HTTP adapter implements (it keeps the old sorted-key marshal), so a replay of a row written by the old binary is byte-identical. Those tests moved with the code and are the reason the use case could be split from the HTTP shape at all. Do the same for any service that stores a rendered response.
+- **Transaction scope is part of the behaviour.** With an `Idempotency-Key` the transaction opens first (advisory lock, key lookup, pricing, insert); without one, pricing and Avro encoding run before a transaction that covers only the insert. The unit of work keeps both shapes, and each has a test that pins which runs inside it.
+- **Release claims on every failure path, with a context that may already be cancelled.** A claimed quote or promo token is given back when the booking fails afterwards; the release must not use the request context.
+- **Move tests with the code, then diff the names.** The 66 flat test names were accounted for one by one (moved with `git mv`, or deleted only where an equal test with the same name existed in a new package). A test that was deleted because it duplicated another is a decision, written down, not a side effect.
+- **`go test` per package can pass while `main` panics.** Prometheus counters register at package init, so a second declaration of any of the six counters panics at start. The binary was run (`migrate` subcommand) after the flat files were deleted, and `promauto` appears in exactly one package.
+- **Explicit wiring.** `Pricer` and `PromoChecker` must be non-nil in `app.Deps`; the old handler fell back to package-level defaults for tests, so `main` (and the integration helper) have to build them explicitly.
 
 ### Migration order and rollback
 

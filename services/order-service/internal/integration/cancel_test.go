@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -8,50 +8,22 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"grab-mini/pkg/auth"
-	"grab-mini/pkg/auth/authtest"
-	"grab-mini/pkg/eventcodec"
 	"grab-mini/pkg/events"
-	"grab-mini/pkg/outbox"
 )
 
-// fakeRegistry answers the one Schema Registry call Encode makes.
-func fakeRegistry(t *testing.T) *eventcodec.Codec {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]int{"id": 1})
-	}))
-	t.Cleanup(srv.Close)
-	return eventcodec.New(srv.URL)
-}
+// cancelEnv is the API with orders put straight into the database.
+type cancelEnv struct{ *api }
 
-type cancelEnv struct {
-	s      *server
-	db     *pgxpool.Pool
-	mux    http.Handler
-	issuer *auth.Issuer
-}
-
-func newCancelEnv(t *testing.T) *cancelEnv {
-	t.Helper()
-	db := testDB(t)
-	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: fakeRegistry(t)}
-	issuer, verifier := authtest.Pair(t, time.Hour)
-	return &cancelEnv{s, db, s.routes(verifier), issuer}
-}
+func newCancelEnv(t *testing.T) *cancelEnv { return &cancelEnv{newAPI(t)} }
 
 // order saves an order for rider-1 in the given status.
 func (e *cancelEnv) order(t *testing.T, status string) string {
 	t.Helper()
-	id := uuid.NewString()
-	err := e.s.insertOrder(context.Background(), id, createOrderRequest{
-		RiderID: "rider-1", Pickup: &events.LatLng{Lat: 1, Lng: 2}, Dropoff: &events.LatLng{Lat: 3, Lng: 4}, VehicleType: events.VehicleCar,
-	}, []byte("created"))
+	id, err := insertOrder(context.Background(), e.uow, newOrder("rider-1"), []byte("created"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +76,7 @@ func TestARiderCancelsAPendingOrder(t *testing.T) {
 	if topics := e.queued(t); len(topics) != 1 || topics[0] != events.TopicOrderCancelled {
 		t.Errorf("queued %v, want exactly one order.cancelled", topics)
 	}
-	if o, err := queryOrder(context.Background(), e.db, "id = $1", id); err != nil || o.Status != "CANCELLED" || o.CancelledBy != "RIDER" {
+	if o, err := e.store.ByID(context.Background(), id); err != nil || o.Status != "CANCELLED" || o.CancelledBy != "RIDER" {
 		t.Errorf("stored order = %+v, %v", o, err)
 	}
 }
@@ -139,7 +111,7 @@ func TestAMatchedOrderCannotBeCancelledHere(t *testing.T) {
 	if code != http.StatusConflict || out["status"] != "MATCHED" || !strings.Contains(out["error"].(string), "cancel the trip") {
 		t.Errorf("cancel = %d %v; want 409 pointing the client at the trip", code, out)
 	}
-	if o, _ := queryOrder(context.Background(), e.db, "id = $1", id); o.Status != "MATCHED" {
+	if o, _ := e.store.ByID(context.Background(), id); o.Status != "MATCHED" {
 		t.Errorf("order is %s, want it left MATCHED", o.Status)
 	}
 	if topics := e.queued(t); len(topics) != 0 {
@@ -177,7 +149,7 @@ func TestOnlyTheOrdersRiderMayCancelIt(t *testing.T) {
 	if code, _ := e.cancel(id, auth.Rider, "rider-1", `{"reason":"`+strings.Repeat("x", 201)+`"}`); code != http.StatusBadRequest {
 		t.Errorf("a too-long reason got %d, want 400", code)
 	}
-	if o, _ := queryOrder(context.Background(), e.db, "id = $1", id); o.Status != "PENDING" {
+	if o, _ := e.store.ByID(context.Background(), id); o.Status != "PENDING" {
 		t.Errorf("a refused request moved the order to %s", o.Status)
 	}
 	if topics := e.queued(t); len(topics) != 0 {
@@ -199,14 +171,15 @@ func TestMatchAndCancelRacingLeaveOneConsistentOutcome(t *testing.T) {
 		id := e.order(t, "PENDING")
 		var wg sync.WaitGroup
 		var code int
+		outcome := e.outcome(t, id, "MATCHED")
 		start := make(chan struct{})
 		wg.Add(2)
 		go func() { defer wg.Done(); <-start; code, _ = e.cancel(id, auth.Rider, "rider-1", `{}`) }()
-		go func() { defer wg.Done(); <-start; setOutcome(ctx, e.db, id, "MATCHED") }()
+		go func() { defer wg.Done(); <-start; e.deliver(ctx, outcome) }()
 		close(start)
 		wg.Wait()
 
-		o, _ := queryOrder(ctx, e.db, "id = $1", id)
+		o, _ := e.store.ByID(ctx, id)
 		topics := e.queued(t)
 		switch o.Status {
 		case "CANCELLED":
@@ -231,11 +204,11 @@ func TestAMatchedOutcomeNeverOverwritesACancelledOrder(t *testing.T) {
 	e.cancel(id, auth.Rider, "rider-1", `{}`)
 
 	for _, status := range []string{"MATCHED", "NO_DRIVER"} {
-		if err := setOutcome(ctx, e.db, id, status); err != nil {
+		if err := e.deliver(ctx, e.outcome(t, id, status)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if o, _ := queryOrder(ctx, e.db, "id = $1", id); o.Status != "CANCELLED" {
+	if o, _ := e.store.ByID(ctx, id); o.Status != "CANCELLED" {
 		t.Errorf("order is %s, want CANCELLED to stick", o.Status)
 	}
 }
@@ -247,32 +220,26 @@ func TestACancelledTripCancelsItsMatchedOrder(t *testing.T) {
 	pending := e.order(t, "PENDING")
 
 	for i := 0; i < 2; i++ { // the second is a redelivery
-		if err := cancelMatchedOrder(ctx, e.db, matched, events.CancelledByDriver, "flat tyre"); err != nil {
+		if err := e.deliver(ctx, e.tripCancelled(t, matched, events.CancelledByDriver, "flat tyre")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	o, _ := queryOrder(ctx, e.db, "id = $1", matched)
+	o, _ := e.store.ByID(ctx, matched)
 	if o.Status != "CANCELLED" || o.CancelledBy != "DRIVER" || o.CancelReason != "flat tyre" || o.CancelledAt == nil {
 		t.Errorf("order = %+v, want CANCELLED by the DRIVER", o)
 	}
 
 	// Only MATCHED orders move this way; a PENDING one keeps searching.
-	if err := cancelMatchedOrder(ctx, e.db, pending, events.CancelledByDriver, ""); err != nil {
+	if err := e.deliver(ctx, e.tripCancelled(t, pending, events.CancelledByDriver, "")); err != nil {
 		t.Fatal(err)
 	}
-	if o, _ := queryOrder(ctx, e.db, "id = $1", pending); o.Status != "PENDING" {
+	if o, _ := e.store.ByID(ctx, pending); o.Status != "PENDING" {
 		t.Errorf("a PENDING order became %s", o.Status)
 	}
 
 	// A later event never rewrites who cancelled.
-	cancelMatchedOrder(ctx, e.db, matched, events.CancelledByRider, "again")
-	if o, _ := queryOrder(ctx, e.db, "id = $1", matched); o.CancelledBy != "DRIVER" {
+	e.deliver(ctx, e.tripCancelled(t, matched, events.CancelledByRider, "again"))
+	if o, _ := e.store.ByID(ctx, matched); o.CancelledBy != "DRIVER" {
 		t.Errorf("cancelledBy rewritten to %s", o.CancelledBy)
-	}
-}
-
-func TestACancelledTripWithABadOrderIdIsPermanentlyUnusable(t *testing.T) {
-	if err := cancelMatchedOrder(context.Background(), nil, "not-a-uuid", "RIDER", ""); err == nil {
-		t.Error("want a permanent error for a non-UUID order id")
 	}
 }
