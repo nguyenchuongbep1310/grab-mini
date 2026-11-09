@@ -71,6 +71,17 @@ func TestFingerprintIgnoresFormattingButNotMeaning(t *testing.T) {
 	}
 }
 
+func TestPromoTokenParticipatesInTheIdempotencyFingerprint(t *testing.T) {
+	a, b := tripRequest(), tripRequest()
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Fatal("identical requests differ")
+	}
+	b.PromoToken = "some.token"
+	if a.Fingerprint() == b.Fingerprint() {
+		t.Error("a booking with a promo token has the fingerprint of one without")
+	}
+}
+
 // The hash input is the JSON of a fixed struct; these values were recorded
 // from the flat code, so a reordered field or renamed key (which would orphan
 // keys stored for 24 hours) fails here.

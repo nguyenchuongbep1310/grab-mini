@@ -1,9 +1,8 @@
-package main
+package integration
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -13,172 +12,26 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	goredis "github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 
+	httpapi "grab-mini/order-service/internal/adapters/http"
+	kafkaadapter "grab-mini/order-service/internal/adapters/kafka"
+	ordermetrics "grab-mini/order-service/internal/adapters/metrics"
+	"grab-mini/order-service/internal/adapters/postgres"
+	redisadapter "grab-mini/order-service/internal/adapters/redis"
+	"grab-mini/order-service/internal/app"
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/auth/authtest"
 	"grab-mini/pkg/eventcodec"
+	"grab-mini/pkg/events"
 	"grab-mini/pkg/outbox"
 	"grab-mini/pkg/promo"
+	"grab-mini/pkg/surge"
 )
 
-// ---- unit: key validation and fingerprinting (no database) ----
-
-func TestIdempotencyKeyValidation(t *testing.T) {
-	ok := []string{"a", "550e8400-e29b-41d4-a716-446655440000", strings.Repeat("k", 128), "with space and ~!@#"}
-	for _, k := range ok {
-		h := http.Header{"Idempotency-Key": {k}}
-		if got, err := idempotencyKey(h); err != nil || got != k {
-			t.Errorf("%q: got %q, %v; want accepted", k, got, err)
-		}
-	}
-	if got, err := idempotencyKey(http.Header{}); got != "" || err != nil {
-		t.Errorf("absent header = %q, %v; want empty and no error", got, err)
-	}
-	bad := map[string][]string{
-		"empty":         {""},
-		"too long":      {strings.Repeat("k", 129)},
-		"newline":       {"a\nb"},
-		"tab":           {"a\tb"},
-		"DEL":           {"a\x7fb"},
-		"non-ASCII":     {"clé"},
-		"given twice":   {"a", "b"},
-		"only too long": {strings.Repeat("é", 70)},
-	}
-	for name, v := range bad {
-		if _, err := idempotencyKey(http.Header{"Idempotency-Key": v}); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-}
-
-func TestFingerprintIgnoresFormattingButNotMeaning(t *testing.T) {
-	base := tripRequest()
-	same := tripRequest()
-	same.RiderID = "someone" // the rider is scoped by the key, not part of the body
-	if fingerprint(base) != fingerprint(same) {
-		t.Error("the rider changed the fingerprint")
-	}
-	// The same JSON written differently, with the default vehicle spelled out or not.
-	a := `{"pickup":{"lat":10.776,"lng":106.72},"dropoff":{"lat":10.82,"lng":106.75}}`
-	b := `{ "dropoff": {"lng":106.75, "lat":10.82}, "vehicleType":"CAR", "pickup":{"lat":1.0776e1,"lng":106.72} }`
-	fa, fb := fingerprintOfJSON(t, a), fingerprintOfJSON(t, b)
-	if fa != fb {
-		t.Errorf("equivalent bodies fingerprint differently:\n%s\n%s", fa, fb)
-	}
-
-	for name, mutate := range map[string]func(*createOrderRequest){
-		"pickup":   func(r *createOrderRequest) { r.Pickup.Lat += 0.0001 },
-		"dropoff":  func(r *createOrderRequest) { r.Dropoff.Lng += 0.0001 },
-		"vehicle":  func(r *createOrderRequest) { r.VehicleType = "BIKE" },
-		"quote id": func(r *createOrderRequest) { r.QuoteID = "q" },
-	} {
-		other := tripRequest()
-		mutate(&other)
-		if fingerprint(other) == fingerprint(base) {
-			t.Errorf("a different %s kept the fingerprint", name)
-		}
-	}
-}
-
-func fingerprintOfJSON(t *testing.T, body string) string {
-	t.Helper()
-	var req createOrderRequest
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		t.Fatal(err)
-	}
-	if req.VehicleType == "" {
-		req.VehicleType = "CAR"
-	}
-	return fingerprint(req)
-}
-
-func TestABadKeyIs400BeforeAnythingElse(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(
-		`{"pickup":{"lat":10.776,"lng":106.7},"dropoff":{"lat":10.79,"lng":106.71}}`))
-	req.Header.Set("Idempotency-Key", strings.Repeat("k", 200))
-	req = req.WithContext(auth.With(req.Context(), auth.Identity{Subject: "r", Role: auth.Rider}))
-	(&server{}).handleCreateOrder(rec, req) // no database: it must not get that far
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Idempotency-Key") {
-		t.Errorf("status %d body %q, want a 400 naming the header", rec.Code, rec.Body.String())
-	}
-}
-
-// ---- unit: single-use quotes (miniredis) ----
-
-func claimingPricer(t *testing.T, current float64) (*pricer, *miniredis.Miniredis) {
-	t.Helper()
-	mr := miniredis.RunT(t)
-	p := testPricer(t, current)
-	p.claims = redisClaims{redis.NewClient(&redis.Options{Addr: mr.Addr()})}
-	return p, mr
-}
-
-func TestAQuoteBooksOnceAndThenGetsAFreshQuote(t *testing.T) {
-	p, mr := claimingPricer(t, 1.5)
-	req := tripRequest()
-	q := quoteFor(p, "rider-1", req, 1.2, t0.Add(-10*time.Second))
-	ctx := context.Background()
-
-	first, err := p.Price(ctx, "rider-1", req, q.QuoteID)
-	if err != nil || first.Multiplier != 1.2 || first.ClaimedQuote != q.QuoteID {
-		t.Fatalf("first booking = %+v, %v; want the quoted 1.2x", first, err)
-	}
-	if ttl := mr.TTL(claimKey(q.QuoteID)); ttl <= 0 || ttl > 60*time.Second {
-		t.Errorf("the mark lives %v, want the quote's remaining life (about 50s)", ttl)
-	}
-
-	_, err = p.Price(ctx, "rider-1", req, q.QuoteID)
-	var again *conflict
-	if !errors.As(err, &again) {
-		t.Fatalf("second booking err = %v, want a *conflict", err)
-	}
-	if again.NewQuote.Multiplier != 1.5 || again.NewQuote.QuoteID == q.QuoteID || again.Error() != reasonQuoteUsed {
-		t.Errorf("conflict = %+v (%q), want a fresh quote at the current 1.5x and the reuse reason", again.NewQuote, again.Error())
-	}
-}
-
-func TestAQuoteGivenBackCanBookAgain(t *testing.T) {
-	p, _ := claimingPricer(t, 1.0)
-	req := tripRequest()
-	q := quoteFor(p, "rider-1", req, 1.2, t0.Add(-10*time.Second))
-	ctx := context.Background()
-
-	settled, err := p.Price(ctx, "rider-1", req, q.QuoteID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.release(ctx, settled) // the booking failed after pricing
-	if _, err := p.Price(ctx, "rider-1", req, q.QuoteID); err != nil {
-		t.Errorf("retry after a failed booking = %v, want the quote honoured again", err)
-	}
-}
-
-// Fail-open policy: with Redis down a quote can't be checked, so the booking
-// is not rejected; it is priced at the current multiplier, never at the old quote.
-func TestWithRedisDownABookingIsRepricedNotRejected(t *testing.T) {
-	p, mr := claimingPricer(t, 1.5)
-	req := tripRequest()
-	q := quoteFor(p, "rider-1", req, 1.2, t0.Add(-10*time.Second))
-	mr.Close()
-
-	got, err := p.Price(context.Background(), "rider-1", req, q.QuoteID)
-	if err != nil {
-		t.Fatalf("err = %v, want the booking to go ahead", err)
-	}
-	if got.ClaimedQuote != "" {
-		t.Error("claimed a quote it could not mark")
-	}
-	// currentMultiplier here is the test's fixed 1.5, standing for "what Redis last said".
-	if got.Multiplier != 1.5 {
-		t.Errorf("multiplier = %v, want the current 1.5 and not the quoted 1.2", got.Multiplier)
-	}
-}
-
-// ---- integration: the API over a real database ----
+// ---- the API over a real database ----
 
 // fakeRegistryCodec is a codec over an in-process Schema Registry that keeps
 // the schemas it is given, so a test can decode what the service queued.
@@ -216,29 +69,94 @@ func fakeRegistryCodec(t *testing.T) *eventcodec.Codec {
 	return eventcodec.New(srv.URL)
 }
 
+// api is the service wired as main wires it, over a private database and an
+// in-process Redis, with a fixed clock for quotes and promo tokens.
 type api struct {
-	t      *testing.T
-	db     *pgxpool.Pool
-	pricer *pricer
-	promos *promoChecker
-	codec  *eventcodec.Codec
-	mux    *http.ServeMux
-	issuer *auth.Issuer
+	t       *testing.T
+	db      *pgxpool.Pool
+	store   *postgres.Store
+	uow     *postgres.UnitOfWork
+	svc     *app.Service
+	pricer  *app.Pricer
+	promos  *app.PromoChecker
+	codec   *eventcodec.Codec
+	mux     *http.ServeMux
+	issuer  *auth.Issuer
+	handler *kafkaadapter.Handler
 }
 
 func newAPI(t *testing.T) *api {
 	t.Helper()
 	db := testDB(t)
-	p, _ := claimingPricer(t, 1.0)
-	codec := fakeRegistryCodec(t)
+	mr := miniredis.RunT(t)
+	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	m := ordermetrics.New()
+	claims := redisadapter.NewClaims(rdb)
+	signer, err := surge.NewSigner("test-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := func() time.Time { return t0 }
+	p := &app.Pricer{Signer: signer, Mult: redisadapter.NewMultipliers(rdb, m), Claims: claims,
+		Tolerance: 0.2, CellDeg: 0.05, Now: clock, Metrics: m}
 	promoSigner, err := promo.NewSigner("test-promo-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pc := &promoChecker{signer: promoSigner, claims: p.claims, now: func() time.Time { return t0 }}
-	s := &server{db: db, relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), codec: codec, pricer: p, promos: pc}
+	pc := &app.PromoChecker{Signer: promoSigner, Claims: claims, Now: clock, Metrics: m}
+	codec := fakeRegistryCodec(t)
+	store := postgres.NewStore(db)
+	uow := postgres.NewUnitOfWork(db, outboxSource)
+	svc := app.New(app.Deps{
+		Orders: store, Keys: store, Outcomes: store, UoW: uow,
+		Encoder: kafkaadapter.NewEncoder(codec), Receipt: httpapi.ReceiptEncoder(),
+		Pricer: p, Promos: pc, Relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), Metrics: m, Now: time.Now,
+	})
 	issuer, verifier := authtest.Pair(t, time.Hour)
-	return &api{t: t, db: db, pricer: p, promos: pc, codec: codec, mux: s.routes(verifier), issuer: issuer}
+	return &api{t: t, db: db, store: store, uow: uow, svc: svc, pricer: p, promos: pc, codec: codec,
+		mux: httpapi.NewAPI(svc, verifier).Routes(), issuer: issuer, handler: kafkaadapter.NewHandler(svc, codec)}
+}
+
+// message encodes evt as the producer on topic would.
+func (a *api) message(t *testing.T, topic string, evt any) kafka.Message {
+	t.Helper()
+	payload, err := a.codec.Encode(context.Background(), topic, evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kafka.Message{Topic: topic, Value: payload}
+}
+
+// matched is order.matched for the order, to the driver.
+func (a *api) matched(t *testing.T, orderID, driverID string) kafka.Message {
+	return a.message(t, events.TopicOrderMatched, events.OrderMatched{OrderID: orderID, DriverID: driverID, VehicleType: events.VehicleCar})
+}
+
+// outcome is what matching reports for the order: MATCHED (with no driver
+// named) or NO_DRIVER.
+func (a *api) outcome(t *testing.T, orderID, status string) kafka.Message {
+	t.Helper()
+	switch status {
+	case "MATCHED":
+		return a.matched(t, orderID, "")
+	case "NO_DRIVER":
+		return a.message(t, events.TopicOrderNoDriverFound, events.OrderNoDriverFound{OrderID: orderID})
+	}
+	t.Fatalf("no outcome %q", status)
+	return kafka.Message{}
+}
+
+// tripCancelled is trip.status.changed CANCELLED for the order's trip.
+func (a *api) tripCancelled(t *testing.T, orderID, by, reason string) kafka.Message {
+	return a.message(t, events.TopicTripStatusChanged, events.TripStatusChanged{
+		TripID: "trip-1", OrderID: orderID, Status: events.TripStatusCancelled, CancelledBy: by, Reason: reason,
+	})
+}
+
+// deliver hands one consumed message to the Kafka handler.
+func (a *api) deliver(ctx context.Context, msg kafka.Message) error {
+	return a.handler.Handle(ctx, msg)
 }
 
 const bookingBody = `{"pickup":{"lat":10.776,"lng":106.72},"dropoff":{"lat":10.82,"lng":106.75}}`
@@ -364,39 +282,6 @@ func TestConcurrentDuplicatesCreateOneOrder(t *testing.T) {
 	}
 }
 
-// The primary key is the backstop when the lock is bypassed: the loser of the
-// race finds the winner's row.
-func TestTheUniqueKeyStopsASecondOrderEvenWithoutTheLock(t *testing.T) {
-	a := newAPI(t)
-	ctx := context.Background()
-	s := &server{db: a.db, relay: outbox.NewRelay(a.db, &recordingWriter{}, outboxSource)}
-	req := tripRequest()
-	req.RiderID = "rider-1"
-	rec := idemRecord{Key: "k", Fingerprint: fingerprint(req), Status: 201, Body: []byte("{}")}
-
-	insert := func() error {
-		tx, _ := a.db.Begin(ctx)
-		defer tx.Rollback(ctx)
-		id := uuid.NewString()
-		r := rec
-		r.OrderID = id
-		if err := s.insertOrderTx(ctx, tx, id, req, []byte("x"), &r); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	}
-	if err := insert(); err != nil {
-		t.Fatal(err)
-	}
-	err := insert()
-	if !isDuplicateKey(err) {
-		t.Fatalf("second insert err = %v, want the idempotency_keys primary key violation", err)
-	}
-	if a.count("orders") != 1 || a.count("outbox") != 1 {
-		t.Errorf("%d orders, %d outbox rows after the rejected insert, want 1 each", a.count("orders"), a.count("outbox"))
-	}
-}
-
 func TestAKeyExpiresAfter24Hours(t *testing.T) {
 	a := newAPI(t)
 	first := a.book("rider-1", "old", bookingBody)
@@ -411,13 +296,13 @@ func TestAKeyExpiresAfter24Hours(t *testing.T) {
 	}
 
 	a.db.Exec(context.Background(), `UPDATE idempotency_keys SET created_at = now() - interval '25 hours'`)
-	n, err := purgeExpiredKeys(context.Background(), a.db)
+	n, err := a.svc.PurgeExpiredKeys(context.Background())
 	if err != nil || n != 1 || a.count("idempotency_keys") != 0 {
 		t.Errorf("purge = %d, %v; %d keys left; want it to remove the expired one", n, err, a.count("idempotency_keys"))
 	}
 }
 
-// ---- integration: quote replay ----
+// ---- quote replay ----
 
 func (a *api) quoteBody(rider string, mult float64) (string, string) {
 	q := quoteFor(a.pricer, rider, tripRequest(), mult, t0.Add(-10*time.Second))
@@ -471,33 +356,5 @@ func TestAQuoteSurvivesAFailedBookingForTheRetry(t *testing.T) {
 	retry := a.book("rider-1", "k", body)
 	if retry.Code != http.StatusCreated || retry.Body["surgeMultiplier"] != 1.2 {
 		t.Errorf("retry = %d %s, want 201 with the quote still honoured", retry.Code, retry.Raw)
-	}
-}
-
-// Against a real Redis, when TEST_REDIS_ADDR is set: SET NX with a TTL.
-func TestQuoteMarksUseSetNXWithATTL(t *testing.T) {
-	addr := ""
-	if addr = getEnv("TEST_REDIS_ADDR", ""); addr == "" {
-		t.Skip("TEST_REDIS_ADDR not set")
-	}
-	ctx := context.Background()
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	t.Cleanup(func() { rdb.Close() })
-	c := redisClaims{rdb}
-	id := "test-quote-" + uuid.NewString()
-	t.Cleanup(func() { rdb.Del(ctx, claimKey(id)) })
-
-	if first, err := c.Claim(ctx, id, 30*time.Second); err != nil || !first {
-		t.Fatalf("first claim = %v, %v", first, err)
-	}
-	if first, err := c.Claim(ctx, id, 30*time.Second); err != nil || first {
-		t.Fatalf("second claim = %v, %v; want it refused", first, err)
-	}
-	if ttl := rdb.TTL(ctx, claimKey(id)).Val(); ttl <= 0 || ttl > 30*time.Second {
-		t.Errorf("ttl = %v, want at most 30s", ttl)
-	}
-	c.Release(ctx, id)
-	if first, _ := c.Claim(ctx, id, 30*time.Second); !first {
-		t.Error("claim after release refused")
 	}
 }

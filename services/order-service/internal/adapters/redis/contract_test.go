@@ -130,6 +130,9 @@ func TestRedisMultipliersReadsAndFailsOpen(t *testing.T) {
 	if got := mult.Multiplier(ctx, "CAR", cell); got != 1.8 {
 		t.Errorf("stored 1.8 = %v", got)
 	}
+	if got := mult.Multiplier(ctx, "BIKE", cell); got != 1.0 {
+		t.Errorf("another vehicle's key leaked: %v", got)
+	}
 	for _, bad := range []string{"NaN", "+Inf", "0.5", "abc", ""} {
 		rdb.Set(ctx, key, bad, 0)
 		if got := mult.Multiplier(ctx, "CAR", cell); got != 1.0 || math.IsNaN(got) {

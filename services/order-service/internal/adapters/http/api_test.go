@@ -120,6 +120,13 @@ func TestErrorResponsesAreStable(t *testing.T) {
 		if got := rec.Header().Get("Content-Type"); got != want.ct {
 			t.Errorf("%s: Content-Type = %q, want %q", c.name, got, want.ct)
 		}
+		wantAuth := ""
+		if want.status == http.StatusUnauthorized {
+			wantAuth = "Bearer"
+		}
+		if got := rec.Header().Get("WWW-Authenticate"); got != wantAuth {
+			t.Errorf("%s: WWW-Authenticate = %q, want %q", c.name, got, wantAuth)
+		}
 		if got := rec.Body.String(); got != want.body {
 			t.Errorf("%s: body = %q, want %q", c.name, got, want.body)
 		}
@@ -258,6 +265,14 @@ func TestCreateOrderTakesTheRiderFromTheToken(t *testing.T) {
 	book(s, `{"riderId":"r",`+where+`}`, nil)
 	if s.gotCreate.Request.VehicleType != domain.VehicleCar || s.gotCreate.IdempotencyKey != "" {
 		t.Errorf("command = %+v", s.gotCreate)
+	}
+	// Naming another rider is refused, before anything is saved.
+	refused := &stub{create: func(app.CreateOrderCommand) (app.CreateOrderResult, error) {
+		t.Error("a body naming another rider reached the use case")
+		return app.CreateOrderResult{}, nil
+	}}
+	if rec := book(refused, `{"riderId":"someone-else",`+where+`}`, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("a body naming another rider: status %d, want 403", rec.Code)
 	}
 }
 
