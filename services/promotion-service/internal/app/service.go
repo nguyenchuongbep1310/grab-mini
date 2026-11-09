@@ -5,15 +5,19 @@ package app
 
 import "time"
 
-// Deps are the ports a Service needs. The ones the redemption use cases need
-// (unit of work, event encoder, relay) join in a later change.
+// Deps are the ports a Service needs.
 type Deps struct {
 	Reader  PromotionReader
 	Writer  PromotionWriter
 	Views   PromotionViews
 	Tokens  TokenIssuer
 	Metrics Metrics
-	Now     func() time.Time // nil: time.Now
+	UoW     UnitOfWork
+	Encoder Encoder
+	// Relay is woken after a commit that queued an outbox row. It may be nil;
+	// never set it from a possibly-nil pointer (a typed nil is not nil here).
+	Relay Waker
+	Now   func() time.Time // nil: time.Now
 }
 
 // Service runs the use cases.
@@ -28,3 +32,5 @@ func New(d Deps) *Service {
 	}
 	return &Service{d: d}
 }
+
+func (s *Service) now() time.Time { return s.d.Now() }
