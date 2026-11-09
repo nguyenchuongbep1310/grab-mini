@@ -7,10 +7,15 @@
 // records the redemption, releases it when the order ends without a ride
 // (order.cancelled, a cancelled trip, order.no_driver_found), and announces it
 // on promotion.redeemed through the outbox. Admins create and disable promotions.
+//
+// This file is the composition root: it reads the environment, builds the
+// adapters, hands them to the use cases in internal/app and runs the HTTP API,
+// the outbox relay and the consumer.
 package main
 
 import (
 	"context"
+	"embed"
 	"log"
 	"os"
 	"os/signal"
@@ -30,6 +35,20 @@ import (
 	"grab-mini/pkg/secret"
 	"grab-mini/pkg/serve"
 	"grab-mini/pkg/tracing"
+	"grab-mini/promotion-service/internal/adapters/http"
+	kafkaadapter "grab-mini/promotion-service/internal/adapters/kafka"
+	promometrics "grab-mini/promotion-service/internal/adapters/metrics"
+	"grab-mini/promotion-service/internal/adapters/postgres"
+	"grab-mini/promotion-service/internal/adapters/promotoken"
+	"grab-mini/promotion-service/internal/app"
+)
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
+
+const (
+	serviceName  = "promotion-service"
+	outboxSource = "promotion-service"
 )
 
 func main() {
@@ -54,7 +73,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	db, err := connectDB(ctx, env.DatabaseURL)
+	db, err := postgres.Connect(ctx, env.DatabaseURL, serviceName, migrationFiles)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
@@ -70,18 +89,30 @@ func main() {
 	defer producer.Close()
 
 	codec := eventcodec.New(env.SchemaRegistryURL)
+	// Always a real relay: a nil *outbox.Relay put in app.Deps.Relay would be a
+	// non-nil Waker (a typed nil).
 	relay := outbox.NewRelay(db, producer, outboxSource)
-	s := newService(db, signer, codec, relay)
+	store := postgres.NewStore(db)
+	svc := app.New(app.Deps{
+		Reader:  store,
+		Writer:  store,
+		Views:   store,
+		Tokens:  promotoken.New(signer),
+		Metrics: promometrics.New(),
+		UoW:     postgres.NewUnitOfWork(db, outboxSource),
+		Encoder: kafkaadapter.NewEncoder(codec),
+		Relay:   relay,
+	})
 
 	var background sync.WaitGroup
 	background.Go(func() { relay.Run(ctx) })
-	background.Go(func() { s.runConsumer(ctx, env, "", codec) })
+	background.Go(func() { kafkaadapter.NewHandler(svc, codec).Run(ctx, env.KafkaBrokers, "") })
 
 	verifier, err := auth.VerifierFromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux := s.routes(verifier)
+	mux := http.NewAPI(svc, verifier).Routes()
 	health.Mount(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("promotion-service listening on :%s", env.Port)
@@ -90,6 +121,15 @@ func main() {
 	}
 	background.Wait() // the consumer stops and the relay drains before the pool closes
 	log.Printf("promotion-service stopped")
+}
+
+// runMigrate is the `promotion-service migrate` command: apply pending
+// migrations and exit. A connection failure reads "failed to connect to
+// database: ..." (postgres.Migrate wraps it so), as before.
+func runMigrate(env Env) {
+	if err := postgres.Migrate(context.Background(), env.DatabaseURL, serviceName, migrationFiles); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // runSeedDev is `promotion-service seed-dev`: a few promotions to try the
@@ -102,12 +142,12 @@ func runSeedDev(env Env) {
 	}
 	ctx := context.Background()
 	// Brings the schema up to date first: this runs before the service has started.
-	pool, err := connectDB(ctx, env.DatabaseURL)
+	pool, err := postgres.Connect(ctx, env.DatabaseURL, serviceName, migrationFiles)
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
 	defer pool.Close()
-	n, err := seedDev(ctx, pool)
+	n, err := postgres.SeedDev(ctx, pool)
 	if err != nil {
 		log.Fatal(err)
 	}

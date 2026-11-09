@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"bytes"
@@ -10,57 +10,60 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	kafkago "github.com/segmentio/kafka-go"
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/promo"
+	httpadapter "grab-mini/promotion-service/internal/adapters/http"
+	kafkaadapter "grab-mini/promotion-service/internal/adapters/kafka"
+	promometrics "grab-mini/promotion-service/internal/adapters/metrics"
+	"grab-mini/promotion-service/internal/adapters/postgres"
+	"grab-mini/promotion-service/internal/adapters/promotoken"
+	"grab-mini/promotion-service/internal/app"
+	"grab-mini/promotion-service/internal/domain"
 )
 
-// These tests need Postgres: set TEST_DATABASE_URL to a throwaway database
-// (they truncate the promotion tables and delete this service's outbox rows).
+// These tests need Postgres: set TEST_DATABASE_URL to a server where they may
+// create databases (each test gets one of its own, see testdb_test.go). They
+// enter the service the way production does: HTTP through
+// httpadapter.NewAPI(...).Routes(), events through kafkaadapter.Handler.Handle,
+// over the real Postgres adapters.
 
-// jsonEncoder stands in for the Avro codec: the tests read back what was queued.
-type jsonEncoder struct{}
+// jsonCodec stands in for the Avro codec on both sides: the tests read back
+// what was queued as JSON, and deliver events as JSON.
+type jsonCodec struct{}
 
-func (jsonEncoder) Encode(_ context.Context, _ string, v any) ([]byte, error) { return json.Marshal(v) }
+func (jsonCodec) Encode(_ context.Context, _ string, v any) ([]byte, error) { return json.Marshal(v) }
+
+func (jsonCodec) Decode(_ context.Context, _ string, data []byte, v any) error {
+	return json.Unmarshal(data, v)
+}
 
 type fixture struct {
-	t      *testing.T
-	db     *pgxpool.Pool
-	svc    *service
-	signer *promo.Signer
-	issuer *auth.Issuer
-	api    http.Handler
-	now    time.Time
+	t        *testing.T
+	db       *pgxpool.Pool
+	svc      *app.Service
+	handler  *kafkaadapter.Handler
+	signer   *promo.Signer
+	issuer   *auth.Issuer
+	verifier *auth.Verifier
+	api      http.Handler
+	now      time.Time // the service's clock; a test moves it
 }
 
 var testPriv ed25519.PrivateKey
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
+	db := testDB(t)
 	t.Setenv(auth.RateLimitScaleEnv, "0") // the cases below ask more often than a person would
-	ctx := context.Background()
-	db, err := connectDB(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(db.Close)
-	if _, err := db.Exec(ctx, `
-		TRUNCATE redemptions, promotion_events, promotion_cancelled_orders, promotions;
-		DELETE FROM outbox WHERE source = 'promotion-service'`); err != nil {
-		t.Fatal(err)
-	}
 	signer, err := promo.NewSigner("test-promo-secret")
 	if err != nil {
 		t.Fatal(err)
@@ -70,19 +73,65 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := newService(db, signer, jsonEncoder{}, nil)
-	f := &fixture{t: t, db: db, svc: svc, signer: signer, issuer: issuer, now: time.Now().UTC().Truncate(time.Second)}
-	svc.now = func() time.Time { return f.now }
-	f.api = svc.routes(auth.NewVerifier(auth.NewKeySet(pub)))
+	f := &fixture{t: t, db: db, signer: signer, issuer: issuer,
+		verifier: auth.NewVerifier(auth.NewKeySet(pub)), now: time.Now().UTC().Truncate(time.Second)}
+	// No relay: an untyped nil, so the service has no Waker at all.
+	f.wire(kafkaadapter.NewEncoder(jsonCodec{}), nil, jsonCodec{})
 	return f
 }
+
+// wire builds the service over the real adapters, with enc, relay and dec in
+// place of the Avro codec and the outbox relay main.go uses.
+func (f *fixture) wire(enc app.Encoder, relay app.Waker, dec kafkaadapter.Decoder) {
+	store := postgres.NewStore(f.db)
+	f.svc = app.New(app.Deps{
+		Reader:  store,
+		Writer:  store,
+		Views:   store,
+		Tokens:  promotoken.New(f.signer),
+		Metrics: promometrics.New(),
+		UoW:     postgres.NewUnitOfWork(f.db, "promotion-service"),
+		Encoder: enc,
+		Relay:   relay,
+		Now:     func() time.Time { return f.now },
+	})
+	f.handler = kafkaadapter.NewHandler(f.svc, dec)
+	f.api = httpadapter.NewAPI(f.svc, f.verifier).Routes()
+}
+
+// deliver hands evt to the consumer's handler as a message on topic, JSON-encoded.
+func (f *fixture) deliver(ctx context.Context, topic string, evt any) error {
+	b, err := json.Marshal(evt)
+	if err != nil {
+		return err
+	}
+	return f.handler.Handle(ctx, kafkago.Message{Topic: topic, Value: b})
+}
+
+func (f *fixture) onOrderCreated(ctx context.Context, evt events.OrderCreated) error {
+	return f.deliver(ctx, events.TopicOrderCreated, evt)
+}
+
+func (f *fixture) onOrderCancelled(ctx context.Context, evt events.OrderCancelled) error {
+	return f.deliver(ctx, events.TopicOrderCancelled, evt)
+}
+
+func (f *fixture) onTripStatusChanged(ctx context.Context, evt events.TripStatusChanged) error {
+	return f.deliver(ctx, events.TopicTripStatusChanged, evt)
+}
+
+func (f *fixture) onNoDriverFound(ctx context.Context, evt events.OrderNoDriverFound) error {
+	return f.deliver(ctx, events.TopicOrderNoDriverFound, evt)
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func newID() string { return uuid.NewString() }
 
 // promotion inserts a promotion that is valid now, edited by fn.
-func (f *fixture) promotion(code string, fn func(*Promotion)) {
+func (f *fixture) promotion(code string, fn func(*domain.Promotion)) {
 	f.t.Helper()
-	p := Promotion{Code: code, Kind: kindPercent, Value: 10, MaxDiscount: ptr[int64](20000),
+	p := domain.Promotion{Code: code, Kind: domain.KindPercent, Value: 10, MaxDiscount: ptr[int64](20000),
 		ValidFrom: f.now.Add(-time.Hour), ValidTo: f.now.Add(24 * time.Hour), PerRider: 1}
 	if fn != nil {
 		fn(&p)
@@ -157,7 +206,7 @@ func TestAnOrderWithACodeIsRedeemedOnceAndAnnounced(t *testing.T) {
 	order := newID()
 	evt := created(order, "rider-1", "WELCOME10", 10000)
 
-	if err := f.svc.onOrderCreated(ctx, evt); err != nil {
+	if err := f.onOrderCreated(ctx, evt); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.statusOf("WELCOME10", order); got != "REDEEMED" {
@@ -181,7 +230,7 @@ func TestAnOrderWithACodeIsRedeemedOnceAndAnnounced(t *testing.T) {
 
 func TestOrdersWithoutACodeAreNotRecordedAtAll(t *testing.T) {
 	f := newFixture(t)
-	if err := f.svc.onOrderCreated(context.Background(), created(newID(), "rider-1", "", 0)); err != nil {
+	if err := f.onOrderCreated(context.Background(), created(newID(), "rider-1", "", 0)); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.scalar(`SELECT count(*) FROM redemptions`) + f.scalar(`SELECT count(*) FROM promotion_events`) + f.outboxRows(); n != 0 {
@@ -192,15 +241,15 @@ func TestOrdersWithoutACodeAreNotRecordedAtAll(t *testing.T) {
 func TestRedeliveryAndReplayDoNotRedeemTwice(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 5 })
 	order := newID()
 	evt := created(order, "rider-1", "WELCOME10", 10000)
 
-	f.svc.onOrderCreated(ctx, evt) // the event
-	f.svc.onOrderCreated(ctx, evt) // redelivered: same eventId
+	f.onOrderCreated(ctx, evt) // the event
+	f.onOrderCreated(ctx, evt) // redelivered: same eventId
 	replay := evt
 	replay.EventID = newID() // replayed with a new eventId (an upstream re-publish): (code, order) still holds
-	if err := f.svc.onOrderCreated(ctx, replay); err != nil {
+	if err := f.onOrderCreated(ctx, replay); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,13 +263,13 @@ func TestRedeliveryAndReplayDoNotRedeemTwice(t *testing.T) {
 
 func TestConcurrentDeliveriesOfTheSameOrderRedeemOnce(t *testing.T) {
 	f := newFixture(t)
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 5 })
 	evt := created(newID(), "rider-1", "WELCOME10", 10000)
 
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if err := f.svc.onOrderCreated(context.Background(), evt); err != nil {
+			if err := f.onOrderCreated(context.Background(), evt); err != nil {
 				t.Error(err)
 			}
 		})
@@ -236,9 +285,9 @@ func TestThePerRiderLimitIsEnforcedInTheRedemptionTransaction(t *testing.T) {
 	ctx := context.Background()
 	f.promotion("WELCOME10", nil) // one per rider
 	first, second := newID(), newID()
-	f.svc.onOrderCreated(ctx, created(first, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(first, "rider-1", "WELCOME10", 10000))
 	// Booked before the first was recorded, so validation let it through. The order exists.
-	if err := f.svc.onOrderCreated(ctx, created(second, "rider-1", "WELCOME10", 10000)); err != nil {
+	if err := f.onOrderCreated(ctx, created(second, "rider-1", "WELCOME10", 10000)); err != nil {
 		t.Fatalf("an order past the limit must not fail: %v", err)
 	}
 	if got := f.statusOf("WELCOME10", first); got != "REDEEMED" {
@@ -254,7 +303,7 @@ func TestThePerRiderLimitIsEnforcedInTheRedemptionTransaction(t *testing.T) {
 	}
 	// Another rider is unaffected.
 	other := newID()
-	f.svc.onOrderCreated(ctx, created(other, "rider-2", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(other, "rider-2", "WELCOME10", 10000))
 	if got := f.statusOf("WELCOME10", other); got != "REDEEMED" {
 		t.Errorf("other rider = %s", got)
 	}
@@ -274,13 +323,13 @@ func TestThePerRiderLimitIsEnforcedInTheRedemptionTransaction(t *testing.T) {
 func TestTheGlobalLimitIsSoftNotExceededByRedemptionsButRecordedAsOverLimit(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.promotion("FLAT15K", func(p *Promotion) { p.UsageLimit = ptr[int64](3); p.PerRider = 10 })
+	f.promotion("FLAT15K", func(p *domain.Promotion) { p.UsageLimit = ptr[int64](3); p.PerRider = 10 })
 
 	// Ten riders' orders were all validated while the code still had room, then arrive together.
 	var wg sync.WaitGroup
 	for i := range 10 {
 		wg.Go(func() {
-			if err := f.svc.onOrderCreated(ctx, created(newID(), fmt.Sprintf("rider-%d", i), "FLAT15K", 15000)); err != nil {
+			if err := f.onOrderCreated(ctx, created(newID(), fmt.Sprintf("rider-%d", i), "FLAT15K", 15000)); err != nil {
 				t.Error(err)
 			}
 		})
@@ -299,13 +348,13 @@ func TestACancelledOrderGivesTheRedemptionBack(t *testing.T) {
 	ctx := context.Background()
 	f.promotion("WELCOME10", nil)
 	order := newID()
-	f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
 
 	cancel := cancelled(order, "rider-1")
-	if err := f.svc.onOrderCancelled(ctx, cancel); err != nil {
+	if err := f.onOrderCancelled(ctx, cancel); err != nil {
 		t.Fatal(err)
 	}
-	f.svc.onOrderCancelled(ctx, cancel) // redelivered
+	f.onOrderCancelled(ctx, cancel) // redelivered
 	if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
 		t.Fatalf("status = %s, want RELEASED", got)
 	}
@@ -315,7 +364,7 @@ func TestACancelledOrderGivesTheRedemptionBack(t *testing.T) {
 		t.Errorf("after release, validate = %d %s", rec.Code, rec.Body)
 	}
 	again := newID()
-	f.svc.onOrderCreated(ctx, created(again, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(again, "rider-1", "WELCOME10", 10000))
 	if got := f.statusOf("WELCOME10", again); got != "REDEEMED" {
 		t.Errorf("a new order after a release = %s, want REDEEMED", got)
 	}
@@ -327,10 +376,10 @@ func TestACancellationSeenBeforeTheOrderRecordsTheRedemptionAsReleased(t *testin
 	f.promotion("WELCOME10", nil)
 	order := newID()
 
-	if err := f.svc.onOrderCancelled(ctx, cancelled(order, "rider-1")); err != nil {
+	if err := f.onOrderCancelled(ctx, cancelled(order, "rider-1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000)); err != nil {
+	if err := f.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000)); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
@@ -341,7 +390,7 @@ func TestACancellationSeenBeforeTheOrderRecordsTheRedemptionAsReleased(t *testin
 	}
 	// And it does not use up the rider's one use.
 	next := newID()
-	f.svc.onOrderCreated(ctx, created(next, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(next, "rider-1", "WELCOME10", 10000))
 	if got := f.statusOf("WELCOME10", next); got != "REDEEMED" {
 		t.Errorf("next order = %s, want REDEEMED", got)
 	}
@@ -349,12 +398,12 @@ func TestACancellationSeenBeforeTheOrderRecordsTheRedemptionAsReleased(t *testin
 
 func TestCancellingAndRedeemingAtTheSameTimeNeverLeavesALiveRedemption(t *testing.T) {
 	f := newFixture(t)
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 100 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 100 })
 	for range 20 {
 		order := newID()
 		var wg sync.WaitGroup
-		wg.Go(func() { f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)) })
-		wg.Go(func() { f.svc.onOrderCancelled(context.Background(), cancelled(order, "rider-1")) })
+		wg.Go(func() { f.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)) })
+		wg.Go(func() { f.onOrderCancelled(context.Background(), cancelled(order, "rider-1")) })
 		wg.Wait()
 		if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
 			t.Fatalf("status = %s, want RELEASED whichever event was handled first", got)
@@ -364,7 +413,7 @@ func TestCancellingAndRedeemingAtTheSameTimeNeverLeavesALiveRedemption(t *testin
 
 func TestCancelledOrderWithoutAPromotionLeavesOnlyAMarker(t *testing.T) {
 	f := newFixture(t)
-	if err := f.svc.onOrderCancelled(context.Background(), cancelled(newID(), "rider-1")); err != nil {
+	if err := f.onOrderCancelled(context.Background(), cancelled(newID(), "rider-1")); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.scalar(`SELECT count(*) FROM promotion_cancelled_orders`); n != 1 {
@@ -380,14 +429,14 @@ func TestEventsThatCanNeverBeAppliedArePermanentErrors(t *testing.T) {
 	ctx := context.Background()
 	f.promotion("WELCOME10", nil)
 	bad := map[string]error{}
-	bad["unknown code"] = f.svc.onOrderCreated(ctx, created(newID(), "rider-1", "NOSUCHCODE", 1000))
-	bad["no order id"] = f.svc.onOrderCreated(ctx, created("", "rider-1", "WELCOME10", 1000))
-	bad["no rider"] = f.svc.onOrderCreated(ctx, created(newID(), "", "WELCOME10", 1000))
-	bad["negative discount"] = f.svc.onOrderCreated(ctx, created(newID(), "rider-1", "WELCOME10", -1))
+	bad["unknown code"] = f.onOrderCreated(ctx, created(newID(), "rider-1", "NOSUCHCODE", 1000))
+	bad["no order id"] = f.onOrderCreated(ctx, created("", "rider-1", "WELCOME10", 1000))
+	bad["no rider"] = f.onOrderCreated(ctx, created(newID(), "", "WELCOME10", 1000))
+	bad["negative discount"] = f.onOrderCreated(ctx, created(newID(), "rider-1", "WELCOME10", -1))
 	badID := created(newID(), "rider-1", "WELCOME10", 1000)
 	badID.EventID = "not-a-uuid"
-	bad["bad event id"] = f.svc.onOrderCreated(ctx, badID)
-	bad["cancel without order"] = f.svc.onOrderCancelled(ctx, cancelled("", "rider-1"))
+	bad["bad event id"] = f.onOrderCreated(ctx, badID)
+	bad["cancel without order"] = f.onOrderCancelled(ctx, cancelled("", "rider-1"))
 	for name, err := range bad {
 		var p interface{ Permanent() bool }
 		if !errors.As(err, &p) || !p.Permanent() {
@@ -405,7 +454,7 @@ func TestACodeTypedInLowerCaseIsRedeemedAgainstTheRealOne(t *testing.T) {
 	f := newFixture(t)
 	f.promotion("WELCOME10", nil)
 	order := newID()
-	if err := f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "welcome10", 10000)); err != nil {
+	if err := f.onOrderCreated(context.Background(), created(order, "rider-1", "welcome10", 10000)); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.statusOf("WELCOME10", order); got != "REDEEMED" {
@@ -452,7 +501,7 @@ func decode(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 
 func TestValidateReturnsTheDiscountAndATokenBoundToTheTrip(t *testing.T) {
 	f := newFixture(t)
-	f.promotion("WELCOME10", func(p *Promotion) { p.MinFare = 40000 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.MinFare = 40000 })
 
 	rec := f.validate("rider-1", "welcome10", "87000", "CAR") // lower case is fine
 	if rec.Code != http.StatusOK {
@@ -484,15 +533,15 @@ func TestValidateReturnsTheDiscountAndATokenBoundToTheTrip(t *testing.T) {
 func TestValidateRefusesWithAMachineReadableCode(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.promotion("MINFARE", func(p *Promotion) { p.MinFare = 50000 })
-	f.promotion("CARONLY", func(p *Promotion) { p.VehicleType = ptr("CAR") })
-	f.promotion("OLDONE", func(p *Promotion) { p.ValidFrom = f.now.Add(-48 * time.Hour); p.ValidTo = f.now.Add(-time.Hour) })
-	f.promotion("SOON", func(p *Promotion) { p.ValidFrom = f.now.Add(time.Hour); p.ValidTo = f.now.Add(48 * time.Hour) })
-	f.promotion("OFF", func(p *Promotion) { p.DisabledAt = &f.now })
-	f.promotion("FULL", func(p *Promotion) { p.UsageLimit = ptr[int64](1); p.PerRider = 5 })
+	f.promotion("MINFARE", func(p *domain.Promotion) { p.MinFare = 50000 })
+	f.promotion("CARONLY", func(p *domain.Promotion) { p.VehicleType = ptr("CAR") })
+	f.promotion("OLDONE", func(p *domain.Promotion) { p.ValidFrom = f.now.Add(-48 * time.Hour); p.ValidTo = f.now.Add(-time.Hour) })
+	f.promotion("SOON", func(p *domain.Promotion) { p.ValidFrom = f.now.Add(time.Hour); p.ValidTo = f.now.Add(48 * time.Hour) })
+	f.promotion("OFF", func(p *domain.Promotion) { p.DisabledAt = &f.now })
+	f.promotion("FULL", func(p *domain.Promotion) { p.UsageLimit = ptr[int64](1); p.PerRider = 5 })
 	f.promotion("ONCE", nil)
-	f.svc.onOrderCreated(ctx, created(newID(), "rider-9", "FULL", 1000))
-	f.svc.onOrderCreated(ctx, created(newID(), "rider-1", "ONCE", 1000))
+	f.onOrderCreated(ctx, created(newID(), "rider-9", "FULL", 1000))
+	f.onOrderCreated(ctx, created(newID(), "rider-1", "ONCE", 1000))
 
 	cases := []struct {
 		name, rider, code, price, vehicle string
@@ -598,7 +647,7 @@ func TestAdminCreatesListsAndDisablesAPromotion(t *testing.T) {
 	if rec := f.validate("rider-1", "SUMMER20", "100000", "CAR"); rec.Code != 200 {
 		t.Fatalf("validate: %d %s", rec.Code, rec.Body)
 	}
-	f.svc.onOrderCreated(ctx, created2("rider-1", "SUMMER20"))
+	f.onOrderCreated(ctx, created2("rider-1", "SUMMER20"))
 	list := decode(t, f.do(http.MethodGet, "/promotions", "admin", "admin-1", nil))["promotions"].([]any)
 	if len(list) != 1 || list[0].(map[string]any)["redeemed"] != float64(1) {
 		t.Errorf("list = %v", list)
@@ -647,7 +696,7 @@ func TestCreateRefusesPromotionsThatCannotWork(t *testing.T) {
 		},
 		"zero usage limit":      func(m map[string]any) { m["usageLimit"] = 0 },
 		"zero per-rider limit":  func(m map[string]any) { m["perRiderLimit"] = 0 },
-		"value above the limit": func(m map[string]any) { m["kind"] = "FIXED"; m["value"] = maxAmount + 1 },
+		"value above the limit": func(m map[string]any) { m["kind"] = "FIXED"; m["value"] = domain.MaxAmount + 1 },
 	}
 	for name, mutate := range cases {
 		m := valid()
@@ -668,11 +717,11 @@ func TestCreateRefusesPromotionsThatCannotWork(t *testing.T) {
 func TestSeedDevAddsTheDemoCodesOnce(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	n, err := seedDev(ctx, f.db)
+	n, err := postgres.SeedDev(ctx, f.db)
 	if err != nil || n != 3 {
 		t.Fatalf("first run: %d, %v", n, err)
 	}
-	if n, err := seedDev(ctx, f.db); err != nil || n != 0 {
+	if n, err := postgres.SeedDev(ctx, f.db); err != nil || n != 0 {
 		t.Fatalf("second run: %d, %v; want nothing added", n, err)
 	}
 	f.now = time.Now().UTC()
@@ -695,18 +744,18 @@ func TestSeedDevAddsTheDemoCodesOnce(t *testing.T) {
 func TestEveryEndWithoutARideReleasesTheRedemption(t *testing.T) {
 	ends := map[string]func(f *fixture, order, rider string) error{
 		"order.cancelled": func(f *fixture, order, rider string) error {
-			return f.svc.onOrderCancelled(context.Background(), cancelled(order, rider))
+			return f.onOrderCancelled(context.Background(), cancelled(order, rider))
 		},
 		"trip cancelled by the rider": func(f *fixture, order, rider string) error {
-			return f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, rider))
+			return f.onTripStatusChanged(context.Background(), tripCancelled(order, rider))
 		},
 		"trip cancelled by the driver": func(f *fixture, order, rider string) error {
 			evt := tripCancelled(order, rider)
 			evt.CancelledBy = events.CancelledByDriver
-			return f.svc.onTripStatusChanged(context.Background(), evt)
+			return f.onTripStatusChanged(context.Background(), evt)
 		},
 		"order.no_driver_found": func(f *fixture, order, rider string) error {
-			return f.svc.onNoDriverFound(context.Background(), noDriver(order, rider))
+			return f.onNoDriverFound(context.Background(), noDriver(order, rider))
 		},
 	}
 	for name, end := range ends {
@@ -715,7 +764,7 @@ func TestEveryEndWithoutARideReleasesTheRedemption(t *testing.T) {
 			ctx := context.Background()
 			f.promotion("WELCOME10", nil) // once per rider
 			order := newID()
-			f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+			f.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
 			if got := f.statusOf("WELCOME10", order); got != "REDEEMED" {
 				t.Fatalf("before: %s", got)
 			}
@@ -746,12 +795,12 @@ func TestEveryEndWithoutARideReleasesTheRedemption(t *testing.T) {
 func TestAReleaseIsDeduplicatedByEventIDAndAlsoWhenAnotherEventNamesTheSameOrder(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 5 })
 	order := newID()
-	f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
 
 	trip := tripCancelled(order, "rider-1")
-	if err := f.svc.onTripStatusChanged(ctx, trip); err != nil {
+	if err := f.onTripStatusChanged(ctx, trip); err != nil {
 		t.Fatal(err)
 	}
 	var releasedAt time.Time
@@ -762,9 +811,9 @@ func TestAReleaseIsDeduplicatedByEventIDAndAlsoWhenAnotherEventNamesTheSameOrder
 	// cancels just as a driver is matched: order.cancelled and the trip's CANCELLED).
 	f.now = f.now.Add(time.Hour)
 	for _, err := range []error{
-		f.svc.onTripStatusChanged(ctx, trip),
-		f.svc.onOrderCancelled(ctx, cancelled(order, "rider-1")),
-		f.svc.onNoDriverFound(ctx, noDriver(order, "rider-1")),
+		f.onTripStatusChanged(ctx, trip),
+		f.onOrderCancelled(ctx, cancelled(order, "rider-1")),
+		f.onNoDriverFound(ctx, noDriver(order, "rider-1")),
 	} {
 		if err != nil {
 			t.Fatal(err)
@@ -791,12 +840,12 @@ func TestOtherTripStatusesLeaveTheRedemptionAlone(t *testing.T) {
 	ctx := context.Background()
 	f.promotion("WELCOME10", nil)
 	order := newID()
-	f.svc.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(order, "rider-1", "WELCOME10", 10000))
 
 	for _, status := range []events.TripStatus{events.TripStatusAssigned, events.TripStatusInProgress, events.TripStatusCompleted} {
 		evt := tripCancelled(order, "rider-1")
 		evt.Status, evt.CancelledBy = status, ""
-		if err := f.svc.onTripStatusChanged(ctx, evt); err != nil {
+		if err := f.onTripStatusChanged(ctx, evt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -812,14 +861,14 @@ func TestOtherTripStatusesLeaveTheRedemptionAlone(t *testing.T) {
 func TestAnOverLimitRedemptionIsReleasedByACancelledTrip(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 1 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 1 })
 	first, second := newID(), newID()
-	f.svc.onOrderCreated(ctx, created(first, "rider-1", "WELCOME10", 10000))
-	f.svc.onOrderCreated(ctx, created(second, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(first, "rider-1", "WELCOME10", 10000))
+	f.onOrderCreated(ctx, created(second, "rider-1", "WELCOME10", 10000))
 	if got := f.statusOf("WELCOME10", second); got != "OVER_LIMIT" {
 		t.Fatalf("second = %s", got)
 	}
-	if err := f.svc.onTripStatusChanged(ctx, tripCancelled(second, "rider-1")); err != nil {
+	if err := f.onTripStatusChanged(ctx, tripCancelled(second, "rider-1")); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.statusOf("WELCOME10", second); got != "RELEASED" {
@@ -836,10 +885,10 @@ func TestAnOverLimitRedemptionIsReleasedByACancelledTrip(t *testing.T) {
 func TestATripCancellationOrNoDriverSeenBeforeTheOrderRecordsTheRedemptionAsReleased(t *testing.T) {
 	for name, end := range map[string]func(f *fixture, order string) error{
 		"trip cancelled": func(f *fixture, order string) error {
-			return f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
+			return f.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
 		},
 		"no driver": func(f *fixture, order string) error {
-			return f.svc.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
+			return f.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -849,7 +898,7 @@ func TestATripCancellationOrNoDriverSeenBeforeTheOrderRecordsTheRedemptionAsRele
 			if err := end(f, order); err != nil {
 				t.Fatal(err)
 			}
-			if err := f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)); err != nil {
+			if err := f.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.statusOf("WELCOME10", order); got != "RELEASED" {
@@ -859,7 +908,7 @@ func TestATripCancellationOrNoDriverSeenBeforeTheOrderRecordsTheRedemptionAsRele
 				t.Errorf("%d promotion.redeemed for an order that never took effect", n)
 			}
 			next := newID()
-			f.svc.onOrderCreated(context.Background(), created(next, "rider-1", "WELCOME10", 10000))
+			f.onOrderCreated(context.Background(), created(next, "rider-1", "WELCOME10", 10000))
 			if got := f.statusOf("WELCOME10", next); got != "REDEEMED" {
 				t.Errorf("next order = %s, want REDEEMED", got)
 			}
@@ -869,16 +918,16 @@ func TestATripCancellationOrNoDriverSeenBeforeTheOrderRecordsTheRedemptionAsRele
 
 func TestReleasingAndRedeemingAtTheSameTimeNeverLeavesALiveRedemptionForTheNewEvents(t *testing.T) {
 	f := newFixture(t)
-	f.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 100 })
+	f.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 100 })
 	for i := range 20 {
 		order := newID()
 		var wg sync.WaitGroup
-		wg.Go(func() { f.svc.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)) })
+		wg.Go(func() { f.onOrderCreated(context.Background(), created(order, "rider-1", "WELCOME10", 10000)) })
 		wg.Go(func() {
 			if i%2 == 0 {
-				f.svc.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
+				f.onTripStatusChanged(context.Background(), tripCancelled(order, "rider-1"))
 			} else {
-				f.svc.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
+				f.onNoDriverFound(context.Background(), noDriver(order, "rider-1"))
 			}
 		})
 		wg.Wait()
@@ -892,12 +941,12 @@ func TestReleaseEventsWithoutAnOrderIdArePermanentErrors(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	for name, err := range map[string]error{
-		"trip":      f.svc.onTripStatusChanged(ctx, tripCancelled("", "rider-1")),
-		"no driver": f.svc.onNoDriverFound(ctx, noDriver("", "rider-1")),
+		"trip":      f.onTripStatusChanged(ctx, tripCancelled("", "rider-1")),
+		"no driver": f.onNoDriverFound(ctx, noDriver("", "rider-1")),
 	} {
-		var inv *invalidEvent
+		var inv *domain.InvalidEvent
 		if !errors.As(err, &inv) {
-			t.Errorf("%s: err = %v, want an invalidEvent", name, err)
+			t.Errorf("%s: err = %v, want a domain.InvalidEvent", name, err)
 		}
 	}
 }
