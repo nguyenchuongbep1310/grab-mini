@@ -173,3 +173,22 @@ func TestAPortFailureIsReportedWithTheStepName(t *testing.T) {
 		}
 	}
 }
+
+func TestListKeepsAStepTheStoreAlreadyNamed(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("boom")
+
+	r := newRig(t)
+	r.store.fail["List"] = &StepError{Step: "read promotion", Err: boom}
+	_, err := r.svc.ListPromotions(ctx)
+	if err == nil || err.Error() != "read promotion: boom" {
+		t.Fatalf("scan failure = %v, want exactly %q", err, "read promotion: boom")
+	}
+
+	r = newRig(t)
+	r.store.fail["List"] = boom
+	_, err = r.svc.ListPromotions(ctx)
+	if err == nil || err.Error() != "list promotions: boom" {
+		t.Fatalf("plain failure = %v, want exactly %q", err, "list promotions: boom")
+	}
+}

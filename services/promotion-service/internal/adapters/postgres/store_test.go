@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"grab-mini/promotion-service/internal/app"
 	"grab-mini/promotion-service/internal/domain"
 )
 
@@ -150,5 +151,26 @@ func TestSeedDevAddsTheDemoCodesOnce(t *testing.T) {
 	p, err := NewStore(db).Find(ctx, "BIKE5K")
 	if err != nil || p.VehicleType == nil || *p.VehicleType != "BIKE" {
 		t.Fatalf("BIKE5K = %+v, %v", p, err)
+	}
+}
+
+func TestListNamesTheReadPromotionStepForAScanFailure(t *testing.T) {
+	db := testDB(t)
+	s := NewStore(db)
+	ctx := context.Background()
+	if err := s.Create(ctx, samplePromotion("SCAN"), "a"); err != nil {
+		t.Fatal(err)
+	}
+	// A NULL in a column the view scans into a non-pointer field.
+	if _, err := db.Exec(ctx, `ALTER TABLE promotions ALTER COLUMN created_by DROP NOT NULL`); err != nil {
+		t.Skip("created_by cannot be made nullable here:", err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE promotions SET created_by = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.List(ctx)
+	var se *app.StepError
+	if !errors.As(err, &se) || se.Step != "read promotion" {
+		t.Fatalf("List = %v, want a StepError named read promotion", err)
 	}
 }

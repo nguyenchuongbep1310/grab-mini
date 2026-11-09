@@ -58,6 +58,12 @@ func (s *Service) CreatePromotion(ctx context.Context, c CreatePromotionCommand)
 func (s *Service) ListPromotions(ctx context.Context) ([]PromotionView, error) {
 	sums, err := s.d.Views.List(ctx)
 	if err != nil {
+		// A row that failed to scan already names its step ("read promotion"),
+		// as the flat handler logged it; keep that label.
+		var se *StepError
+		if errors.As(err, &se) {
+			return nil, err
+		}
 		return nil, step("list promotions", err)
 	}
 	now := s.d.Now()
