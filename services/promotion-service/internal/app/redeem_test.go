@@ -203,6 +203,7 @@ func TestEventsThatCanNeverBeAppliedArePermanentErrors(t *testing.T) {
 
 func TestACodeTypedInLowerCaseIsRedeemedAgainstTheRealOne(t *testing.T) {
 	r := newEventRig(t)
+	logs := capture(t)
 	if err := r.svc.RedeemOrder(context.Background(), order(ev1, "order-1", " welcome10 ", 10000)); err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +212,9 @@ func TestACodeTypedInLowerCaseIsRedeemedAgainstTheRealOne(t *testing.T) {
 	}
 	if r.enc.events[0].Code != "WELCOME10" {
 		t.Errorf("announced code %q", r.enc.events[0].Code)
+	}
+	if logs.String() != "order order-1 redeemed WELCOME10 for 10000 VND\n" {
+		t.Errorf("log = %q", logs)
 	}
 }
 
@@ -222,7 +226,7 @@ func TestACancelledOrderIsRecordedAsReleasedWithTheApplicationClockAndNothingIsA
 		t.Fatal(err)
 	}
 	// The usage is not consulted for an order that never took effect.
-	wantCalls(t, r.db.calls, "begin", "MarkEventProcessed", "LockOrder", "FindPromotionForUpdate", "OrderWasCancelled", "InsertRedemption", "commit")
+	wantCalls(t, r.db.calls, "begin", "MarkEventProcessed", "LockOrder", "FindPromotionForUpdate", "OrderWasCancelled", "InsertRedemption", "commit", "Wake")
 	row := r.db.row("WELCOME10", "order-3")
 	if row == nil || row.StoredStatus != domain.StatusReleased || row.OverLimitReason != "" {
 		t.Fatalf("row = %+v", row)
@@ -233,8 +237,12 @@ func TestACancelledOrderIsRecordedAsReleasedWithTheApplicationClockAndNothingIsA
 	if r.clock.reads != 1 {
 		t.Errorf("clock read %d times, want once", r.clock.reads)
 	}
-	if len(r.enc.events) != 0 || len(r.db.state.outbox) != 0 || r.relay.wakes != 0 {
-		t.Errorf("announced: %d encoded, %d queued, %d wakes", len(r.enc.events), len(r.db.state.outbox), r.relay.wakes)
+	if len(r.enc.events) != 0 || len(r.db.state.outbox) != 0 {
+		t.Errorf("announced: %d encoded, %d queued", len(r.enc.events), len(r.db.state.outbox))
+	}
+	// Nothing was queued, but the relay is still woken after the commit, as the flat code did.
+	if r.relay.wakes != 1 {
+		t.Errorf("%d wakes, want 1", r.relay.wakes)
 	}
 	wantMetrics(t, r.m, "released:1")
 	if logs.String() != "order order-3 used WELCOME10 but was already cancelled: recorded as released\n" {
@@ -329,7 +337,7 @@ func TestNoCounterAndNoWakeWhenTheCommitFails(t *testing.T) {
 	})
 }
 
-func TestWakeOnlyWhenARowWasQueued(t *testing.T) {
+func TestWakeAfterEveryRecordingCommit(t *testing.T) {
 	r := newEventRig(t)
 	capture(t)
 	ctx := context.Background()
@@ -349,7 +357,10 @@ func TestWakeOnlyWhenARowWasQueued(t *testing.T) {
 		}, 1},
 		{"recorded as released", func() error {
 			return r.svc.RedeemOrder(ctx, order("55555555-5555-4555-8555-555555555555", "order-2", "WELCOME10", 10000))
-		}, 1},
+		}, 2},
+		{"recorded as released, redelivered", func() error {
+			return r.svc.RedeemOrder(ctx, order("55555555-5555-4555-8555-555555555555", "order-2", "WELCOME10", 10000))
+		}, 2},
 	}
 	for _, s := range steps {
 		if err := s.run(); err != nil {

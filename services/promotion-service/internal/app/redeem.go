@@ -114,7 +114,9 @@ func (s *Service) RedeemOrder(ctx context.Context, c RedeemOrderCommand) error {
 		return err
 	}
 
-	if decision.Announced && s.d.Relay != nil {
+	// Woken after every commit that recorded a redemption, even one that queued
+	// nothing (an order already cancelled), as the flat code did.
+	if s.d.Relay != nil {
 		s.d.Relay.Wake()
 	}
 	switch {

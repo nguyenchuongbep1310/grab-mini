@@ -14,7 +14,7 @@ type Deps struct {
 	Metrics Metrics
 	UoW     UnitOfWork
 	Encoder Encoder
-	// Relay is woken after a commit that queued an outbox row. It may be nil;
+	// Relay is woken after every commit that recorded a redemption. It may be nil;
 	// never set it from a possibly-nil pointer (a typed nil is not nil here).
 	Relay Waker
 	Now   func() time.Time // nil: time.Now

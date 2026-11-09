@@ -121,19 +121,21 @@ func TestReleaseEventsWithoutAnOrderIdArePermanentErrors(t *testing.T) {
 		"order.no_driver_found": func(s *Service) error { return s.OnNoDriverFound(ctx, ReleaseCommand{EventID: evRelease}) },
 	} {
 		r := newEventRig(t)
+		logs := capture(t)
 		err := run(r.svc)
 		var inv *domain.InvalidEvent
 		if !errors.As(err, &inv) || !inv.Permanent() || inv.Reason != topic+" without orderId" {
 			t.Errorf("%s: err = %v", topic, err)
 		}
-		if len(r.db.calls) != 0 {
-			t.Errorf("%s: calls %v", topic, r.db.calls)
+		if len(r.db.calls) != 0 || logs.Len() != 0 || len(r.m.events) != 0 {
+			t.Errorf("%s: calls %v, log %q, metrics %v", topic, r.db.calls, logs, r.m.events)
 		}
 	}
 }
 
 func TestAReleaseWithABadEventIdIsPermanentAndLeavesNoMarker(t *testing.T) {
 	r := newEventRig(t)
+	logs := capture(t)
 	r.db.redeemed("WELCOME10", "order-1")
 	err := r.svc.OnNoDriverFound(context.Background(), ReleaseCommand{EventID: "nope", OrderID: "order-1"})
 	var inv *domain.InvalidEvent
@@ -143,6 +145,10 @@ func TestAReleaseWithABadEventIdIsPermanentAndLeavesNoMarker(t *testing.T) {
 	wantCalls(t, r.db.calls, "begin", "rollback")
 	if len(r.db.state.markers) != 0 || r.db.row("WELCOME10", "order-1").StoredStatus != domain.StatusRedeemed {
 		t.Errorf("state = %+v", r.db.state)
+	}
+	wantMetrics(t, r.m)
+	if logs.Len() != 0 || r.relay.wakes != 0 {
+		t.Errorf("log %q, %d wakes", logs, r.relay.wakes)
 	}
 }
 
