@@ -88,12 +88,15 @@ func (s *Service) CreateOrder(ctx context.Context, cmd CreateOrderCommand) (Crea
 			}
 			return errReplayed
 		}
-		if err := s.prepare(ctx, riderID, req, b); err != nil {
+		// Whatever fails from here, the claims go back while the transaction
+		// (and with it the key's lock) is still open: Do rolls back before it
+		// returns, and a waiting retry with this key must not find the quote
+		// still claimed. The flags are cleared so the deferred release in
+		// CreateOrder does not give them back twice.
+		if err := s.settle(ctx, tx, riderID, key, fp, req, b, &saveErr); err != nil {
+			s.release(ctx, b)
+			b.priced, b.promoApplied = false, false
 			return err
-		}
-		idem := &domain.KeyRecord{Key: key, Fingerprint: fp, OrderID: b.order.ID, Status: statusCreated, Body: b.body}
-		if saveErr = s.insert(ctx, tx, b, riderID, idem); saveErr != nil {
-			return saveErr
 		}
 		inserted = true
 		return nil
@@ -121,6 +124,17 @@ func (s *Service) CreateOrder(ctx context.Context, cmd CreateOrderCommand) (Crea
 	}
 	log.Printf("failed to save order: %v", err)
 	return CreateOrderResult{}, ErrInternal
+}
+
+// settle prices and prepares the booking and inserts it, with the key's
+// record, into tx. A failed insert is also stored in saveErr.
+func (s *Service) settle(ctx context.Context, tx Tx, riderID, key, fp string, req domain.BookingRequest, b *booking, saveErr *error) error {
+	if err := s.prepare(ctx, riderID, req, b); err != nil {
+		return err
+	}
+	idem := &domain.KeyRecord{Key: key, Fingerprint: fp, OrderID: b.order.ID, Status: statusCreated, Body: b.body}
+	*saveErr = s.insert(ctx, tx, b, riderID, idem)
+	return *saveErr
 }
 
 // prepare settles the price and the promo, and encodes the event and the

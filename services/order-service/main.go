@@ -100,7 +100,6 @@ func main() {
 		Promos:  &app.PromoChecker{Signer: promoSigner, Claims: claims, Now: time.Now, Metrics: m},
 		Relay:   relay,
 		Metrics: m,
-		Now:     time.Now,
 	})
 
 	var background sync.WaitGroup

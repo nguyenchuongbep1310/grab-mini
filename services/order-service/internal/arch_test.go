@@ -23,10 +23,13 @@ func TestImportsFollowTheDependencyRule(t *testing.T) {
 	}
 	rules := archtest.Default(module)
 	// The quote and promo decision logic lives in app and uses *surge.Signer,
-	// surge.Quote and *promo.Signer directly. Both packages are pure (HMAC,
-	// encoding and maths on crypto/*, encoding/*, math and strings; only main
-	// calls their SignerFromEnv), so they are allowed here and nothing else
-	// from services/pkg is (plan decision 1).
+	// surge.Quote and *promo.Signer directly. Those packages are not
+	// import-pure (surge imports os, strconv, time, fmt and pkg/secret; promo
+	// imports pkg/secret, which imports os), so app is allowed to import them
+	// only because it calls their pure functions (surge.Quote, Price, CellID,
+	// BaseFare, HaversineKm, NewSigner; promo.NewSigner and Signer.Verify). The environment-reading ones, SignerFromEnv and CellDegrees,
+	// are called only from main. archtest checks direct imports only, so that
+	// is a review-time rule (plan decision 1).
 	rules.AppAllowed = append(rules.AppAllowed, "grab-mini/pkg/surge", "grab-mini/pkg/promo")
 	rules.Test(t, ".")
 }

@@ -1,7 +1,5 @@
 package app
 
-import "time"
-
 // Service is the set of order use cases. It holds the ports and no state of
 // its own.
 type Service struct {
@@ -15,7 +13,6 @@ type Service struct {
 	promos   *PromoChecker
 	relay    Waker
 	metrics  Metrics
-	now      func() time.Time
 }
 
 // Deps are what New needs. Every field is required.
@@ -30,12 +27,11 @@ type Deps struct {
 	Promos   *PromoChecker
 	Relay    Waker
 	Metrics  Metrics
-	Now      func() time.Time
 }
 
 func New(d Deps) *Service {
 	return &Service{
 		orders: d.Orders, keys: d.Keys, outcomes: d.Outcomes, uow: d.UoW, enc: d.Encoder, receipt: d.Receipt,
-		pricer: d.Pricer, promos: d.Promos, relay: d.Relay, metrics: d.Metrics, now: d.Now,
+		pricer: d.Pricer, promos: d.Promos, relay: d.Relay, metrics: d.Metrics,
 	}
 }

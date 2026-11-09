@@ -23,6 +23,7 @@ type fakeClaims struct {
 	used     map[string]bool
 	ttls     map[string]time.Duration
 	released []string
+	rec      *recorder // when set, Release is logged as "release"
 	down     bool
 }
 
@@ -47,6 +48,9 @@ func (f *fakeClaims) Release(_ context.Context, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.released = append(f.released, id)
+	if f.rec != nil {
+		f.rec.add("release")
+	}
 	delete(f.used, id)
 }
 
@@ -423,6 +427,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	rec := &recorder{}
 	m := newFakeMetrics()
 	claims := newFakeClaims()
+	claims.rec = rec
 	now := func() time.Time { return t0 }
 	e := &testEnv{
 		db: newFakeDB(rec), enc: &fakeEncoder{rec: rec}, relay: &fakeWaker{rec: rec}, metrics: m, claims: claims, rec: rec,
@@ -431,7 +436,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	e.svc = New(Deps{
 		Orders: e.db, Keys: e.db, Outcomes: e.db, UoW: e.db, Encoder: e.enc, Receipt: testReceipt,
-		Pricer: e.pricer, Promos: e.promos, Relay: e.relay, Metrics: m, Now: now,
+		Pricer: e.pricer, Promos: e.promos, Relay: e.relay, Metrics: m,
 	})
 	return e
 }

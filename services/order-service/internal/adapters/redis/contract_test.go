@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"math"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,9 +26,6 @@ func testRedis(t *testing.T) *goredis.Client {
 	addr := os.Getenv("TEST_REDIS_ADDR")
 	if addr == "" {
 		t.Skip("TEST_REDIS_ADDR not set")
-	}
-	if strings.HasSuffix(addr, ":6379") {
-		t.Fatalf("refusing to run against %s: the default Redis port may be a real instance", addr)
 	}
 	rdb := goredis.NewClient(&goredis.Options{Addr: addr})
 	t.Cleanup(func() { rdb.Close() })

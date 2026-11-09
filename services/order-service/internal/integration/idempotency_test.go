@@ -111,7 +111,7 @@ func newAPI(t *testing.T) *api {
 	svc := app.New(app.Deps{
 		Orders: store, Keys: store, Outcomes: store, UoW: uow,
 		Encoder: kafkaadapter.NewEncoder(codec), Receipt: httpapi.ReceiptEncoder(),
-		Pricer: p, Promos: pc, Relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), Metrics: m, Now: time.Now,
+		Pricer: p, Promos: pc, Relay: outbox.NewRelay(db, &recordingWriter{}, outboxSource), Metrics: m,
 	})
 	issuer, verifier := authtest.Pair(t, time.Hour)
 	return &api{t: t, db: db, store: store, uow: uow, svc: svc, pricer: p, promos: pc, codec: codec,

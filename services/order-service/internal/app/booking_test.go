@@ -311,3 +311,33 @@ func quotedPromoRequest(e *testEnv) (req domain.BookingRequest, quoteID, promoID
 	req.QuoteID, req.PromoToken = q.QuoteID, issue(e.promos, "rider-1", roundVND(q.Price), "CAR", 5000, t0)
 	return req, q.QuoteID, "promo:" + req.PromoToken
 }
+
+// A failed keyed booking gives its claims back while the transaction, and with
+// it the key's lock, is still open: after the rollback a waiting retry with the
+// same key could claim the quote first and be refused as reused.
+func TestWithAKeyTheClaimsAreReleasedBeforeTheRollback(t *testing.T) {
+	for name, breakIt := range map[string]func(*testEnv){
+		"InsertOrder fails": func(e *testEnv) { e.db.failInsert = errors.New("db down") },
+		"encoder fails":     func(e *testEnv) { e.enc.failCreated = errors.New("registry down") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEnv(t)
+			req := tripRequest()
+			q := quoteFor(e.pricer, "rider-1", req, 1.4, t0.Add(-10*time.Second))
+			req.QuoteID = q.QuoteID
+			breakIt(e)
+
+			if _, err := e.book("rider-1", "k1", req); err == nil {
+				t.Fatal("want an error")
+			}
+			calls := e.rec.list()
+			rel, rb := slices.Index(calls, "release"), slices.Index(calls, "rollback")
+			if rel < 0 || rb < 0 || rel > rb {
+				t.Errorf("release must come before rollback, calls = %v", calls)
+			}
+			if n := slices.Index(e.claims.released, q.QuoteID); n < 0 || len(e.claims.released) != 1 {
+				t.Errorf("the quote must be released exactly once, released = %v", e.claims.released)
+			}
+		})
+	}
+}
