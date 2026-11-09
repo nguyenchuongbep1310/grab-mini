@@ -119,7 +119,8 @@ func goldenService(t *testing.T, closed bool) *service {
 	return svc
 }
 
-// inUTC makes the process zone UTC for the test: pgx hands timestamps back in
+// inUTC mutates the global time.Local, so it must not be combined with t.Parallel.
+// It makes the process zone UTC for the test: pgx hands timestamps back in
 // time.Local, so the admin views would otherwise follow the machine's TZ.
 func inUTC(t *testing.T) {
 	t.Helper()
@@ -150,6 +151,9 @@ func TestErrorResponsesAreStable(t *testing.T) {
 		{name: "validate price 1e13", method: "GET", path: v + "code=WELCOME10&price=1e13", role: "rider", want: exp{400, "application/json", "{\"code\":\"invalid_request\",\"error\":\"price must be above 0 VND\"}\n"}},
 		{name: "validate vehicle car lower", method: "GET", path: v + "code=WELCOME10&price=87000&vehicleType=car", role: "rider", want: exp{400, "application/json", "{\"code\":\"invalid_request\",\"error\":\"vehicleType must be CAR or BIKE\"}\n"}},
 		{name: "validate vehicle TRUCK", method: "GET", path: v + "code=WELCOME10&price=87000&vehicleType=TRUCK", role: "rider", want: exp{400, "application/json", "{\"code\":\"invalid_request\",\"error\":\"vehicleType must be CAR or BIKE\"}\n"}},
+		{name: "validate order code before price", method: "GET", path: v + "code=ab&price=abc", role: "rider", want: exp{404, "application/json", "{\"code\":\"not_found\",\"error\":\"no such promotion code\"}\n"}},
+		{name: "validate order price before vehicle", method: "GET", path: v + "code=WELCOME10&price=abc&vehicleType=TRUCK", role: "rider", want: exp{400, "application/json", "{\"code\":\"invalid_request\",\"error\":\"price must be a number of VND\"}\n"}},
+		{name: "validate order code before vehicle", method: "GET", path: v + "code=ab&price=87000&vehicleType=TRUCK", role: "rider", want: exp{404, "application/json", "{\"code\":\"not_found\",\"error\":\"no such promotion code\"}\n"}},
 
 		{name: "create no token", method: "POST", path: "/promotions", body: `{` + validPromo + `}`, want: exp{401, "application/json", "{\"error\":\"missing bearer token\"}\n"}},
 		{name: "create rider token", method: "POST", path: "/promotions", role: "rider", body: `{` + validPromo + `}`, want: exp{403, "application/json", "{\"error\":\"this role can't do that\"}\n"}},
@@ -201,6 +205,7 @@ func TestSuccessBodiesAreStable(t *testing.T) {
 		{step: step{name: "list empty", method: "GET", path: "/promotions", role: "admin", want: exp{200, "application/json", "{\"promotions\":[]}\n"}}},
 		{step: step{name: "validate ok", method: "GET", path: "/promotions/validate?code=WELCOME10&price=87000&vehicleType=CAR", role: "rider", want: exp{200, "application/json", "{\"code\":\"WELCOME10\",\"currency\":\"VND\",\"discount\":8700,\"expiresAt\":\"2026-06-01T12:10:00Z\",\"finalPrice\":78300,\"price\":87000,\"promoToken\":\"eyJjIjoiV0VMQ09NRTEwIiwiciI6InJpZGVyLTEiLCJwIjo4NzAwMCwidiI6IkNBUiIsImQiOjg3MDAsImUiOjE3ODAzMTU4MDB9.JA1P5ggK8q1XKiaABo9u341UMmCVpQldBVdshg2NfXk\"}\n"}},
 			do: func() { f.promotion("WELCOME10", nil) }},
+		// Reuses the first row's promoToken on purpose: default CAR vehicle, and 87000.4 rounds to 87000.
 		{step: step{name: "validate ok lower case code no vehicle", method: "GET", path: "/promotions/validate?code=%20welcome10%20&price=87000.4", role: "rider", want: exp{200, "application/json", "{\"code\":\"WELCOME10\",\"currency\":\"VND\",\"discount\":8700,\"expiresAt\":\"2026-06-01T12:10:00Z\",\"finalPrice\":78300,\"price\":87000,\"promoToken\":\"eyJjIjoiV0VMQ09NRTEwIiwiciI6InJpZGVyLTEiLCJwIjo4NzAwMCwidiI6IkNBUiIsImQiOjg3MDAsImUiOjE3ODAzMTU4MDB9.JA1P5ggK8q1XKiaABo9u341UMmCVpQldBVdshg2NfXk\"}\n"}}},
 		{step: step{name: "create 201", method: "POST", path: "/promotions", role: "admin",
 			body: `{"code":" summer20 ","kind":"percent","value":20,"maxDiscount":30000,"minFare":50000,"vehicleType":"CAR","validTo":"2026-06-04T12:00:00Z","usageLimit":100,"perRiderLimit":2}`, want: exp{201, "application/json", "{\"code\":\"SUMMER20\",\"kind\":\"PERCENT\",\"value\":20,\"maxDiscount\":30000,\"minFare\":50000,\"vehicleType\":\"CAR\",\"validFrom\":\"2026-06-01T12:00:00Z\",\"validTo\":\"2026-06-04T12:00:00Z\",\"usageLimit\":100,\"perRiderLimit\":2,\"disabledAt\":null,\"status\":\"active\",\"redeemed\":0,\"overLimit\":0,\"createdBy\":\"admin-1\",\"createdAt\":\"<ts>\"}\n"}}, mask: true},
