@@ -93,6 +93,37 @@ func TestEveryEndWithoutARideReleasesTheRedemption(t *testing.T) {
 	}
 }
 
+// A release seen before its order.created releases nothing: it only remembers
+// the cancellation, and logs and counts nothing (the flat code's golden log
+// test pinned the empty log for order.cancelled; the trip and no-driver
+// events share the path).
+func TestAReleaseThatReleasesNothingLogsNothing(t *testing.T) {
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		run func(*Service, context.Context, ReleaseCommand) error
+		cmd ReleaseCommand
+	}{
+		"order cancelled": {(*Service).OnOrderCancelled, ReleaseCommand{EventID: evRelease, OrderID: "order-3"}},
+		"trip cancelled":  {(*Service).OnTripStatusChanged, ReleaseCommand{EventID: evRelease, OrderID: "order-3", Status: domain.TripStatusCancelled}},
+		"no driver":       {(*Service).OnNoDriverFound, ReleaseCommand{EventID: evRelease, OrderID: "order-3"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newEventRig(t)
+			logs := capture(t)
+			if err := c.run(r.svc, ctx, c.cmd); err != nil {
+				t.Fatal(err)
+			}
+			if !r.db.state.cancelled["order-3"] {
+				t.Fatal("order-3 not remembered as cancelled")
+			}
+			if logs.String() != "" {
+				t.Errorf("log = %q, want nothing", logs)
+			}
+			wantMetrics(t, r.m)
+		})
+	}
+}
+
 func TestOtherTripStatusesLeaveTheRedemptionAlone(t *testing.T) {
 	r := newEventRig(t)
 	logs := capture(t)

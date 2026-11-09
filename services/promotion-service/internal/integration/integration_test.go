@@ -90,7 +90,7 @@ func (f *fixture) wire(enc app.Encoder, relay app.Waker, dec kafkaadapter.Decode
 		Views:   store,
 		Tokens:  promotoken.New(f.signer),
 		Metrics: promometrics.New(),
-		UoW:     postgres.NewUnitOfWork(f.db, "promotion-service"),
+		UoW:     postgres.NewUnitOfWork(f.db, "promotion-service"), // must equal outboxSource in main.go
 		Encoder: enc,
 		Relay:   relay,
 		Now:     func() time.Time { return f.now },

@@ -134,7 +134,7 @@ func newKafkaFixture(t *testing.T) *kafkaFixture {
 	codec := eventcodec.New(sharedRegistryURL())
 	relayWriter := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll})
 	t.Cleanup(func() { relayWriter.Close() })
-	relay := outbox.NewRelay(f.db, relayWriter, "promotion-service")
+	relay := outbox.NewRelay(f.db, relayWriter, "promotion-service") // must equal outboxSource in main.go
 	// The Avro codec on both sides and a real relay, as main.go wires them.
 	f.wire(kafkaadapter.NewEncoder(codec), relay, codec)
 
