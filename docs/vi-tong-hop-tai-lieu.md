@@ -8,6 +8,7 @@ Toàn bộ tài liệu gốc của dự án viết bằng **tiếng Anh**. File 
 |---|---|
 | Hiểu nhanh dự án là gì | [README.md](../README.md) |
 | Chạy dự án và quan sát Kafka | [guide.md](guide.md) |
+| Học system design qua code: dòng nào, trade-off gì | [vi-huong-dan-hoc-system-design.md](vi-huong-dan-hoc-system-design.md) |
 | Hiểu vì sao thiết kế như vậy (chuẩn bị phỏng vấn) | [adr/](adr/README.md), rồi [scaling.md](scaling.md) và [performance.md](performance.md) |
 | Hiểu đặc tả gốc | [specs/ride-booking-mini/](../specs/ride-booking-mini) |
 | Vận hành, xử lý sự cố | [runbook.md](runbook.md), [disaster-recovery.md](disaster-recovery.md) |
@@ -46,6 +47,8 @@ Toàn bộ tài liệu gốc của dự án viết bằng **tiếng Anh**. File 
 **`SECURITY-REVIEW.md`** (đã bị `.gitignore`, chỉ có trên máy bạn): báo cáo rà soát bảo mật ngày 2026-10-25 do AI soạn, chỉ đọc mã, không kiểm thử động. Chính file này ghi là cần người kiểm lại trước khi tin.
 
 **[vi-tong-hop-tai-lieu.md](vi-tong-hop-tai-lieu.md)**: chính file này.
+
+**[vi-huong-dan-hoc-system-design.md](vi-huong-dan-hoc-system-design.md)**: lộ trình học, lần theo một chuyến đi qua code, và từng khái niệm system design kèm file:dòng và trade-off cụ thể.
 
 ### Thư mục `docs/adr/` (ADR = bản ghi quyết định kiến trúc)
 
