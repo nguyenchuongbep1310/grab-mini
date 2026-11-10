@@ -7,7 +7,7 @@ Toàn bộ tài liệu gốc của dự án viết bằng **tiếng Anh**. File 
 | Bạn muốn | Đọc |
 |---|---|
 | Hiểu nhanh dự án là gì | [README.md](../README.md) |
-| Chạy dự án và quan sát Kafka | [guide.md](guide.md) |
+| Chạy dự án và quan sát Kafka | [guide.md](guide.md), hoặc bản tiếng Việt [vi-guide.md](vi-guide.md) |
 | Học system design qua code: dòng nào, trade-off gì | [vi-huong-dan-hoc-system-design.md](vi-huong-dan-hoc-system-design.md) |
 | Hiểu vì sao thiết kế như vậy (chuẩn bị phỏng vấn) | [adr/](adr/README.md), rồi [scaling.md](scaling.md) và [performance.md](performance.md) |
 | Hiểu đặc tả gốc | [specs/ride-booking-mini/](../specs/ride-booking-mini) |
