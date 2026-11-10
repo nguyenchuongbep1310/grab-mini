@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"bytes"
@@ -21,10 +21,18 @@ import (
 
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
+	httpadapter "grab-mini/profile-service/internal/adapters/http"
+	kafkaadapter "grab-mini/profile-service/internal/adapters/kafka"
+	appmetrics "grab-mini/profile-service/internal/adapters/metrics"
+	"grab-mini/profile-service/internal/adapters/postgres"
+	"grab-mini/profile-service/internal/app"
 )
 
-// These tests need Postgres: set TEST_DATABASE_URL to a throwaway database (they
-// truncate the profile tables and delete this service's outbox rows).
+// These tests need Postgres: set TEST_DATABASE_URL. Each test gets a database of its own
+// (testdb_test.go), with the service's real migrations.
+
+// outboxSource names this service in the outbox, as main does.
+const outboxSource = "profile-service"
 
 // jsonEncoder stands in for the Avro codec: the tests read back what was queued.
 type jsonEncoder struct{}
@@ -37,44 +45,71 @@ func (failingEncoder) Encode(context.Context, string, any) ([]byte, error) {
 	return nil, fmt.Errorf("schema registry down")
 }
 
+// fixture is the service wired as main wires it, over the test's own database, with a
+// clock the test moves (f.now), no relay and no public rate limit unless a test sets them.
+// The use* methods change one dependency and rebuild the service and the routes.
 type fixture struct {
-	t      *testing.T
-	db     *pgxpool.Pool
-	svc    *service
-	issuer *auth.Issuer
-	api    http.Handler
-	now    time.Time
+	t        *testing.T
+	db       *pgxpool.Pool
+	issuer   *auth.Issuer
+	verifier *auth.Verifier
+	api      http.Handler
+	now      time.Time
+
+	enc     kafkaadapter.Codec
+	relay   app.Waker // nil unless a test supplies a real relay (never a nil *outbox.Relay)
+	limiter *auth.Limiter
+	clock   func() time.Time // nil: the closure over f.now
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	db, err := connectDB(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(db.Close)
-	if _, err := db.Exec(ctx, `
-		TRUNCATE rider_profiles, driver_profiles;
-		DELETE FROM outbox WHERE source = 'profile-service'`); err != nil {
-		t.Fatal(err)
-	}
+	return newFixtureOn(t, testDB(t))
+}
+
+// newFixtureOn builds the fixture over db, which may be a pool that is already closed.
+func newFixtureOn(t *testing.T, db *pgxpool.Pool) *fixture {
+	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	issuer, err := auth.NewIssuer(priv, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := newService(db, jsonEncoder{}, nil, Env{PublicRatePerMinute: 6000})
-	f := &fixture{t: t, db: db, svc: svc, issuer: issuer, now: time.Now().UTC().Truncate(time.Second)}
-	svc.now = func() time.Time { return f.now }
-	svc.publicLimiter = nil
-	f.api = svc.routes(auth.NewVerifier(auth.NewKeySet(pub)))
+	f := &fixture{
+		t: t, db: db, issuer: issuer, verifier: auth.NewVerifier(auth.NewKeySet(pub)),
+		now: time.Now().UTC().Truncate(time.Second), enc: jsonEncoder{},
+	}
+	f.rebuild()
 	return f
 }
+
+// rebuild wires app.Deps and the HTTP API again from the fixture's fields.
+func (f *fixture) rebuild() {
+	now := f.clock
+	if now == nil {
+		now = func() time.Time { return f.now }
+	}
+	store := postgres.NewStore(f.db)
+	m := appmetrics.New()
+	svc := app.New(app.Deps{
+		Riders:  store,
+		Drivers: store,
+		Queue:   store,
+		Resync:  store,
+		Locker:  postgres.NewResyncLocker(f.db),
+		UoW:     postgres.NewUnitOfWork(f.db, outboxSource),
+		Encoder: kafkaadapter.NewEncoder(f.enc),
+		Relay:   f.relay,
+		Metrics: m,
+		Now:     now,
+	})
+	f.api = httpadapter.NewAPI(svc, f.verifier, f.limiter, m).Routes()
+}
+
+func (f *fixture) useEncoder(c kafkaadapter.Codec) { f.enc = c; f.rebuild() }
+func (f *fixture) useRelay(r app.Waker)            { f.relay = r; f.rebuild() }
+func (f *fixture) useLimiter(l *auth.Limiter)      { f.limiter = l; f.rebuild() }
+func (f *fixture) useClock(c func() time.Time)     { f.clock = c; f.rebuild() }
 
 type result struct {
 	status int
@@ -466,12 +501,12 @@ func TestEveryDecisionIsOneEventInTheSameTransaction(t *testing.T) {
 func TestTheEventIsNotPublishedWhenItCannotBeQueued(t *testing.T) {
 	f := newFixture(t)
 	f.applied("driver-1")
-	f.svc.enc = failingEncoder{}
+	f.useEncoder(failingEncoder{})
 	wantStatus(t, "approve with the registry down", f.decide("approve", "driver-1", ""), 500)
 	if got := f.statusOf("driver-1"); got != "PENDING" {
 		t.Errorf("status %s: a decision whose event could not be queued must not be saved", got)
 	}
-	f.svc.enc = jsonEncoder{}
+	f.useEncoder(jsonEncoder{})
 	wantStatus(t, "approve again", f.decide("approve", "driver-1", ""), 200)
 	if n := len(f.queued()); n != 1 {
 		t.Errorf("%d events, want 1", n)
@@ -790,7 +825,7 @@ func TestPublicViewShowsOnlyAnApprovedDriversVehicle(t *testing.T) {
 func TestPublicLookupsAreRateLimitedPerCaller(t *testing.T) {
 	f := newFixture(t)
 	f.approved("driver-1")
-	f.svc.publicLimiter = auth.NewLimiter(1.0/60, 3) // a burst of 3, then one a minute
+	f.useLimiter(auth.NewLimiter(1.0/60, 3)) // a burst of 3, then one a minute
 	got := map[int]int{}
 	for i := 0; i < 6; i++ {
 		r := f.call("GET", "/drivers/driver-1/public", auth.Rider, "rider-1", nil)
@@ -905,11 +940,11 @@ func TestPersonalDataIsNeverLogged(t *testing.T) {
 	f.decide("suspend", "driver-1", "reason text is fine")
 	f.call("GET", "/driver-applications?status=SUSPENDED", auth.Admin, "ops-1", nil)
 	f.putDriver("driver-2", map[string]any{"name": secrets[7], "plate": "bad#plate"}) // refused
-	f.svc.enc = failingEncoder{}
+	f.useEncoder(failingEncoder{})
 	f.putDriver("driver-3", body)
 	f.apply("driver-3")
 	f.decide("approve", "driver-3", "")
-	f.svc.enc = jsonEncoder{}
+	f.useEncoder(jsonEncoder{})
 
 	logged := buf.String()
 	if strings.TrimSpace(logged) == "" {
@@ -930,7 +965,7 @@ func TestPersonalDataIsNeverLogged(t *testing.T) {
 func TestSeedDevAddsApprovedProfilesOnceAndPublishesNothing(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
-	d, r, err := seedDev(ctx, f.db)
+	d, r, err := postgres.SeedDev(ctx, f.db)
 	if err != nil || d != 5 || r != 3 {
 		t.Fatalf("seedDev = %d, %d, %v; want 5, 3", d, r, err)
 	}
@@ -952,7 +987,7 @@ func TestSeedDevAddsApprovedProfilesOnceAndPublishesNothing(t *testing.T) {
 	// A second run adds nothing and undoes nothing.
 	wantStatus(t, "suspend a seeded driver", f.decide("suspend", "driver-2", "test"), 200)
 	f.call("PUT", "/riders/rider-1", auth.Rider, "rider-1", map[string]string{"name": "Changed"})
-	d, r, err = seedDev(ctx, f.db)
+	d, r, err = postgres.SeedDev(ctx, f.db)
 	if err != nil || d != 0 || r != 0 {
 		t.Errorf("second seedDev = %d, %d, %v; want 0, 0", d, r, err)
 	}

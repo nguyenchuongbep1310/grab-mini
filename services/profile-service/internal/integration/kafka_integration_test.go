@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -100,7 +100,7 @@ func TestKafkaDecisionsAreAnnouncedAsAvro(t *testing.T) {
 	}
 	f := newFixture(t)
 	f.now = time.Now().UTC()
-	f.svc.now = time.Now
+	f.useClock(time.Now)
 	createTopic(t, brokers, events.TopicDriverApplicationReviewed)
 
 	registry := httptest.NewServer(&fakeRegistry{})
@@ -109,7 +109,8 @@ func TestKafkaDecisionsAreAnnouncedAsAvro(t *testing.T) {
 	relayWriter := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll})
 	defer relayWriter.Close()
 	relay := outbox.NewRelay(f.db, relayWriter, outboxSource)
-	f.svc.enc, f.svc.relay = codec, relay
+	f.useEncoder(codec)
+	f.useRelay(relay)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup

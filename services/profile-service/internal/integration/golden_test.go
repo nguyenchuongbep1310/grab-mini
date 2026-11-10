@@ -1,20 +1,21 @@
-package main
+package integration
 
-// Characterisation ("golden") tests for the flat profile-service, written before the Clean
-// Architecture migration. Every expectation below was recorded by running the unchanged
-// code, not derived from the specification: the point is to prove the migration changes no
-// byte a client, an operator or Matching can see. They go through the real HTTP handlers
-// (routes) and, where a row needs state, the real Postgres in TEST_DATABASE_URL, exactly
-// like integration_test.go. Rows that never reach the database use a pool that is closed
-// at once, so a row that unexpectedly reaches it answers 500 and fails loudly.
+// Characterisation ("golden") tests, written against the flat profile-service before the
+// Clean Architecture migration and moved here with it. Every expectation below was recorded
+// by running the unchanged flat code, not derived from the specification: the point is to
+// prove the migration changes no byte a client, an operator or Matching can see. They go
+// through the HTTP adapter wired as main wires it and, where a row needs state, the real
+// Postgres adapters on the test's own database, exactly like integration_test.go. Rows that
+// never reach the database use a pool that is closed at once, so a row that unexpectedly
+// reaches it answers 500 and fails loudly.
 //
-// This file is deleted when the migrated packages carry the same rows (see the plan).
+// adapters/http keeps the same tables over in-memory fakes; this copy is what proves the
+// fakes answer what Postgres answers (success bodies, the closed-pool 500 lines) and is the
+// home of the counter (real registry), outbox and log rows.
 
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -29,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"grab-mini/pkg/auth"
+	"grab-mini/profile-service/internal/adapters/postgres"
 )
 
 // goldenNow is the frozen clock of every golden test that touches the database.
@@ -48,21 +50,13 @@ func gFix(t *testing.T) *fixture {
 // before the database never notice, and the ones that reach it answer 500 "closed pool".
 func gOffline(t *testing.T) *fixture {
 	t.Helper()
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	issuer, err := auth.NewIssuer(priv, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	db, err := pgxpool.New(context.Background(), "postgres://nobody:nobody@127.0.0.1:1/none")
 	if err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
-	svc := newService(db, jsonEncoder{}, nil, Env{PublicRatePerMinute: 6000})
-	f := &fixture{t: t, db: db, svc: svc, issuer: issuer, now: goldenNow}
-	svc.now = func() time.Time { return f.now }
-	svc.publicLimiter = nil
-	f.api = svc.routes(auth.NewVerifier(auth.NewKeySet(pub)))
+	f := newFixtureOn(t, db)
+	f.now = goldenNow
 	return f
 }
 
@@ -354,11 +348,11 @@ func TestErrorResponsesAreStable(t *testing.T) {
 			if err != nil {
 				f.t.Fatal(err)
 			}
-			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, resyncLockKey); err != nil {
+			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, postgres.ResyncLockKey); err != nil {
 				f.t.Fatal(err)
 			}
 			f.t.Cleanup(func() {
-				c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, resyncLockKey)
+				c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, postgres.ResyncLockKey)
 				c.Release()
 			})
 		}),
@@ -381,7 +375,7 @@ func TestErrorResponsesAreStable(t *testing.T) {
 					row.setup(f)
 				}
 				if row.limiter {
-					f.svc.publicLimiter = auth.NewLimiter(1.0/60, 3)
+					f.useLimiter(auth.NewLimiter(1.0/60, 3))
 					for i := 0; i < 3; i++ {
 						wantStatus(t, "burst", f.call(row.method, row.path, row.role, row.sub, row.body), 200)
 					}
@@ -434,7 +428,7 @@ func TestSuccessBodiesAreStable(t *testing.T) {
 		gEq(t, name+" Content-Type", res.header.Get("Content-Type"), gJSON)
 		gEq(t, name+" Cache-Control", res.header.Get("Cache-Control"), gNoStore)
 		gEq(t, name, res.raw, want)
-		// Times are UTC (scanDriver and loadRider convert), whatever the session's zone.
+		// Times are UTC (the Postgres adapter converts), whatever the session's zone.
 		if regexp.MustCompile(`T[0-9:.]+[+-][0-9]{2}:[0-9]{2}"`).MatchString(res.raw) {
 			t.Errorf("%s: a time with a numeric offset, want Z: %s", name, res.raw)
 		}
@@ -546,17 +540,17 @@ func TestLogLinesAreStable(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer c.Release()
-			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, resyncLockKey); err != nil {
+			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, postgres.ResyncLockKey); err != nil {
 				t.Fatal(err)
 			}
 			f.resync(nil)
-			c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, resyncLockKey)
+			c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, postgres.ResyncLockKey)
 		}, ""},
-		{"l resync that fails in the encoder logs only the 500", func() { f.svc.enc = failingEncoder{}; f.resync(nil); f.svc.enc = jsonEncoder{} }, "resync: encoding the review result: schema registry down\n"},
+		{"l resync that fails in the encoder logs only the 500", func() { f.useEncoder(failingEncoder{}); f.resync(nil); f.useEncoder(jsonEncoder{}) }, "resync: encoding the review result: schema registry down\n"},
 		{"l approve that fails in the encoder logs only the 500", func() {
-			f.svc.enc = failingEncoder{}
+			f.useEncoder(failingEncoder{})
 			f.decide("approve", "driver-3", "")
-			f.svc.enc = jsonEncoder{}
+			f.useEncoder(jsonEncoder{})
 		}, "approve driver driver-3: encoding the review result: schema registry down\n"},
 	}
 	for _, s := range steps {
@@ -672,7 +666,7 @@ func TestCountersMoveAsRecorded(t *testing.T) {
 		{"c invalid_transition", false, gApproved, func(f *fixture) { f.decide("approve", "driver-1", "") }, "profile_requests_rejected_total{reason=\"invalid_transition\"}=1"},
 		{"c rate_limited", false, func(f *fixture) {
 			gApproved(f)
-			f.svc.publicLimiter = auth.NewLimiter(1.0/60, 1)
+			f.useLimiter(auth.NewLimiter(1.0/60, 1))
 			f.call("GET", "/drivers/driver-1/public", rd, "rider-1", nil)
 		}, func(f *fixture) { f.call("GET", "/drivers/driver-1/public", rd, "rider-1", nil) }, "profile_requests_rejected_total{reason=\"rate_limited\"}=1"},
 		{"c resync_running", false, func(f *fixture) {
@@ -681,10 +675,10 @@ func TestCountersMoveAsRecorded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, resyncLockKey); err != nil {
+			if _, err := c.Exec(ctx, `SELECT pg_advisory_lock($1)`, postgres.ResyncLockKey); err != nil {
 				t.Fatal(err)
 			}
-			f.t.Cleanup(func() { c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, resyncLockKey); c.Release() })
+			f.t.Cleanup(func() { c.Exec(ctx, `SELECT pg_advisory_unlock($1)`, postgres.ResyncLockKey); c.Release() })
 		}, func(f *fixture) { f.resync(nil) }, "profile_requests_rejected_total{reason=\"resync_running\"}=1 profile_resync_runs_total{result=\"refused_running\"}=1"},
 		{"c an internal error counts no refusal", true, nil, func(f *fixture) {
 			f.call("GET", "/riders/rider-1", rd, "rider-1", nil)
@@ -709,7 +703,7 @@ func TestCountersMoveAsRecorded(t *testing.T) {
 		{"c reject", false, gPending, func(f *fixture) { f.decide("reject", "driver-1", "no") }, "profile_reviews_total{decision=\"rejected\"}=1"},
 		{"c suspend", false, gApproved, func(f *fixture) { f.decide("suspend", "driver-1", "no") }, "profile_reviews_total{decision=\"suspended\"}=1"},
 		{"c a review whose event cannot be queued counts nothing", false, gPending, func(f *fixture) {
-			f.svc.enc = failingEncoder{}
+			f.useEncoder(failingEncoder{})
 			f.decide("approve", "driver-1", "")
 		}, ""},
 		{"c public found", false, gApproved, func(f *fixture) { f.call("GET", "/drivers/driver-1/public", rd, "rider-1", nil) }, "profile_public_lookups_total{result=\"found\"}=1"},
@@ -730,7 +724,7 @@ func TestCountersMoveAsRecorded(t *testing.T) {
 		{"c resync one that is PENDING is skipped", false, gPending, func(f *fixture) { f.resync(map[string]string{"driverId": "driver-1"}) }, "profile_resync_runs_total{result=\"completed\"}=1"},
 		{"c resync unknown driver", false, nil, func(f *fixture) { f.resync(map[string]string{"driverId": "nobody"}) }, "profile_requests_rejected_total{reason=\"not_found\"}=1"},
 		{"c resync long driverId", false, nil, func(f *fixture) { f.resync(map[string]string{"driverId": long}) }, "profile_requests_rejected_total{reason=\"not_found\"}=1"},
-		{"c resync that fails in the encoder", false, gApproved, func(f *fixture) { f.svc.enc = failingEncoder{}; f.resync(nil) }, "profile_resync_runs_total{result=\"failed\"}=1"},
+		{"c resync that fails in the encoder", false, gApproved, func(f *fixture) { f.useEncoder(failingEncoder{}); f.resync(nil) }, "profile_resync_runs_total{result=\"failed\"}=1"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
