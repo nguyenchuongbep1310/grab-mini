@@ -352,6 +352,30 @@ func TestAFailedBatchQueuesNothingFromItsBatch(t *testing.T) {
 	}
 }
 
+func TestAnIdListErrorAfterACommittedBatchReturnsThePartialResultAndCountsFailed(t *testing.T) {
+	var ds []domain.Driver
+	for i := range 250 {
+		ds = append(ds, approvedDriver(fmt.Sprintf("d%03d", i)))
+	}
+	r := resyncRig(t, ds...)
+	r.src.hook = func(call int) {
+		if call == 2 {
+			r.src.err = errBoom
+		}
+	}
+	res, err := r.svc.Resync(context.Background(), "")
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("got %v", err)
+	}
+	wantCounts(t, res, 200, 0, 0, 200, 0)
+	if !reflect.DeepEqual(r.m.runs, []string{"failed"}) {
+		t.Fatalf("runs %q", r.m.runs)
+	}
+	if r.uow.dos != 1 || r.wake.n != 1 || len(r.uow.outbox) != 200 {
+		t.Fatalf("the first batch stays committed: dos %d wakes %d queued %d", r.uow.dos, r.wake.n, len(r.uow.outbox))
+	}
+}
+
 func TestEveryCommittedBatchWakesEvenWhenAllWereSkipped(t *testing.T) {
 	var ds []domain.Driver
 	for i := range 250 {

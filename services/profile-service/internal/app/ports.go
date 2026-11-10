@@ -34,7 +34,9 @@ type ResyncSource interface {
 // ResyncLocker lets one resync run at a time across instances.
 type ResyncLocker interface {
 	// TryLock reports acquired=false when another run holds the lock. unlock must be called
-	// once when acquired.
+	// once when acquired. It must release the lock even when the caller's ctx is cancelled:
+	// the release runs on a detached context with a 5 s timeout, and the connection is closed
+	// instead of returned if the unlock fails.
 	TryLock(ctx context.Context) (unlock func(), acquired bool, err error)
 }
 
