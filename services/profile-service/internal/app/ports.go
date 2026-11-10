@@ -61,18 +61,18 @@ type Tx interface {
 
 // ReviewedEvent is the review result as the use case sees it; the adapter owns the wire form.
 type ReviewedEvent struct {
-	EventID     string
-	OccurredAt  time.Time
-	DriverID    string
-	Status      string
-	VehicleType domain.VehicleType
-	Reason      string
-	ReviewedBy  string
+	EventID    string
+	OccurredAt time.Time
+	DriverID   string
+	Status     string
+	Vehicle    domain.VehicleType
+	Reason     string
+	ReviewedBy string
 }
 
 // Encoder turns a review result into the bytes to queue.
 type Encoder interface {
-	Encode(ctx context.Context, e ReviewedEvent) ([]byte, error)
+	Reviewed(ctx context.Context, e ReviewedEvent) ([]byte, error)
 }
 
 // Waker nudges the outbox relay after a commit.
