@@ -1,4 +1,4 @@
-package main
+package postgres
 
 import (
 	"context"
@@ -31,7 +31,7 @@ var seedRiders = []struct{ ID, Name, Phone string }{
 	{"rider-3", "Bùi Khánh Linh", "0900 100 003"},
 }
 
-// seedDev adds the development profiles, once: a profile that exists is left alone (an admin's
+// SeedDev adds the development profiles, once: a profile that exists is left alone (an admin's
 // decision or a person's edit is not undone by running the seed again), and it returns how many
 // were added. The five drivers are APPROVED, reviewed by "seed-dev".
 //
@@ -40,7 +40,7 @@ var seedRiders = []struct{ ID, Name, Phone string }{
 // make Matching apply the approval again: harmless, but it would put a driver back to
 // AVAILABLE after a demo script set them ON_TRIP or OFFLINE by hand. The cost is that these
 // five drivers have an approved profile and no review event in Kafka.
-func seedDev(ctx context.Context, db *pgxpool.Pool) (drivers, riders int, err error) {
+func SeedDev(ctx context.Context, db *pgxpool.Pool) (drivers, riders int, err error) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	for _, d := range seedDrivers {
 		tag, err := db.Exec(ctx, `

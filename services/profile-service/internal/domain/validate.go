@@ -1,35 +1,33 @@
-package main
+package domain
 
 import (
 	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"grab-mini/pkg/events"
 )
 
 // Limits, in characters (runes, so Vietnamese counts as one each).
 const (
-	maxNameRunes   = 80
-	maxPhoneRunes  = 20
-	maxPlateRunes  = 16
-	maxModelRunes  = 50
-	maxColorRunes  = 30
-	maxReasonRunes = 500
+	MaxNameRunes   = 80
+	MaxPhoneRunes  = 20
+	MaxPlateRunes  = 16
+	MaxModelRunes  = 50
+	MaxColorRunes  = 30
+	MaxReasonRunes = 500
 
-	minPhoneDigits = 7
-	maxPhoneDigits = 15 // E.164
-	minPlateAlnum  = 3
+	MinPhoneDigits = 7
+	MaxPhoneDigits = 15 // E.164
+	MinPlateAlnum  = 3
 )
 
-// fieldError says which field is wrong and why.
-type fieldError struct{ field, msg string }
+// FieldError says which field is wrong and why.
+type FieldError struct{ Field, Msg string }
 
-func (e *fieldError) Error() string { return e.field + ": " + e.msg }
+func (e *FieldError) Error() string { return e.Field + ": " + e.Msg }
 
-func bad(field, format string, args ...any) *fieldError {
-	return &fieldError{field, fmt.Sprintf(format, args...)}
+func bad(field, format string, args ...any) *FieldError {
+	return &FieldError{field, fmt.Sprintf(format, args...)}
 }
 
 // forbidden says whether r can make text read as something it is not or break a
@@ -40,9 +38,9 @@ func forbidden(r rune) bool {
 		(r >= '‪' && r <= '‮') || (r >= '⁦' && r <= '⁩')
 }
 
-// clean trims the text, collapses runs of white space to one space and refuses
+// Clean trims the text, collapses runs of white space to one space and refuses
 // control characters and text longer than max characters. Any script is fine.
-func clean(field, raw string, max int) (string, *fieldError) {
+func Clean(field, raw string, max int) (string, *FieldError) {
 	if !utf8.ValidString(raw) {
 		return "", bad(field, "must be valid UTF-8 text")
 	}
@@ -58,10 +56,10 @@ func clean(field, raw string, max int) (string, *fieldError) {
 	return text, nil
 }
 
-// cleanName is a person's name: required, and it has to contain a letter (a number
+// CleanName is a person's name: required, and it has to contain a letter (a number
 // is not a name). Nothing else is assumed: names come in every script.
-func cleanName(raw string) (string, *fieldError) {
-	name, err := clean("name", raw, maxNameRunes)
+func CleanName(raw string) (string, *FieldError) {
+	name, err := Clean("name", raw, MaxNameRunes)
 	if err != nil {
 		return "", err
 	}
@@ -74,12 +72,12 @@ func cleanName(raw string) (string, *fieldError) {
 	return name, nil
 }
 
-// cleanPhone is optional. It is checked loosely, since formats differ by country: digits
+// CleanPhone is optional. It is checked loosely, since formats differ by country: digits
 // with spaces, dots, dashes and brackets, and a "+" only at the start, 7 to 15 digits
 // (the E.164 limit). Vietnamese numbers (0901 234 567, +84 901 234 567) pass; it is not
 // proof that the number exists or is the person's: it is not verified.
-func cleanPhone(raw string) (string, *fieldError) {
-	phone, err := clean("phone", raw, maxPhoneRunes)
+func CleanPhone(raw string) (string, *FieldError) {
+	phone, err := Clean("phone", raw, MaxPhoneRunes)
 	if err != nil {
 		return "", err
 	}
@@ -94,18 +92,18 @@ func cleanPhone(raw string) (string, *fieldError) {
 			return "", bad("phone", "may contain only digits, spaces, + - . ( )")
 		}
 	}
-	if phone != "" && (digits < minPhoneDigits || digits > maxPhoneDigits) {
-		return "", bad("phone", "must have %d to %d digits", minPhoneDigits, maxPhoneDigits)
+	if phone != "" && (digits < MinPhoneDigits || digits > MaxPhoneDigits) {
+		return "", bad("phone", "must have %d to %d digits", MinPhoneDigits, MaxPhoneDigits)
 	}
 	return phone, nil
 }
 
-// cleanPlate returns the plate in capitals. Loosely checked: letters of any script, digits,
+// CleanPlate returns the plate in capitals. Loosely checked: letters of any script, digits,
 // spaces, dots and dashes, and at least three letters or digits. Vietnamese plates
 // (29A-123.45, 59-X1 123.45, 51F-12345) pass, and so do plates of other countries.
 // Required only to apply, so an empty plate is returned as empty.
-func cleanPlate(raw string) (string, *fieldError) {
-	plate, err := clean("plate", raw, maxPlateRunes)
+func CleanPlate(raw string) (string, *FieldError) {
+	plate, err := Clean("plate", raw, MaxPlateRunes)
 	if err != nil {
 		return "", err
 	}
@@ -119,24 +117,24 @@ func cleanPlate(raw string) (string, *fieldError) {
 			return "", bad("plate", "may contain only letters, digits, spaces, - and .")
 		}
 	}
-	if plate != "" && alnum < minPlateAlnum {
-		return "", bad("plate", "must have at least %d letters or digits", minPlateAlnum)
+	if plate != "" && alnum < MinPlateAlnum {
+		return "", bad("plate", "must have at least %d letters or digits", MinPlateAlnum)
 	}
 	return strings.ToUpper(plate), nil
 }
 
-// cleanVehicle accepts CAR or BIKE in any case; empty is allowed until the driver applies.
-func cleanVehicle(raw string) (events.VehicleType, *fieldError) {
-	v := events.VehicleType(strings.ToUpper(strings.TrimSpace(raw)))
+// CleanVehicle accepts CAR or BIKE in any case; empty is allowed until the driver applies.
+func CleanVehicle(raw string) (VehicleType, *FieldError) {
+	v := VehicleType(strings.ToUpper(strings.TrimSpace(raw)))
 	if v != "" && !v.Valid() {
 		return "", bad("vehicleType", "must be CAR or BIKE")
 	}
 	return v, nil
 }
 
-// cleanReason is the text of a review decision: one line, 1 to 500 characters when required.
-func cleanReason(raw string, required bool) (string, *fieldError) {
-	reason, err := clean("reason", raw, maxReasonRunes)
+// CleanReason is the text of a review decision: one line, 1 to 500 characters when required.
+func CleanReason(raw string, required bool) (string, *FieldError) {
+	reason, err := Clean("reason", raw, MaxReasonRunes)
 	if err != nil {
 		return "", err
 	}

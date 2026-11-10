@@ -1,9 +1,8 @@
-package main
+package domain
 
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCleanName(t *testing.T) {
@@ -31,7 +30,7 @@ func TestCleanName(t *testing.T) {
 		{"invalid utf-8", "An\xffBinh", "", false},
 	}
 	for _, c := range cases {
-		got, err := cleanName(c.in)
+		got, err := CleanName(c.in)
 		if (err == nil) != c.ok {
 			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
 			continue
@@ -65,7 +64,7 @@ func TestCleanPhone(t *testing.T) {
 		{"+84 (0) 901 234 567 89", "", false}, // 21 characters
 	}
 	for _, c := range cases {
-		got, err := cleanPhone(c.in)
+		got, err := CleanPhone(c.in)
 		if (err == nil) != c.ok {
 			t.Errorf("%q: err = %v, want ok=%v", c.in, err, c.ok)
 			continue
@@ -98,7 +97,7 @@ func TestCleanPlate(t *testing.T) {
 		{"51A\n123", "", false},
 	}
 	for _, c := range cases {
-		got, err := cleanPlate(c.in)
+		got, err := CleanPlate(c.in)
 		if (err == nil) != c.ok {
 			t.Errorf("%q: err = %v, want ok=%v", c.in, err, c.ok)
 			continue
@@ -111,59 +110,50 @@ func TestCleanPlate(t *testing.T) {
 
 func TestCleanVehicle(t *testing.T) {
 	for in, want := range map[string]string{"CAR": "CAR", "bike": "BIKE", " Car ": "CAR", "": ""} {
-		got, err := cleanVehicle(in)
+		got, err := CleanVehicle(in)
 		if err != nil || string(got) != want {
 			t.Errorf("%q: %q, %v; want %q", in, got, err, want)
 		}
 	}
 	for _, in := range []string{"TRUCK", "car bike", "0"} {
-		if _, err := cleanVehicle(in); err == nil {
+		if _, err := CleanVehicle(in); err == nil {
 			t.Errorf("%q was accepted", in)
 		}
 	}
 }
 
 func TestCleanReason(t *testing.T) {
-	if _, err := cleanReason("  ", true); err == nil {
+	if _, err := CleanReason("  ", true); err == nil {
 		t.Error("a blank reason was accepted where required")
 	}
-	if got, err := cleanReason("", false); err != nil || got != "" {
+	if got, err := CleanReason("", false); err != nil || got != "" {
 		t.Errorf("optional empty: %q, %v", got, err)
 	}
-	if got, err := cleanReason("Biển số không khớp với giấy tờ", true); err != nil || got != "Biển số không khớp với giấy tờ" {
+	if got, err := CleanReason("Biển số không khớp với giấy tờ", true); err != nil || got != "Biển số không khớp với giấy tờ" {
 		t.Errorf("%q, %v", got, err)
 	}
-	if _, err := cleanReason(strings.Repeat("x", 501), true); err == nil {
+	if _, err := CleanReason(strings.Repeat("x", 501), true); err == nil {
 		t.Error("501 characters were accepted")
 	}
-	if _, err := cleanReason("a\nb", true); err == nil {
+	if _, err := CleanReason("a\nb", true); err == nil {
 		t.Error("a newline was accepted")
 	}
 }
 
-func TestNextReviewTimeIsAlwaysLater(t *testing.T) {
-	now := mustTime("2026-01-02T03:04:05.000100Z")
-	if got := nextReviewTime(nil, now); !got.Equal(now) {
-		t.Errorf("no previous: %v", got)
-	}
-	earlier := mustTime("2026-01-02T03:04:04Z")
-	if got := nextReviewTime(&earlier, now); !got.Equal(now) {
-		t.Errorf("earlier previous: %v", got)
-	}
-	same := now
-	if got := nextReviewTime(&same, now); !got.After(same) {
-		t.Errorf("same time: %v is not after %v", got, same)
-	}
-	later := mustTime("2026-01-02T03:05:00Z")
-	if got := nextReviewTime(&later, now); !got.After(later) {
-		t.Errorf("clock stepped back: %v is not after %v", got, later)
+func TestFieldErrorText(t *testing.T) {
+	_, err := CleanName("")
+	if err == nil || err.Error() != "name: is required" || err.Field != "name" || err.Msg != "is required" {
+		t.Errorf("%v", err)
 	}
 }
 
-func mustTime(s string) (t time.Time) {
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		panic(err)
+func TestVehicleTypeValid(t *testing.T) {
+	for v, want := range map[VehicleType]bool{VehicleCar: true, VehicleBike: true, "": false, "car": false, "TRUCK": false} {
+		if v.Valid() != want {
+			t.Errorf("%q.Valid() = %v", v, !want)
+		}
 	}
-	return t
+	if VehicleCar != "CAR" || VehicleBike != "BIKE" {
+		t.Error("vehicle constants changed")
+	}
 }

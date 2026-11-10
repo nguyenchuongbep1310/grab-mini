@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"bytes"
@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"grab-mini/pkg/auth"
 	"grab-mini/pkg/events"
+	"grab-mini/profile-service/internal/adapters/postgres"
+	"grab-mini/profile-service/internal/app"
 )
 
 func (f *fixture) resync(body any) result {
@@ -41,22 +41,34 @@ func (f *fixture) fleet() {
 	f.putDriver("driver-n", vehicle("30G-246.80"))
 }
 
+// profileRows is every column of every driver row, in driver_id order: a resync must change
+// none of them.
 func (f *fixture) profileRows() string {
 	f.t.Helper()
-	rows, err := f.db.Query(context.Background(), `SELECT `+driverColumns+` FROM driver_profiles ORDER BY driver_id`)
+	rows, err := f.db.Query(context.Background(), `SELECT * FROM driver_profiles ORDER BY driver_id`)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	defer rows.Close()
 	var b strings.Builder
 	for rows.Next() {
-		d, err := scanDriver(rows)
+		vals, err := rows.Values()
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		fmt.Fprintf(&b, "%+v\n", d)
+		fmt.Fprintf(&b, "%#v\n", vals)
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatal(err)
 	}
 	return b.String()
+}
+
+// counter is one series of the service's counters, read through the default registry as
+// /metrics does (the counters are process-wide: tests compare before and after).
+func counter(t *testing.T, series string) float64 {
+	t.Helper()
+	return gCounters(t)[series]
 }
 
 func TestResyncRepublishesTheCurrentStatusOfEveryEligibleDriverAndChangesNoRow(t *testing.T) {
@@ -68,8 +80,8 @@ func TestResyncRepublishesTheCurrentStatusOfEveryEligibleDriverAndChangesNoRow(t
 	for _, e := range before {
 		last[e.DriverID] = eventTime(t, e)
 	}
-	runs := testutil.ToFloat64(resyncRuns.WithLabelValues("completed"))
-	approvedBefore := testutil.ToFloat64(resyncEvents.WithLabelValues("APPROVED"))
+	runs := counter(t, `profile_resync_runs_total{result="completed"}`)
+	approvedBefore := counter(t, `profile_resync_events_total{status="APPROVED"}`)
 
 	f.now = f.now.Add(time.Minute)
 	r := f.resync(nil)
@@ -106,10 +118,10 @@ func TestResyncRepublishesTheCurrentStatusOfEveryEligibleDriverAndChangesNoRow(t
 	if len(want) != 0 {
 		t.Errorf("no event for %v", want)
 	}
-	if d := testutil.ToFloat64(resyncRuns.WithLabelValues("completed")) - runs; d != 1 {
+	if d := counter(t, `profile_resync_runs_total{result="completed"}`) - runs; d != 1 {
 		t.Errorf("completed runs +%v, want 1", d)
 	}
-	if d := testutil.ToFloat64(resyncEvents.WithLabelValues("APPROVED")) - approvedBefore; d != 2 {
+	if d := counter(t, `profile_resync_events_total{status="APPROVED"}`) - approvedBefore; d != 2 {
 		t.Errorf("APPROVED events counted +%v, want 2", d)
 	}
 }
@@ -179,7 +191,7 @@ func TestResyncIsForAdminsOnly(t *testing.T) {
 
 func TestResyncGoesThroughAllDriversInBatches(t *testing.T) {
 	f := newFixture(t)
-	const total = 2*resyncBatch + 37
+	const total = 2*app.ResyncBatch + 37
 	_, err := f.db.Exec(context.Background(), `
 		INSERT INTO driver_profiles (driver_id, name, vehicle_type, plate, status, reviewed_by, reviewed_at, status_at, updated_at)
 		SELECT 'bulk-' || lpad(i::text, 5, '0'), 'n', CASE WHEN i % 2 = 0 THEN 'CAR' ELSE 'BIKE' END, 'P' || i,
@@ -217,18 +229,18 @@ func TestOnlyOneResyncRunsAtATime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.Exec(ctx, `SELECT pg_advisory_lock($1)`, resyncLockKey); err != nil {
+	if _, err := other.Exec(ctx, `SELECT pg_advisory_lock($1)`, postgres.ResyncLockKey); err != nil {
 		t.Fatal(err)
 	}
-	refused := testutil.ToFloat64(requestsRefused.WithLabelValues("resync_running"))
+	refused := counter(t, `profile_requests_rejected_total{reason="resync_running"}`)
 	wantCode(t, "while running", f.resync(nil), 409, "resync_running")
-	if d := testutil.ToFloat64(requestsRefused.WithLabelValues("resync_running")) - refused; d != 1 {
+	if d := counter(t, `profile_requests_rejected_total{reason="resync_running"}`) - refused; d != 1 {
 		t.Errorf("resync_running counted +%v", d)
 	}
 	if len(f.queued()) != n {
 		t.Error("the refused resync queued events")
 	}
-	if _, err := other.Exec(ctx, `SELECT pg_advisory_unlock($1)`, resyncLockKey); err != nil {
+	if _, err := other.Exec(ctx, `SELECT pg_advisory_unlock($1)`, postgres.ResyncLockKey); err != nil {
 		t.Fatal(err)
 	}
 	other.Release()
@@ -241,14 +253,14 @@ func TestAFailedResyncQueuesNothingFromItsBatchAndReleasesTheLock(t *testing.T) 
 	f := newFixture(t)
 	f.approved("driver-1")
 	n := len(f.queued())
-	f.svc.enc = failingEncoder{}
-	failed := testutil.ToFloat64(resyncRuns.WithLabelValues("failed"))
+	f.useEncoder(failingEncoder{})
+	failed := counter(t, `profile_resync_runs_total{result="failed"}`)
 	wantCode(t, "failing", f.resync(nil), 500, "internal")
-	f.svc.enc = jsonEncoder{}
+	f.useEncoder(jsonEncoder{})
 	if len(f.queued()) != n {
 		t.Error("a failed batch left events behind")
 	}
-	if d := testutil.ToFloat64(resyncRuns.WithLabelValues("failed")) - failed; d != 1 {
+	if d := counter(t, `profile_resync_runs_total{result="failed"}`) - failed; d != 1 {
 		t.Errorf("failed runs +%v", d)
 	}
 	wantStatus(t, "retry", f.resync(nil), 200)
