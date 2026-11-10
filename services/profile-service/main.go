@@ -99,6 +99,9 @@ func main() {
 	// Waker (a typed nil).
 	relay := outbox.NewRelay(db, producer, outboxSource)
 	m := appmetrics.New()
+	// Built here, before the relay starts and before the verifier, so a bad RATE_LIMIT_SCALE
+	// stops the start at the same point as before the migration.
+	limiter := httpadapter.NewPublicLimiter(env.PublicRatePerMinute)
 	svc := newService(db, codec, relay, m)
 
 	var background sync.WaitGroup
@@ -108,7 +111,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux := httpadapter.NewAPI(svc, verifier, httpadapter.NewPublicLimiter(env.PublicRatePerMinute), m).Routes()
+	mux := httpadapter.NewAPI(svc, verifier, limiter, m).Routes()
 	health.Mount(ctx, mux, health.Postgres(db), health.Kafka(env.KafkaBrokers))
 
 	log.Printf("profile-service listening on :%s (%d public lookups a minute per caller)", env.Port, env.PublicRatePerMinute)
