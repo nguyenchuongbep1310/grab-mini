@@ -1,6 +1,6 @@
 package http
 
-// Task 1's golden rows (services/profile-service/golden_test.go, recorded from the flat
+// Task 1's golden rows (services/profile-service/internal/integration/golden_test.go, recorded from the flat
 // code), re-expressed over NewAPI and an app.Service on in-memory fakes. Subtest names and
 // expected strings are Task 1's, byte for byte. Where Task 1 used Postgres, the fakes hold
 // the same data; where it used a closed pool, every storage call answers "closed pool".

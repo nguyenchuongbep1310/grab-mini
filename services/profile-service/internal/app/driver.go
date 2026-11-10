@@ -118,6 +118,7 @@ func (s *Service) Apply(ctx context.Context, id string) (ApplyResult, error) {
 		}
 		// The clock is read after the checks and only on the path that writes, so Submit
 		// (pure) decides first without a time and runs again with now.
+		// A replay commits an empty transaction where the flat code rolled it back; nothing is written (plan Decision 3).
 		if _, submitted, err := domain.Submit(d, time.Time{}); err != nil || !submitted {
 			out = ApplyResult{Driver: d}
 			return err
