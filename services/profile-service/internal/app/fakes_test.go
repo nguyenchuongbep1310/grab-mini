@@ -56,6 +56,7 @@ func (r *recorder) Write(p []byte) (int, error) {
 
 // fakeStore implements RiderStore, DriverReader and ApplicationQueue in memory.
 type fakeStore struct {
+	rec     *recorder // when set, Driver logs "Driver" to it
 	riders  map[string]domain.Rider
 	drivers map[string]domain.Driver
 
@@ -99,6 +100,7 @@ func (f *fakeStore) SaveRider(_ context.Context, r domain.Rider) error {
 
 func (f *fakeStore) Driver(_ context.Context, id string) (domain.Driver, error) {
 	f.calls = append(f.calls, "Driver")
+	f.rec.add("Driver")
 	if f.loadErr != nil {
 		return domain.Driver{}, f.loadErr
 	}
@@ -300,14 +302,65 @@ func (e *fakeEncoder) Reviewed(_ context.Context, ev ReviewedEvent) ([]byte, err
 	return []byte("event:" + ev.EventID), nil
 }
 
-// fakeSource and fakeLocker only satisfy Deps; Task 5 uses them.
-type fakeSource struct{}
+// fakeSource lists ids from a sorted slice, as the Postgres query does: the ids after the
+// given one, in order, at most limit. It logs "ResyncableIDs(<after>)" to rec, can fail
+// (err) and runs hook (when set) on every call, before it answers.
+type fakeSource struct {
+	rec   *recorder
+	ids   []string
+	err   error
+	calls []sourceCall
+	hook  func(call int)
+}
 
-func (fakeSource) ResyncableIDs(context.Context, string, int) ([]string, error) { return nil, nil }
+type sourceCall struct {
+	After string
+	Limit int
+}
 
-type fakeLocker struct{}
+func (s *fakeSource) ResyncableIDs(_ context.Context, after string, limit int) ([]string, error) {
+	s.rec.add("ResyncableIDs(" + after + ")")
+	s.calls = append(s.calls, sourceCall{after, limit})
+	if s.hook != nil {
+		s.hook(len(s.calls))
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []string
+	for _, id := range s.ids {
+		if id > after && len(out) < limit {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
 
-func (fakeLocker) TryLock(context.Context) (func(), bool, error) { return func() {}, true, nil }
+// fakeLocker is one lock: TryLock fails (err), or reports false while it is held. It logs
+// "TryLock" and "unlock" to rec and in calls.
+type fakeLocker struct {
+	rec   *recorder
+	held  bool
+	err   error
+	calls []string
+}
+
+func (l *fakeLocker) TryLock(context.Context) (func(), bool, error) {
+	l.rec.add("TryLock")
+	l.calls = append(l.calls, "TryLock")
+	if l.err != nil {
+		return nil, false, l.err
+	}
+	if l.held {
+		return nil, false, nil
+	}
+	l.held = true
+	return func() {
+		l.rec.add("unlock")
+		l.calls = append(l.calls, "unlock")
+		l.held = false
+	}, true, nil
+}
 
 // clock is a recording clock: it logs the order of its reads against the store calls and,
 // when rec is set, as "now" in the shared log.
@@ -338,6 +391,8 @@ type rig struct {
 	rec   *recorder
 	uow   *fakeUoW
 	enc   *fakeEncoder
+	src   *fakeSource
+	lock  *fakeLocker
 }
 
 func newRig(t *testing.T) *rig {
@@ -349,11 +404,13 @@ func newRig(t *testing.T) *rig {
 	w := &fakeWaker{rec: rec}
 	uow := newFakeUoW(rec)
 	enc := &fakeEncoder{rec: rec}
+	src := &fakeSource{rec: rec}
+	lock := &fakeLocker{rec: rec}
 	svc := New(Deps{
-		Riders: st, Drivers: st, Queue: st, Resync: fakeSource{}, Locker: fakeLocker{},
+		Riders: st, Drivers: st, Queue: st, Resync: src, Locker: lock,
 		UoW: uow, Encoder: enc, Relay: w, Metrics: m, Now: clk.Now,
 	})
-	return &rig{svc, st, m, clk, w, rec, uow, enc}
+	return &rig{svc, st, m, clk, w, rec, uow, enc, src, lock}
 }
 
 var logMu sync.Mutex
