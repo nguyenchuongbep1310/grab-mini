@@ -1,23 +1,26 @@
-package main
+package postgres
 
 import (
 	"context"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"grab-mini/promotion-service/internal/domain"
 )
 
-// seedDev adds the demo promotions, once: the codes are there already on a second
+// SeedDev adds the demo promotions, once: the codes are there already on a second
 // run, and an admin's edits (a disabled code stays disabled) are left alone. They
 // are valid from a day ago for a year.
 //
 //	WELCOME10  10% off, at most 20,000 VND, for a fare of 40,000 VND or more
 //	FLAT15K    15,000 VND off a fare of 40,000 VND or more, up to 5 times per rider
 //	BIKE5K     5,000 VND off a BIKE trip (a code for one vehicle type)
-func seedDev(ctx context.Context, db *pgxpool.Pool) (int, error) {
+func SeedDev(ctx context.Context, db *pgxpool.Pool) (int, error) {
 	from := time.Now().Add(-24 * time.Hour)
 	to := from.AddDate(1, 0, 1)
 	added := 0
+	maxWelcome, bike := int64(20000), "BIKE"
 	for _, p := range []struct {
 		code, kind  string
 		value       int64
@@ -26,9 +29,9 @@ func seedDev(ctx context.Context, db *pgxpool.Pool) (int, error) {
 		vehicle     *string
 		perRider    int64
 	}{
-		{"WELCOME10", kindPercent, 10, ptr[int64](20000), 40000, nil, 1},
-		{"FLAT15K", kindFixed, 15000, nil, 40000, nil, 5},
-		{"BIKE5K", kindFixed, 5000, nil, 0, ptr("BIKE"), 5},
+		{"WELCOME10", domain.KindPercent, 10, &maxWelcome, 40000, nil, 1},
+		{"FLAT15K", domain.KindFixed, 15000, nil, 40000, nil, 5},
+		{"BIKE5K", domain.KindFixed, 5000, nil, 0, &bike, 5},
 	} {
 		tag, err := db.Exec(ctx, `
 			INSERT INTO promotions (code, kind, value, max_discount, min_fare, vehicle_type, valid_from, valid_to, per_rider_limit, created_by)

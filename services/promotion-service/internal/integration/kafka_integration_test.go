@@ -1,4 +1,4 @@
-package main
+package integration
 
 import (
 	"context"
@@ -19,6 +19,8 @@ import (
 	"grab-mini/pkg/events"
 	"grab-mini/pkg/kafkaconn"
 	"grab-mini/pkg/outbox"
+	kafkaadapter "grab-mini/promotion-service/internal/adapters/kafka"
+	"grab-mini/promotion-service/internal/domain"
 )
 
 // The full path through a real broker and Postgres: set TEST_KAFKA_BROKERS and
@@ -132,15 +134,14 @@ func newKafkaFixture(t *testing.T) *kafkaFixture {
 	codec := eventcodec.New(sharedRegistryURL())
 	relayWriter := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), Balancer: &kafka.Hash{}, RequiredAcks: kafka.RequireAll})
 	t.Cleanup(func() { relayWriter.Close() })
-	relay := outbox.NewRelay(f.db, relayWriter, outboxSource)
-	f.svc.enc, f.svc.relay = codec, relay
+	relay := outbox.NewRelay(f.db, relayWriter, "promotion-service") // must equal outboxSource in main.go
+	// The Avro codec on both sides and a real relay, as main.go wires them.
+	f.wire(kafkaadapter.NewEncoder(codec), relay, codec)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() { relay.Run(ctx) })
-	wg.Go(func() {
-		f.svc.runConsumer(ctx, Env{KafkaBrokers: []string{brokers}}, "promotion-test-"+newID(), codec)
-	})
+	wg.Go(func() { f.handler.Run(ctx, []string{brokers}, "promotion-test-"+newID()) })
 	t.Cleanup(func() { cancel(); wg.Wait() })
 
 	w := kafkaconn.Writer(&kafka.Writer{Addr: kafka.TCP(brokers), RequiredAcks: kafka.RequireAll})
@@ -189,7 +190,7 @@ func (k *kafkaFixture) status(code, orderID string) string {
 
 func TestKafkaOrderRedeemsAnnouncesAndCancelReleases(t *testing.T) {
 	k := newKafkaFixture(t)
-	k.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	k.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 5 })
 	// Ids unique to this run: the broker keeps the events of earlier runs.
 	rider := "rider-" + newID()
 	order, plain := newID(), newID()
@@ -241,7 +242,7 @@ func TestKafkaOrderRedeemsAnnouncesAndCancelReleases(t *testing.T) {
 // The v4 fields survive the Avro round trip through the broker into the redemption.
 func TestKafkaRedemptionDecodesTheV4Fields(t *testing.T) {
 	k := newKafkaFixture(t)
-	k.promotion("FLAT15K", func(p *Promotion) { p.Kind = kindFixed; p.Value = 15000; p.MaxDiscount = nil })
+	k.promotion("FLAT15K", func(p *domain.Promotion) { p.Kind = domain.KindFixed; p.Value = 15000; p.MaxDiscount = nil })
 	order := newID()
 	k.publish(events.TopicOrderCreated, order, created(order, "rider-"+newID(), "FLAT15K", 15000))
 	eventually(t, "the redemption", 30*time.Second, func() bool { return k.status("FLAT15K", order) == "REDEEMED" })
@@ -256,7 +257,7 @@ func TestKafkaRedemptionDecodesTheV4Fields(t *testing.T) {
 // redemption through the one consumer group; other trip statuses do not.
 func TestKafkaTripCancelledAndNoDriverReleaseTheRedemption(t *testing.T) {
 	k := newKafkaFixture(t)
-	k.promotion("WELCOME10", func(p *Promotion) { p.PerRider = 5 })
+	k.promotion("WELCOME10", func(p *domain.Promotion) { p.PerRider = 5 })
 	rider := "rider-" + newID()
 	trip, none, done := newID(), newID(), newID()
 	for _, order := range []string{trip, none, done} {
