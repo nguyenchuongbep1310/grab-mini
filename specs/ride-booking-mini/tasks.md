@@ -95,7 +95,7 @@ Design records: [ADR 0014](../../docs/adr/0014-clean-architecture-for-go-service
 - [x] 12.3 Flink SQL demo beside ksqlDB, behind the `flink` compose profile: two jobs (`orders_per_minute` twin, driver sessions), JSON sink topics, checkpoints to a volume, Flink UI on 127.0.0.1:8082, `make flink-up|flink-down|flink-sql`. Spec and plan: `docs/superpowers/{specs,plans}/2026-11-19-flink-*.md`
 - [x] 12.4 Documentation: `docs/guide.md` and its Vietnamese twin `docs/vi-guide.md` (both with the Flink section), project skills in `.claude/skills/`
 - [x] 12.5 govulncheck gate in CI (`scripts/govulncheck.sh`, allowlist `.govulncheck-allow` for advisories with no fixed version), Go upgraded to 1.26.10
-- [x] 12.6 GO-2026-6859 (`net/http` `MaxBytesReader` header race, fixed in Go 1.26.11): Go upgraded to 1.26.11 in `go.work`, every `go.mod` and `deploy/docker/Dockerfile`. `govulncheck` is clean in all 38 modules locally and `go vet` plus `go test` pass; the CI result is recorded after the push. It was fixed by upgrading, not by `.govulncheck-allow`, because the advisory has a fixed version
+- [x] 12.6 GO-2026-6859 (`net/http` `MaxBytesReader` header race, fixed in Go 1.26.11): Go upgraded to 1.26.11 in `go.work`, every `go.mod` and `deploy/docker/Dockerfile`. `govulncheck` is clean in all 38 modules locally and `go vet` plus `go test` pass; CI run 44770037447 on cb86659 passed: all 93 jobs succeeded, including `govulncheck` in 38 modules. It was fixed by upgrading, not by `.govulncheck-allow`, because the advisory has a fixed version
 
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
