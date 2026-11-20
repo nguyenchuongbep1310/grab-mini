@@ -318,6 +318,41 @@ services:
     volumes:
       - flink-data:/opt/flink/checkpoints
 
+  # One-shot: submits flink/sql/02-... (with the tables of 01-sources.sql) to
+  # the session cluster through the SQL client, skipping a job whose name is
+  # already running (deploy/flink/submit.sh), and exits non-zero if a statement
+  # fails. A job takes its checkpoint and restart settings from the client that
+  # submits it, so they are repeated here; keep them equal to the JobManager's.
+  # kafka-init must have created the source topics; no schema subject or
+  # record is needed before the jobs start.
+  flink-sql-init:
+    profiles: ["flink"]
+    image: grab-mini/flink:1.20
+    container_name: grab-mini-flink-sql-init
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      flink-jobmanager:
+        condition: service_healthy
+      flink-taskmanager:
+        condition: service_started
+    restart: "no"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        rest.port: 8081
+        execution.target: remote
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 10s
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 1000000
+        restart-strategy.fixed-delay.delay: 5s
+    volumes:
+      - ./flink/sql:/opt/flink/sql:ro
+      - ./deploy/flink/submit.sh:/opt/flink/submit.sh:ro
+    command: ["sh", "/opt/flink/submit.sh", "/opt/flink/sql/01-sources.sql", "/opt/flink/sql/02-orders-per-minute.sql"]
+
 volumes:
   kafka-data:
   postgres-data:
