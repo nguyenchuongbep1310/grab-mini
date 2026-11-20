@@ -321,8 +321,10 @@ services:
   # One-shot: submits flink/sql/02-... (with the tables of 01-sources.sql) to
   # the session cluster through the SQL client, skipping a job whose name is
   # already running (deploy/flink/submit.sh), and exits non-zero if a statement
-  # fails. A job takes its checkpoint and restart settings from the client that
-  # submits it, so they are repeated here; keep them equal to the JobManager's.
+  # fails. Only the checkpoint settings are required in the client (a job takes
+  # its checkpoint interval and dir from the submitting client); the three
+  # restart-strategy lines mirror the JobManager's cluster default and are kept
+  # equal on purpose.
   # kafka-init must have created the source topics; no schema subject or
   # record is needed before the jobs start.
   flink-sql-init:

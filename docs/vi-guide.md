@@ -36,7 +36,7 @@ pnpm dev:all
 | ksqlDB | http://localhost:8088/info |
 | Flink UI (chỉ sau `make flink-up`) | http://localhost:8082 |
 
-Ctrl-C dừng các service và app (hạ tầng Docker vẫn chạy). Log nằm ở `.dev/logs/<name>.log` và được Promtail đẩy sang Loki để bạn truy vấn trong Grafana (`{job="grab-mini"}`). Dùng `make dev-reset` (`scripts/dev.sh --reset`) để xoá sạch dữ liệu trước khi chạy, và `make infra-down` (`docker compose down`) để dừng hạ tầng.
+Ctrl-C dừng các service và app (hạ tầng Docker vẫn chạy). Log nằm ở `.dev/logs/<name>.log` và được Promtail đẩy sang Loki để bạn truy vấn trong Grafana (`{job="grab-mini"}`). Dùng `make dev-reset` (`scripts/dev.sh --reset`) để xoá sạch dữ liệu trước khi chạy, và `make infra-down` (`docker compose --profile flink down`) để dừng hạ tầng.
 
 ### Đi thử một chuyến
 
@@ -151,10 +151,11 @@ Một session chỉ đóng khi đồng hồ của Flink (watermark, đi theo eve
 
 ```bash
 docker kill grab-mini-flink-taskmanager
-# các job vẫn RUNNING tối đa khoảng một phút (heartbeat timeout là 50 s), rồi chuyển sang RESTARTING
+# các job vẫn RUNNING tối đa khoảng một phút (heartbeat timeout là 50 s): lặp lại lệnh này đến khi cả hai chuyển sang RESTARTING
 curl -s localhost:8082/jobs/overview
+# chỉ sau đó mới khởi động lại worker
 docker start grab-mini-flink-taskmanager
-# khoảng 15 s sau cả hai job RUNNING trở lại
+# khoảng 15 s sau khi khởi động, cả hai job RUNNING trở lại
 curl -s localhost:8082/jobs/overview
 ```
 
@@ -174,7 +175,7 @@ Dòng log là `Restoring job <id> from Checkpoint N @ ... chk-N`, và câu trả
 - **Dữ liệu đến muộn.** Flink bỏ một record cũ hơn watermark của nó; ksqlDB giữ một cửa sổ mở 24 giờ theo mặc định (grace period). Với timestamp của chính các service, điều này không xảy ra trong lần thử, nhưng các producer lệch thứ tự có thể làm Flink đếm ít hơn ksqlDB.
 - **Các cửa sổ thẳng hàng.** Cả hai dùng cửa sổ tumbling một phút căn theo phút UTC, nên các cửa sổ có cùng biên. Flink ghi mỗi cửa sổ thành một record, khi nó đóng, vào một topic upsert khoá theo cửa sổ và loại xe; ksqlDB cập nhật cùng một dòng khi cửa sổ đang mở.
 - **`flink.driver_sessions` là at-least-once.** Một lần khôi phục có thể phát lại một session đã đóng sau checkpoint cuối cùng, nên bên đọc nên chờ thỉnh thoảng có một dòng trùng.
-- **JobManager không có HA.** Nếu container JobManager khởi động lại, nó mất các job đã nộp. Chạy lại `make flink-up`: nó nộp lại chúng từ offset sớm nhất (số đơn ra giống nhau, vì sink upsert ghi đè cùng các key). `make flink-up` không bao giờ nộp một job đang chạy, nên chạy hai lần là vô hại.
+- **JobManager không có HA.** Nếu container JobManager khởi động lại, nó mất các job đã nộp. Chạy lại `make flink-up`: nó nộp lại chúng từ offset sớm nhất (số đơn ra giống nhau, vì sink upsert ghi đè cùng các key; nhưng mọi session trong quá khứ lại được ghi một lần nữa vào topic chỉ-ghi-thêm `flink.driver_sessions`). `make flink-up` không bao giờ nộp một job đang chạy, nên chạy hai lần là vô hại.
 - **Bộ nhớ.** JobManager và TaskManager cùng dùng khoảng 1,3 đến 1,5 GiB khi có tải (khoảng 1,1 GiB khi rảnh), ngoài phần còn lại của stack.
 - **Dừng nó.** `make flink-down` chỉ dừng các container Flink và giữ lại phần còn lại của stack và volume checkpoint. `make infra-down` cũng dừng các container Flink, và `make infra-reset` còn xoá cả volume `flink-data`.
 

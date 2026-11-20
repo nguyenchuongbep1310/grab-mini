@@ -36,7 +36,7 @@ pnpm dev:all
 | ksqlDB | http://localhost:8088/info |
 | Flink UI (only after `make flink-up`) | http://localhost:8082 |
 
-Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log` and shipped by Promtail to Loki so you can query them in Grafana (`{job="grab-mini"}`). Use `make dev-reset` (`scripts/dev.sh --reset`) to wipe data first, and `make infra-down` (`docker compose down`) to stop the infra.
+Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log` and shipped by Promtail to Loki so you can query them in Grafana (`{job="grab-mini"}`). Use `make dev-reset` (`scripts/dev.sh --reset`) to wipe data first, and `make infra-down` (`docker compose --profile flink down`) to stop the infra.
 
 ### Take a ride
 
@@ -151,10 +151,11 @@ A session closes only when Flink's clock (the watermark, which follows the newes
 
 ```bash
 docker kill grab-mini-flink-taskmanager
-# the jobs stay RUNNING for up to about a minute (the heartbeat timeout is 50 s), then show RESTARTING
+# the jobs stay RUNNING for up to about a minute (the heartbeat timeout is 50 s): repeat this until both show RESTARTING
 curl -s localhost:8082/jobs/overview
+# only then start the worker again
 docker start grab-mini-flink-taskmanager
-# about 15 s later both jobs are RUNNING again
+# about 15 s after the start both jobs are RUNNING again
 curl -s localhost:8082/jobs/overview
 ```
 
@@ -174,7 +175,7 @@ The log line is `Restoring job <id> from Checkpoint N @ ... chk-N`, and the REST
 - **Late data.** Flink drops a record that is older than its watermark; ksqlDB keeps a window open for 24 hours by default (the grace period). With the services' own timestamps this did not happen in the test, but out-of-order producers could make Flink count less than ksqlDB.
 - **Windows line up.** Both use one-minute tumbling windows aligned to the UTC minute, so the windows have the same edges. Flink writes each window as one record, when it closes, to an upsert topic keyed by window and vehicle type; ksqlDB updates the same row while the window is open.
 - **`flink.driver_sessions` is at-least-once.** A restore can emit again a session that closed after the last checkpoint, so a reader should expect an occasional duplicate row.
-- **No JobManager HA.** If the JobManager container restarts, it loses the submitted jobs. Run `make flink-up` again: it resubmits them from the earliest offset (the order counts come out the same, since the upsert sink overwrites the same keys). `make flink-up` never submits a job that already runs, so running it twice is harmless.
+- **No JobManager HA.** If the JobManager container restarts, it loses the submitted jobs. Run `make flink-up` again: it resubmits them from the earliest offset (the order counts come out the same, since the upsert sink overwrites the same keys; but every past session is written to the append-only `flink.driver_sessions` topic again). `make flink-up` never submits a job that already runs, so running it twice is harmless.
 - **Memory.** The JobManager and the TaskManager together use about 1.3 to 1.5 GiB under load (about 1.1 GiB idle), on top of the rest of the stack.
 - **Stopping it.** `make flink-down` stops only the Flink containers and keeps the rest of the stack and the checkpoint volume. `make infra-down` stops the Flink containers too, and `make infra-reset` also deletes the `flink-data` volume.
 

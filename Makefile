@@ -90,7 +90,7 @@ flink-down: ## Stop the Flink demo containers (keeps the checkpoint volume and t
 	docker compose --profile flink rm -f flink-jobmanager flink-taskmanager flink-sql-init
 
 flink-sql: ## Open an interactive Flink SQL client against the Flink cluster
-	docker compose --profile flink exec flink-jobmanager ./bin/sql-client.sh
+	docker compose --profile flink exec -u flink flink-jobmanager ./bin/sql-client.sh
 
 obs-up: ## Start only the observability stack (Prometheus, Loki, Promtail, Grafana)
 	@mkdir -p $(LOG_DIR)
