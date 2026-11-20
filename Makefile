@@ -19,7 +19,7 @@ DURATION ?= 30s
 DRIVERS ?= 100
 
 .PHONY: help dev dev-reset build build-go build-web seed \
-	infra-up infra-down infra-reset infra-ps obs-up \
+	infra-up infra-down infra-reset infra-ps obs-up flink-up flink-down flink-sql \
 	logs logs-errors logs-loki metrics-check prom-check \
 	test test-web test-e2e test-integration fmt fmt-check vet typecheck lint verify \
 	migrate kafka-topics kafka-lag dlq-dry-run dlq-redrive loadtest clean
@@ -63,14 +63,27 @@ infra-up: ## Start all Docker containers (Kafka, Postgres, Redis, ksqlDB, Promet
 	@mkdir -p $(LOG_DIR)
 	docker compose up -d
 
-infra-down: ## Stop all Docker containers (keeps data volumes)
-	docker compose down
+infra-down: ## Stop all Docker containers, Flink included (keeps data volumes)
+	docker compose --profile flink down
 
-infra-reset: ## Stop all Docker containers and delete data volumes
-	docker compose down -v
+infra-reset: ## Stop all Docker containers, Flink included, and delete data volumes
+	docker compose --profile flink down -v
 
 infra-ps: ## List status and ports of all Docker containers
 	docker compose ps
+
+flink-up: ## Build and start the Flink demo cluster (UI: http://localhost:8082)
+	docker compose --profile flink up -d --build flink-jobmanager flink-taskmanager
+	@echo "Flink UI: http://localhost:8082"
+
+# Names the Flink services only: a bare `--profile flink stop` would stop the
+# whole project. Task 2 adds flink-sql-init to both lists.
+flink-down: ## Stop the Flink demo containers (keeps the checkpoint volume and the rest of the stack)
+	docker compose --profile flink stop flink-jobmanager flink-taskmanager
+	docker compose --profile flink rm -f flink-jobmanager flink-taskmanager
+
+flink-sql: ## Open an interactive Flink SQL client against the Flink cluster
+	docker compose --profile flink exec flink-jobmanager ./bin/sql-client.sh
 
 obs-up: ## Start only the observability stack (Prometheus, Loki, Promtail, Grafana)
 	@mkdir -p $(LOG_DIR)

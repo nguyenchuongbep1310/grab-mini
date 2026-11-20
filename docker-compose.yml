@@ -266,6 +266,58 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---- Flink SQL demo (profile "flink") -----------------------------------
+  # Not started by plain `docker compose up`; `make flink-up` starts it. One
+  # image (grab-mini/flink:1.20, built here) serves every Flink service.
+  flink-jobmanager:
+    profiles: ["flink"]
+    build:
+      context: deploy/flink
+    image: grab-mini/flink:1.20
+    container_name: grab-mini-flink-jobmanager
+    command: jobmanager
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8082:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 768m
+        taskmanager.numberOfTaskSlots: 2
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 10s
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 1000000
+        restart-strategy.fixed-delay.delay: 5s
+    volumes:
+      - flink-data:/opt/flink/checkpoints
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  flink-taskmanager:
+    profiles: ["flink"]
+    image: grab-mini/flink:1.20
+    container_name: grab-mini-flink-taskmanager
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 1024m
+        taskmanager.numberOfTaskSlots: 2
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+    volumes:
+      - flink-data:/opt/flink/checkpoints
+
 volumes:
   kafka-data:
   postgres-data:
@@ -273,4 +325,5 @@ volumes:
   prometheus-data:
   loki-data:
   grafana-data:
+  flink-data:
 
