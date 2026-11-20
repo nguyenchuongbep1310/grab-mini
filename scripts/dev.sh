@@ -2,10 +2,10 @@
 # Starts everything needed to try grab-mini locally:
 #   infra (Kafka, Schema Registry, ksqlDB, Kafka UI, Postgres, Redis) -> seeded drivers -> the Go
 #   services -> the driver location simulator -> the Rider, Driver and Ops apps.
-# Ctrl-C stops everything except the Docker infra (use `docker compose down`).
+# Ctrl-C stops everything except the Docker infra (use `docker compose --profile flink down`).
 #
 #   scripts/dev.sh            start
-#   scripts/dev.sh --reset    wipe Kafka/Postgres/Redis data first
+#   scripts/dev.sh --reset    wipe Kafka/Postgres/Redis/Flink data first
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,7 +36,7 @@ cleanup() {
   echo "Stopping services and apps..."
   for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill_tree "$pid"; done
   wait 2>/dev/null || true
-  echo "Done. Infra is still up; stop it with: docker compose down"
+  echo "Done. Infra is still up; stop it with: docker compose --profile flink down"
   exit "$code"
 }
 # Ctrl-C is a normal way to stop, so it exits 0; a startup failure keeps its own exit code.
@@ -69,7 +69,7 @@ topics_ready() { [ "$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' 
 
 if $RESET; then
   echo "Resetting infra data..."
-  docker compose down -v
+  docker compose --profile flink down -v
 fi
 
 echo "Starting infra..."

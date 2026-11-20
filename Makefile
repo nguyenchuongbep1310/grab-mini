@@ -19,7 +19,7 @@ DURATION ?= 30s
 DRIVERS ?= 100
 
 .PHONY: help dev dev-reset build build-go build-web seed \
-	infra-up infra-down infra-reset infra-ps obs-up \
+	infra-up infra-down infra-reset infra-ps obs-up flink-up flink-down flink-sql \
 	logs logs-errors logs-loki metrics-check prom-check \
 	test test-web test-e2e test-integration fmt fmt-check vet typecheck lint verify \
 	migrate kafka-topics kafka-lag dlq-dry-run dlq-redrive loadtest clean
@@ -63,14 +63,34 @@ infra-up: ## Start all Docker containers (Kafka, Postgres, Redis, ksqlDB, Promet
 	@mkdir -p $(LOG_DIR)
 	docker compose up -d
 
-infra-down: ## Stop all Docker containers (keeps data volumes)
-	docker compose down
+infra-down: ## Stop all Docker containers, Flink included (keeps data volumes)
+	docker compose --profile flink down
 
-infra-reset: ## Stop all Docker containers and delete data volumes
-	docker compose down -v
+infra-reset: ## Stop all Docker containers, Flink included, and delete data volumes
+	docker compose --profile flink down -v
 
 infra-ps: ## List status and ports of all Docker containers
 	docker compose ps
+
+# flink-sql-init is removed first so its log holds this run only; it skips jobs
+# that already run, so running flink-up again submits nothing twice. The target
+# waits for it and fails, with its output, when it fails (like ksql-init).
+flink-up: ## Build and start the Flink demo cluster and submit the SQL jobs (UI: http://localhost:8082)
+	@docker compose --profile flink rm -f -s flink-sql-init >/dev/null 2>&1 || true
+	docker compose --profile flink up -d --build flink-jobmanager flink-taskmanager flink-sql-init
+	@code=$$(docker wait grab-mini-flink-sql-init); \
+	docker logs grab-mini-flink-sql-init 2>&1 | grep -v -e 'WARNING: Unknown module: jdk.compiler' -e 'org.jline.utils.Log' -e 'Unable to create a system terminal'; \
+	if [ "$$code" != "0" ]; then echo "flink-sql-init failed (exit $$code)" >&2; exit 1; fi
+	@echo "Flink UI: http://localhost:8082"
+
+# Names the Flink services only: a bare `--profile flink stop` would stop the
+# whole project.
+flink-down: ## Stop the Flink demo containers (keeps the checkpoint volume and the rest of the stack)
+	docker compose --profile flink stop flink-jobmanager flink-taskmanager flink-sql-init
+	docker compose --profile flink rm -f flink-jobmanager flink-taskmanager flink-sql-init
+
+flink-sql: ## Open an interactive Flink SQL client against the Flink cluster
+	docker compose --profile flink exec -u flink flink-jobmanager ./bin/sql-client.sh
 
 obs-up: ## Start only the observability stack (Prometheus, Loki, Promtail, Grafana)
 	@mkdir -p $(LOG_DIR)
