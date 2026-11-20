@@ -1,3 +1,3 @@
 module grab-mini/pkg/promo
 
-go 1.26.10
+go 1.26.11

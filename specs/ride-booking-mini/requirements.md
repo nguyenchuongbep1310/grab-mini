@@ -12,6 +12,12 @@ Non-goals: production-grade scaling, a real payment processor, enterprise-level 
 - **Driver** — accepts and completes trips
 - **Admin** — an operator (the Ops dashboard; admin-only routes arrive with promotions and driver review). Only the development token issuer signs an `admin` token
 
+## Cross-cutting requirements
+- **NFR-1 (behaviour-preserving refactors)**: WHEN a service is restructured (ADR 0014), THE service SHALL keep its HTTP routes and JSON, Kafka topics, keys, consumer groups, Avro schemas, tables, environment variables, metric names and delivery guarantees unchanged, and its tests SHALL still pass.
+- **NFR-2 (layering)**: WHERE a service is layered, THE domain and app packages SHALL NOT import HTTP, Kafka, SQL or Redis packages; `services/pkg/archtest` SHALL fail the build when they do.
+- **NFR-3 (known vulnerabilities)**: THE CI pipeline SHALL fail on any reachable vulnerability reported by `govulncheck`, except an advisory listed in `.govulncheck-allow` because it has no fixed version yet.
+- **NFR-4 (optional demos)**: WHERE a feature exists only for learning (the Flink demo), THE default `make dev` SHALL NOT start it, build it or download anything for it.
+
 ## User Stories & Acceptance Criteria (EARS format)
 
 ### 1. Booking a ride

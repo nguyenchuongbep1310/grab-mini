@@ -1,6 +1,6 @@
 module grab-mini/pkg/health
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0

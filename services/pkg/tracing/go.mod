@@ -1,6 +1,6 @@
 module grab-mini/pkg/tracing
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/segmentio/kafka-go v0.4.51

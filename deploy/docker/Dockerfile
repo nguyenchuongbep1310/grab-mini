@@ -8,7 +8,7 @@
 # rating-service, location-gateway, dlq-redrive, ...).
 
 # Keep in step with `go` in go.work: govulncheck in CI flags an older toolchain.
-ARG GO_VERSION=1.26.10
+ARG GO_VERSION=1.26.11
 FROM golang:${GO_VERSION} AS build
 ARG SERVICE
 WORKDIR /src

@@ -113,6 +113,8 @@ Every event is Avro in Confluent's Schema Registry wire format (magic byte, 4-by
 
 Rather than another hand-written consumer, analytics run in ksqlDB (see `ksql/statements.sql`): each Kafka topic is declared as a stream, and tables are derived with windowed aggregations and one stream-stream join (`order.created` with `order.matched` within a minute, to measure matching latency). Columns are inferred from the Avro schemas in the Schema Registry, which is why `schema-init` registers every schema before ksqlDB starts. The Ops dashboard reads the tables with pull queries. ksqlDB's own state is rebuilt from Kafka, so nothing here needs a database.
 
+Flink runs beside ksqlDB as a learning demo (section 4i); the Ops dashboard still reads ksqlDB only.
+
 ## 4d. Recovering after a reload
 
 WebSocket pushes only reach a client that is connected at that moment, so both apps also recover by asking. The Driver App reads `GET /drivers/{id}/active-trip` (Trip Service). The Rider App reads `GET /riders/{id}/latest-order` (Order Service), and for a MATCHED order the trip from Trip Service; a still-PENDING order resumes "searching" and is polled every few seconds, which also covers a push missed while the socket reconnects. Composing the two calls in the client keeps the services independent (the trip doesn't know its rider, the order doesn't know its trip).
@@ -169,6 +171,10 @@ Profile Service (port 3012; Postgres and the outbox, no Redis, consumes nothing)
 - **Privacy.** Names, phones and plates are never written to a log (ids only; a test fails if they appear) and responses carry `Cache-Control: no-store`. See [production-design §20](production-design.md).
 - **Frontend.** `getRiderProfile()`, `updateRiderProfile()`, `getDriverProfile()`, `updateDriverProfile()`, `applyAsDriver()`, `getDriverPublic()`, `listDriverApplications()`, `reviewDriver()` and `resyncDriverEligibility()` are in `packages/client` (through the `/profile-api` dev proxy to port 3012); the screens (profile sheet and driver card in the Rider App, onboarding and status screens in the Driver App, review queue in Ops) are built (task 11.3).
 
+## 4i. Flink SQL demo
+
+An optional `flink` compose profile adds a Flink cluster (JobManager, TaskManager) and a one-shot `flink-sql-init` that submits the SQL in `flink/sql/`. Job 1 mirrors the ksqlDB `orders_per_minute` table so the two engines can be compared on the same data; job 2 is a 30 s session window over `driver.location.updated`. Event time is the Kafka record timestamp with a 5 s watermark. Results go to `flink.orders_per_minute` and `flink.driver_sessions` as JSON (analytics output, not event contracts, hence not Avro). Checkpoints every 10 s go to the `flink-data` volume. Nothing in the default stack depends on it. Full design: `docs/superpowers/specs/2026-11-19-flink-sql-demo-design.md`.
+
 ## 5. Idempotency strategy
 - Every event carries an `eventId` (UUID) generated at the producer.
 - Before applying a side effect, the consumer checks `processed_event_id` (a Redis set with TTL, or a Postgres table); if it already exists, skip.
@@ -193,6 +199,7 @@ Principle: components hold no business logic or direct API calls — they receiv
 
 ## 7. Tech stack
 - Backend: Go, standard `net/http` for HTTP-facing services, [segmentio/kafka-go](https://github.com/segmentio/kafka-go) for Kafka, [hamba/avro](https://github.com/hamba/avro) with Confluent Schema Registry for event schemas, [jackc/pgx](https://github.com/jackc/pgx) for Postgres, [redis/go-redis](https://github.com/redis/go-redis) for Redis. Chosen over Node.js/NestJS so the project also serves as a Go learning exercise, alongside Kafka and design systems.
+- Service layout: the larger Go services (payment, trip, order, promotion, profile) are layered as `internal/{domain,app,adapters,integration}` with the dependency rule tested by `services/pkg/archtest`; the others stay flat on purpose. See [ADR 0014](../../docs/adr/0014-clean-architecture-for-go-services.md).
 - Kafka: Docker Compose (Kafka + Kafka UI), single local broker using KRaft (no Zookeeper needed)
 - DB: Postgres (order, trip), Redis (driver status/geo, idempotency keys)
 - Frontend: React + TypeScript + Vite, WebSocket (socket.io or plain ws)

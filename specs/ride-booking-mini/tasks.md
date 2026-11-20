@@ -86,6 +86,17 @@ Design: [realism-design.md](./realism-design.md). Each phase is a service, its i
 - [x] 11.4 Infra and docs
 - [x] Rider recovery of a completed ride: after a reload the Rider App restores the latest COMPLETED, unrated trip that settled within 24 h into the receipt and rating prompt (frontend only)
 
+## Phase 12 — Architecture, stream-processing demo and supply-chain hygiene
+
+Design records: [ADR 0014](../../docs/adr/0014-clean-architecture-for-go-services.md) (refactors, no behaviour change) and [the Flink design](../../docs/superpowers/specs/2026-11-19-flink-sql-demo-design.md). Where specs, plans and ADRs live: [../README.md](../README.md).
+
+- [x] 12.1 Clean Architecture, one service at a time, behaviour preserved and the dependency rule enforced by `services/pkg/archtest`: payment-service (pilot), trip-service, order-service, promotion-service, profile-service. Plans exist for order, promotion and profile (`docs/superpowers/plans/`); payment and trip predate the plan convention and are recorded in the ADR 0014 Result sections
+- [x] 12.2 Checked and deliberately not migrated: pricing-service (plan `2026-11-11-pricing-service-clean-architecture.md`) and chat-service. The ADR 0014 survey rows say why and when to revisit
+- [x] 12.3 Flink SQL demo beside ksqlDB, behind the `flink` compose profile: two jobs (`orders_per_minute` twin, driver sessions), JSON sink topics, checkpoints to a volume, Flink UI on 127.0.0.1:8082, `make flink-up|flink-down|flink-sql`. Spec and plan: `docs/superpowers/{specs,plans}/2026-11-19-flink-*.md`
+- [x] 12.4 Documentation: `docs/guide.md` and its Vietnamese twin `docs/vi-guide.md` (both with the Flink section), project skills in `.claude/skills/`
+- [x] 12.5 govulncheck gate in CI (`scripts/govulncheck.sh`, allowlist `.govulncheck-allow` for advisories with no fixed version), Go upgraded to 1.26.10
+- [x] 12.6 GO-2026-6859 (`net/http` `MaxBytesReader` header race, fixed in Go 1.26.11): Go upgraded to 1.26.11 in `go.work`, every `go.mod` and `deploy/docker/Dockerfile`. `govulncheck` is clean in all 38 modules locally and `go vet` plus `go test` pass; the CI result is recorded after the push. It was fixed by upgrading, not by `.govulncheck-allow`, because the advisory has a fixed version
+
 ## Backlog (after core is done, explore as interested)
 - [x] Post-trip rating/feedback — `trip.rated` event, Rating Service, `StarRating` in the design system
 - [x] Tip & richer reviews — `trip.rated` gains defaulted `tipAmount`/`currency` (Avro evolution), `trips.tip_amount`, Rating Service `driver_reviews` + tip totals + `GET /drivers/{id}/reviews`, `TipPicker` in the Rider App. The tip is a recorded amount only (no payments)

@@ -1,6 +1,6 @@
 module grab-mini/pkg/outbox
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/google/uuid v1.6.0
