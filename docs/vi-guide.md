@@ -34,6 +34,7 @@ pnpm dev:all
 | Kafka UI | http://localhost:8080 |
 | Schema Registry | http://localhost:8081/subjects |
 | ksqlDB | http://localhost:8088/info |
+| Flink UI (chỉ sau `make flink-up`) | http://localhost:8082 |
 
 Ctrl-C dừng các service và app (hạ tầng Docker vẫn chạy). Log nằm ở `.dev/logs/<name>.log` và được Promtail đẩy sang Loki để bạn truy vấn trong Grafana (`{job="grab-mini"}`). Dùng `make dev-reset` (`scripts/dev.sh --reset`) để xoá sạch dữ liệu trước khi chạy, và `make infra-down` (`docker compose down`) để dừng hạ tầng.
 
@@ -97,6 +98,85 @@ SHOW QUERIES;                                                -- every table abov
 ```
 
 ksqlDB suy ra tên cột từ schema Avro và viết hoa chúng (`orderId` thành `ORDERID`). Các bảng được dựng lại từ topic Kafka, nên chúng sống sót qua `docker compose down`.
+
+## Xử lý stream với Flink (demo)
+
+[Apache Flink](https://flink.apache.org) là một bản demo để học, chạy cạnh ksqlDB: hai job Flink SQL đọc cùng các topic Avro và ghi kết quả ra hai topic mới. Nó không thuộc về sản phẩm. Ops dashboard không dùng nó (vẫn đọc ksqlDB), không có gì khác phụ thuộc vào nó, và nó tắt trừ khi bạn yêu cầu: nó nằm sau compose profile `flink`, nên `make dev`, `docker compose up -d` và `make infra-up` không khởi động, không build và không tải gì cho nó. Các job nằm ở [flink/sql](../flink/sql).
+
+```bash
+make flink-up      # build image, khởi động cluster, nộp các job (chạy lại an toàn)
+```
+
+Lần `make flink-up` đầu tiên build một image và tải Flink cùng hai file jar connector, nên cần truy cập internet và vài GB ổ đĩa trống. Các lần sau dùng lại image. Nó cần Kafka và Schema Registry, và sẽ khởi động chúng nếu chưa chạy. Khi nó kết thúc, mở **Flink UI** tại http://localhost:8082 (không cần đăng nhập: chỉ dùng ở máy local). Trong **Running Jobs** bạn sẽ thấy hai job.
+
+| Job | Đọc | Ghi (JSON) | Tính gì |
+|---|---|---|---|
+| `flink-orders-per-minute` | `order.created` | `flink.orders_per_minute` | số đơn theo loại xe trong các cửa sổ tumbling một phút: bản song sinh của bảng ksqlDB `orders_per_minute` |
+| `flink-driver-sessions` | `driver.location.updated` | `flink.driver_sessions` | một dòng cho mỗi tài xế mỗi session, session là một chuỗi báo cáo vị trí không có khoảng trống nào dài hơn 30 giây (`driver_id`, `session_start`, `session_end`, `points`); ksqlDB không có bản tương ứng |
+
+Các topic đầu ra là kết quả analytics của bản demo, ghi dưới dạng JSON thường. Chúng không phải là event contract như các topic Avro: không có schema trong Schema Registry, không do `kafka-init` tạo, và không có gì tiêu thụ chúng. Đọc chúng trong [Kafka UI](http://localhost:8080) (Topics, rồi `flink.orders_per_minute`, rồi Messages), hoặc từ terminal:
+
+```bash
+docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic flink.orders_per_minute --from-beginning --timeout-ms 5000
+```
+
+`--timeout-ms 5000` dừng consumer sau 5 giây không có record mới; `TimeoutException` mà nó in ra lúc đó là cách kết thúc bình thường.
+
+Mỗi record của `flink.orders_per_minute` trông như `{"window_start":"2026-11-20T13:23:00Z","window_end":"2026-11-20T13:24:00Z","vehicle_type":"BIKE","orders":31}`, theo UTC.
+
+Không có traffic cho đến khi bạn tạo ra. Hãy đặt xe trong Rider App, hoặc bằng các lệnh `POST localhost:3001/orders` ở mục "HTTP API" bên dưới (đổi `vehicleType` giữa `CAR` và `BIKE`), hoặc chạy trực tiếp công cụ load: `go run ./services/loadtest -orders-per-sec 10 -duration 60s` (nó cần toàn bộ stack `make dev`). Đừng dùng `make loadtest` cho việc này: target trong Makefile hiện đang hỏng, vì nó truyền `-rate` còn flag của công cụ là `-orders-per-sec`. Các báo cáo vị trí đến từ `driver-app-sim`, do `make dev` khởi động.
+
+Để tự gõ Flink SQL, chạy `make flink-sql`. Nó mở SQL client, nhưng các bảng của bản demo không được định nghĩa trong session đó, nên hãy tự khai báo những gì bạn cần hoặc dán từ [flink/sql/01-sources.sql](../flink/sql/01-sources.sql).
+
+### Ba thứ nên thử
+
+**1. So sánh số đơn mỗi phút với ksqlDB.** Đặt vài đơn qua một ranh giới phút, rồi đặt thêm một đơn sau khi phút đó đã kết thúc (xem "Nên biết" bên dưới), rồi so sánh. Với ksqlDB dùng lệnh CLI ở mục trước, rồi:
+
+```sql
+SELECT * FROM orders_per_minute;
+```
+
+còn với Flink thì đọc `flink.orders_per_minute` bằng lệnh ở trên. Với mỗi phút đã kết thúc và mỗi loại xe, hai số đếm phải bằng nhau; điều này đã được kiểm tra với đơn thật. Chúng khác nhau về thời điểm, không phải về số đếm: ksqlDB hiện phút đang mở khi nó đầy dần, Flink ghi một phút đúng một lần, khi nó đã đủ.
+
+**2. Dừng `driver-app-sim` và xem các session đóng.** Khi bộ giả lập đang chạy, đọc `flink.driver_sessions`: các session vẫn mở nên ít thứ đến. Rồi dừng nó và đọc lại:
+
+```bash
+pkill -f driver-app-sim
+docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic flink.driver_sessions --from-beginning --timeout-ms 5000
+```
+
+Một session chỉ đóng khi đồng hồ của Flink (watermark, đi theo event time mới nhất) vượt qua báo cáo cuối của tài xế cộng 30 giây, cộng thêm độ trễ watermark 5 giây. Nếu mọi tài xế đều im lặng, đồng hồ dừng và không có gì đóng, dù bạn chờ bao lâu. Một báo cáo muộn hơn từ bất kỳ tài xế nào làm đồng hồ chạy và đóng các session còn lại: khi các tài xế đang báo cáo, một session đóng khoảng 35 giây sau báo cáo cuối của tài xế đó. Để thấy điều này, khởi động lại bộ giả lập hoặc gửi một báo cáo vị trí cho một tài xế (`POST localhost:3006/locations`, xem "Pickup và complete cần tài xế có mặt" bên dưới).
+
+**3. Giết TaskManager và xem các job khôi phục.** Flink lưu state mỗi 10 giây (một checkpoint). Giết worker đang chạy các job:
+
+```bash
+docker kill grab-mini-flink-taskmanager
+# các job vẫn RUNNING tối đa khoảng một phút (heartbeat timeout là 50 s), rồi chuyển sang RESTARTING
+curl -s localhost:8082/jobs/overview
+docker start grab-mini-flink-taskmanager
+# khoảng 15 s sau cả hai job RUNNING trở lại
+curl -s localhost:8082/jobs/overview
+```
+
+Bằng chứng rằng state đã được khôi phục không phải là số đếm. Hãy đọc log của JobManager và các số liệu checkpoint:
+
+```bash
+docker logs grab-mini-flink-jobmanager 2>&1 | grep Restoring
+curl -s localhost:8082/jobs/<jobId>/checkpoints      # jobId nằm trong /jobs/overview; hoặc mở tab Checkpoints của job trong Flink UI
+```
+
+Dòng log là `Restoring job <id> from Checkpoint N @ ... chk-N`, và câu trả lời REST (hoặc Flink UI) cho thấy `restored` và checkpoint được khôi phục gần nhất `chk-N`, tức checkpoint hoàn tất cuối cùng trước lúc giết. Số đếm không phải bằng chứng: một job chạy lại từ offset sớm nhất cũng cho cùng số đếm. Ngoài ra, `restored: N` đếm số lần thử khởi động lại, không phải số lần giết: một TaskManager chết một lúc có thể làm hỏng vài lần thử, nên một lần giết có thể hiện `restored: 3`. Trong lần thử của bản demo này, một session kéo dài qua lúc giết đã đóng với số điểm bằng số record vị trí của tài xế đó trong Kafka, điều mà một lần chạy lại từ đầu không thể cho ra. UI cũng hiện vài checkpoint thất bại, là những checkpoint đang chạy dở khi worker chết.
+
+### Nên biết
+
+- **Phút mới nhất cần thêm một đơn.** Flink chỉ ghi một cửa sổ một phút khi một đơn muộn hơn đẩy watermark đi tới (một record muộn hơn cuối cửa sổ ít nhất 5 giây). Sau đơn cuối của một đợt, cửa sổ cuối vẫn chưa được ghi cho đến khi có một đơn muộn hơn đến, nên hãy đặt thêm một đơn sau phút đó để thấy nó.
+- **Thời gian của record, không phải giờ đồng hồ.** Cả hai job dùng timestamp mà Kafka lưu trên mỗi record (lúc producer ghi). ksqlDB 0.29 mặc định cũng vậy, nên số đếm khớp nhau, nhưng một producer có đồng hồ lệch sẽ bị tính theo đồng hồ đó ở cả hai.
+- **Dữ liệu đến muộn.** Flink bỏ một record cũ hơn watermark của nó; ksqlDB giữ một cửa sổ mở 24 giờ theo mặc định (grace period). Với timestamp của chính các service, điều này không xảy ra trong lần thử, nhưng các producer lệch thứ tự có thể làm Flink đếm ít hơn ksqlDB.
+- **Các cửa sổ thẳng hàng.** Cả hai dùng cửa sổ tumbling một phút căn theo phút UTC, nên các cửa sổ có cùng biên. Flink ghi mỗi cửa sổ thành một record, khi nó đóng, vào một topic upsert khoá theo cửa sổ và loại xe; ksqlDB cập nhật cùng một dòng khi cửa sổ đang mở.
+- **`flink.driver_sessions` là at-least-once.** Một lần khôi phục có thể phát lại một session đã đóng sau checkpoint cuối cùng, nên bên đọc nên chờ thỉnh thoảng có một dòng trùng.
+- **JobManager không có HA.** Nếu container JobManager khởi động lại, nó mất các job đã nộp. Chạy lại `make flink-up`: nó nộp lại chúng từ offset sớm nhất (số đơn ra giống nhau, vì sink upsert ghi đè cùng các key). `make flink-up` không bao giờ nộp một job đang chạy, nên chạy hai lần là vô hại.
+- **Bộ nhớ.** JobManager và TaskManager cùng dùng khoảng 1,3 đến 1,5 GiB khi có tải (khoảng 1,1 GiB khi rảnh), ngoài phần còn lại của stack.
+- **Dừng nó.** `make flink-down` chỉ dừng các container Flink và giữ lại phần còn lại của stack và volume checkpoint. `make infra-down` cũng dừng các container Flink, và `make infra-reset` còn xoá cả volume `flink-data`.
 
 ## Những thứ nên thử
 
@@ -304,6 +384,9 @@ make help
 - `make infra-reset`: Dừng mọi container Docker và xoá volume.
 - `make infra-ps`: Liệt kê trạng thái và độ khoẻ của mọi container Docker.
 - `make obs-up`: Chỉ khởi động stack Observability (`prometheus`, `loki`, `promtail`, `grafana`).
+- `make flink-up`: Build và khởi động cluster demo Flink tuỳ chọn (compose profile `flink`) và nộp hai job SQL của nó; Flink UI ở http://localhost:8082.
+- `make flink-down`: Chỉ dừng các container demo Flink (phần còn lại của stack và volume checkpoint được giữ).
+- `make flink-sql`: Mở một SQL client Flink tương tác lên cluster Flink.
 
 ### CLI cho Log & Metrics
 - `make logs`: Tail mọi log của service trong `.dev/logs/*.log`.
@@ -407,7 +490,7 @@ Hầu hết test Go không cần gì cả. Một vài test (gồm test hệ th�
 ## Xử lý sự cố
 
 - **`the Docker daemon isn't running`**: khởi động Docker Desktop.
-- **Một cổng đã bị chiếm** (3000-3009, 5170-5173, 5432, 6379, 8080, 8081, 8088, 9090, 9092, 9101, 9102): dừng thứ đang giữ nó. Vite âm thầm chuyển sang cổng kế tiếp nếu cổng của nó bị chiếm, điều này làm hỏng các URL ở trên; `lsof -nP -iTCP:<port> -sTCP:LISTEN` cho thấy thủ phạm.
+- **Một cổng đã bị chiếm** (3000-3009, 5170-5173, 5432, 6379, 8080, 8081, 8082, 8088, 9090, 9092, 9101, 9102): dừng thứ đang giữ nó. Vite âm thầm chuyển sang cổng kế tiếp nếu cổng của nó bị chiếm, điều này làm hỏng các URL ở trên; `lsof -nP -iTCP:<port> -sTCP:LISTEN` cho thấy thủ phạm.
 - **Rider cứ kẹt ở "Looking for a driver"**: kiểm tra `.dev/logs/matching-service.log` và các tài xế đã được seed (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **Rider app đang ở một màn hình không khớp với chuyến**: tải lại nó. Nó hỏi Order Service đơn mới nhất của rider và Trip Service chuyến của nó, rồi tiếp tục các chuyến đang tìm, đã gán hoặc đang đi (một push WebSocket bị lỡ khi đang tìm cũng được bắt lại bằng cách polling mỗi 3 giây).
 - **Driver app không hiện chuyến nào**: kiểm tra id `?driver=` khớp với tài xế mà rider đã được ghép (thẻ của rider hiện nó). Một chuyến đang diễn ra được khôi phục khi trang mở hoặc tải lại.

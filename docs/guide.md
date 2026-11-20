@@ -34,6 +34,7 @@ pnpm dev:all
 | Kafka UI | http://localhost:8080 |
 | Schema Registry | http://localhost:8081/subjects |
 | ksqlDB | http://localhost:8088/info |
+| Flink UI (only after `make flink-up`) | http://localhost:8082 |
 
 Ctrl-C stops the services and apps (the Docker infra keeps running). Logs are in `.dev/logs/<name>.log` and shipped by Promtail to Loki so you can query them in Grafana (`{job="grab-mini"}`). Use `make dev-reset` (`scripts/dev.sh --reset`) to wipe data first, and `make infra-down` (`docker compose down`) to stop the infra.
 
@@ -97,6 +98,85 @@ SHOW QUERIES;                                                -- every table abov
 ```
 
 ksqlDB infers column names from the Avro schemas and upper-cases them (`orderId` becomes `ORDERID`). The tables are rebuilt from the Kafka topics, so they survive `docker compose down`.
+
+## Stream processing with Flink (demo)
+
+[Apache Flink](https://flink.apache.org) is a learning demo that runs beside ksqlDB: two Flink SQL jobs read the same Avro topics and write their results to two new topics. It is not part of the product. The Ops dashboard does not use it (it still reads ksqlDB), nothing else depends on it, and it is off unless you ask for it: it sits behind the `flink` compose profile, so `make dev`, `docker compose up -d` and `make infra-up` do not start it, build it or download anything for it. The jobs are in [flink/sql](../flink/sql).
+
+```bash
+make flink-up      # build the image, start the cluster, submit the jobs (safe to run again)
+```
+
+The first `make flink-up` builds an image and downloads Flink and two connector jars, so it needs internet access and a few GB of free disk. Later runs reuse the image. It needs Kafka and Schema Registry, which it starts if they are not up. When it ends, open the **Flink UI** at http://localhost:8082 (no login: local use only). Under **Running Jobs** you should see two jobs.
+
+| Job | Reads | Writes (JSON) | What it computes |
+|---|---|---|---|
+| `flink-orders-per-minute` | `order.created` | `flink.orders_per_minute` | orders per vehicle type in one-minute tumbling windows: the twin of the ksqlDB table `orders_per_minute` |
+| `flink-driver-sessions` | `driver.location.updated` | `flink.driver_sessions` | one row per driver per session, a session being a run of location reports with no gap longer than 30 seconds (`driver_id`, `session_start`, `session_end`, `points`); ksqlDB has no counterpart |
+
+The output topics are demo analytics output, written as plain JSON. They are not event contracts like the Avro topics: they have no schema in Schema Registry, are not created by `kafka-init`, and nothing consumes them. Read them in [Kafka UI](http://localhost:8080) (Topics, then `flink.orders_per_minute`, then Messages), or from a terminal:
+
+```bash
+docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic flink.orders_per_minute --from-beginning --timeout-ms 5000
+```
+
+`--timeout-ms 5000` stops the consumer after 5 seconds without a new record; the `TimeoutException` it prints then is the normal way it ends.
+
+Each record of `flink.orders_per_minute` looks like `{"window_start":"2026-11-20T13:23:00Z","window_end":"2026-11-20T13:24:00Z","vehicle_type":"BIKE","orders":31}`, in UTC.
+
+There is no traffic until you make some. Book rides in the Rider App, or with the `POST localhost:3001/orders` calls under "HTTP API" below (change `vehicleType` between `CAR` and `BIKE`), or run the load tool directly: `go run ./services/loadtest -orders-per-sec 10 -duration 60s` (it needs the full `make dev` stack). Do not use `make loadtest` for this: the Makefile target is currently broken, because it passes `-rate` and the tool's flag is `-orders-per-sec`. Location reports come from `driver-app-sim`, which `make dev` starts.
+
+To type your own Flink SQL, run `make flink-sql`. It opens the SQL client, but the demo tables are not defined in that session, so declare what you need or paste from [flink/sql/01-sources.sql](../flink/sql/01-sources.sql).
+
+### Three things to try
+
+**1. Compare the minute counts with ksqlDB.** Book some orders across a minute boundary, then book one more order after the minute has ended (see "Good to know" below), and compare. For ksqlDB use the CLI command from the previous section, then:
+
+```sql
+SELECT * FROM orders_per_minute;
+```
+
+and for Flink read `flink.orders_per_minute` with the command above. For every finished minute and vehicle type the two counts should be equal; this was checked with real orders. They differ in timing, not in counts: ksqlDB shows the open minute while it fills, Flink writes a minute once, when it is complete.
+
+**2. Stop `driver-app-sim` and watch sessions close.** While the simulator runs, read `flink.driver_sessions`: sessions stay open, so little arrives. Then stop it and read again:
+
+```bash
+pkill -f driver-app-sim
+docker exec grab-mini-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic flink.driver_sessions --from-beginning --timeout-ms 5000
+```
+
+A session closes only when Flink's clock (the watermark, which follows the newest event time) passes the driver's last report plus 30 seconds, plus the 5 second watermark delay. If every driver goes silent, the clock stops and nothing closes, however long you wait. One later report from any driver moves the clock and closes the others: with drivers reporting, a session closes about 35 seconds after its driver's last report. To see it, start the simulator again or send one position report for a driver (`POST localhost:3006/locations`, see "Pickup and complete need the driver to be there" below).
+
+**3. Kill the TaskManager and watch the jobs restore.** Flink saves its state every 10 seconds (a checkpoint). Kill the worker that runs the jobs:
+
+```bash
+docker kill grab-mini-flink-taskmanager
+# the jobs stay RUNNING for up to about a minute (the heartbeat timeout is 50 s), then show RESTARTING
+curl -s localhost:8082/jobs/overview
+docker start grab-mini-flink-taskmanager
+# about 15 s later both jobs are RUNNING again
+curl -s localhost:8082/jobs/overview
+```
+
+The proof that state was restored is not the counts. Read the JobManager log and the checkpoint figures:
+
+```bash
+docker logs grab-mini-flink-jobmanager 2>&1 | grep Restoring
+curl -s localhost:8082/jobs/<jobId>/checkpoints      # the jobId is in /jobs/overview; or open the job's Checkpoints tab in the Flink UI
+```
+
+The log line is `Restoring job <id> from Checkpoint N @ ... chk-N`, and the REST answer (or the Flink UI) shows `restored` and the latest restored checkpoint `chk-N`, the last one completed before the kill. The counts are no proof: a job that started again from the earliest offset would produce the same counts. Also, `restored: N` counts restart attempts, not kills: a TaskManager that is down for a while can fail several attempts, so one kill can show `restored: 3`. In the test of this demo a session that spanned the kill closed with the same number of points as the driver's location records in Kafka, which no restart from scratch could give. The UI shows a few failed checkpoints too, the ones in flight while the worker was down.
+
+### Good to know
+
+- **The newest minute needs one more order.** Flink writes a one-minute window only when a later order advances the watermark (a record at least 5 seconds past the end of the window). After the last order of a burst the last window stays unwritten until any later order arrives, so book one more order after the minute to see it.
+- **Record time, not wall-clock time.** Both jobs use the timestamp Kafka stored on each record (when the producer wrote it). ksqlDB 0.29 does the same by default, so the counts agree, but a producer with a skewed clock would be counted by that clock in both.
+- **Late data.** Flink drops a record that is older than its watermark; ksqlDB keeps a window open for 24 hours by default (the grace period). With the services' own timestamps this did not happen in the test, but out-of-order producers could make Flink count less than ksqlDB.
+- **Windows line up.** Both use one-minute tumbling windows aligned to the UTC minute, so the windows have the same edges. Flink writes each window as one record, when it closes, to an upsert topic keyed by window and vehicle type; ksqlDB updates the same row while the window is open.
+- **`flink.driver_sessions` is at-least-once.** A restore can emit again a session that closed after the last checkpoint, so a reader should expect an occasional duplicate row.
+- **No JobManager HA.** If the JobManager container restarts, it loses the submitted jobs. Run `make flink-up` again: it resubmits them from the earliest offset (the order counts come out the same, since the upsert sink overwrites the same keys). `make flink-up` never submits a job that already runs, so running it twice is harmless.
+- **Memory.** The JobManager and the TaskManager together use about 1.3 to 1.5 GiB under load (about 1.1 GiB idle), on top of the rest of the stack.
+- **Stopping it.** `make flink-down` stops only the Flink containers and keeps the rest of the stack and the checkpoint volume. `make infra-down` stops the Flink containers too, and `make infra-reset` also deletes the `flink-data` volume.
 
 ## Things to try
 
@@ -302,6 +382,9 @@ make help
 - `make infra-reset`: Stops all Docker containers and deletes volumes.
 - `make infra-ps`: Lists status and health of all Docker containers.
 - `make obs-up`: Starts only the Observability stack (`prometheus`, `loki`, `promtail`, `grafana`).
+- `make flink-up`: Builds and starts the optional Flink demo cluster (compose profile `flink`) and submits its two SQL jobs; Flink UI at http://localhost:8082.
+- `make flink-down`: Stops only the Flink demo containers (the rest of the stack and the checkpoint volume stay).
+- `make flink-sql`: Opens an interactive Flink SQL client against the Flink cluster.
 
 ### Logging & Metrics CLI
 - `make logs`: Tails all service logs in `.dev/logs/*.log`.
@@ -405,7 +488,7 @@ Most Go tests need nothing. A few (including the full-stack system test in [serv
 ## Troubleshooting
 
 - **`the Docker daemon isn't running`**: start Docker Desktop.
-- **A port is already in use** (3000-3009, 5170-5173, 5432, 6379, 8080, 8081, 8088, 9090, 9092, 9101, 9102): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows the culprit.
+- **A port is already in use** (3000-3009, 5170-5173, 5432, 6379, 8080, 8081, 8082, 8088, 9090, 9092, 9101, 9102): stop whatever holds it. Vite silently moves to the next port if its own is taken, which breaks the URLs above; `lsof -nP -iTCP:<port> -sTCP:LISTEN` shows the culprit.
 - **The rider stays on "Looking for a driver"**: check `.dev/logs/matching-service.log` and that the drivers are seeded (`docker exec grab-mini-redis redis-cli GEOPOS drivers:geo driver-1`).
 - **The rider app is on a screen that doesn't match the trip**: reload it. It asks Order Service for the rider's latest order and Trip Service for its trip, and resumes searching, assigned or in-progress rides (a missed WebSocket push while searching is also caught by polling every 3s).
 - **The driver app shows no trip**: check the `?driver=` id matches the driver the rider was matched with (the rider's card shows it). A trip already under way is restored when the page opens or reloads.
